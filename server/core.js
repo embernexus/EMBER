@@ -1,0 +1,2840 @@
+import crypto from "node:crypto";
+import { spawn } from "node:child_process";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import bcrypt from "bcryptjs";
+import bs58 from "bs58";
+import {
+  Connection,
+  Keypair,
+  LAMPORTS_PER_SOL,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+  TransactionMessage,
+  VersionedTransaction,
+} from "@solana/web3.js";
+import {
+  TOKEN_PROGRAM_ID,
+  createAssociatedTokenAccountInstruction,
+  createTransferInstruction,
+  getAssociatedTokenAddressSync,
+} from "@solana/spl-token";
+import { config } from "./config.js";
+import { makeId, makeSessionToken, pool, withTx } from "./db.js";
+import { fmtInt, resolveMint } from "./utils.js";
+
+function toToken(row) {
+  const moduleConfig =
+    row.module_config && typeof row.module_config === "object"
+      ? row.module_config
+      : {};
+  const moduleState =
+    row.module_state && typeof row.module_state === "object"
+      ? row.module_state
+      : {};
+  return {
+    id: row.id,
+    symbol: row.symbol,
+    name: row.name,
+    mint: row.mint,
+    pictureUrl: row.picture_url || "",
+    deposit: row.deposit,
+    claimSec: Number(row.claim_sec),
+    burnSec: Number(row.burn_sec),
+    splits: Number(row.splits),
+    selectedBot: String(row.selected_bot || "burn"),
+    active: row.active,
+    burned: Number(row.burned),
+    pending: Number(row.pending),
+    txCount: Number(row.tx_count),
+    moduleType: String(row.module_type || row.selected_bot || "burn"),
+    moduleEnabled:
+      typeof row.module_enabled === "boolean" ? row.module_enabled : Boolean(row.active),
+    moduleConfig,
+    moduleState,
+    moduleLastError: row.module_last_error ? String(row.module_last_error) : "",
+  };
+}
+
+function toEvent(row) {
+  const createdAt = new Date(row.created_at).getTime();
+  const age = Math.max(0, Math.floor((Date.now() - createdAt) / 1000));
+  return {
+    id: row.id,
+    tokenId: row.token_id,
+    token: row.token_symbol,
+    moduleType: row.module_type ? String(row.module_type) : "",
+    type: row.event_type,
+    amount: Number(row.amount || 0),
+    msg: row.message,
+    tx: row.tx,
+    age,
+    createdAt: row.created_at,
+  };
+}
+
+function parseBurnAmount(row) {
+  const direct = Number(row?.amount || 0);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const match = String(row?.message || "").match(/([0-9][0-9,._]*)/);
+  if (!match) return 0;
+  const normalized = match[1].replace(/,/g, "");
+  const amount = Number(normalized);
+  return Number.isFinite(amount) && amount > 0 ? amount : 0;
+}
+
+function buildChartData(rows) {
+  const dayLetters = ["S", "M", "T", "W", "T", "F", "S"];
+  const days = [];
+  const byDate = new Map();
+  const now = new Date();
+
+  for (let i = 6; i >= 0; i -= 1) {
+    const d = new Date(now);
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    days.push({
+      key,
+      d: dayLetters[d.getDay()],
+      v: 0,
+    });
+    byDate.set(key, days[days.length - 1]);
+  }
+
+  for (const row of rows) {
+    const created = new Date(row.created_at);
+    if (Number.isNaN(created.getTime())) continue;
+    const key = created.toISOString().slice(0, 10);
+    const bucket = byDate.get(key);
+    if (!bucket) continue;
+    const amount = parseBurnAmount(row);
+    bucket.v += amount > 0 ? amount : 1;
+  }
+
+  return days;
+}
+
+function normalizeUsername(username) {
+  const value = String(username || "").trim();
+  if (!/^[A-Za-z0-9_]{3,24}$/.test(value)) {
+    throw new Error("Username must be 3-24 chars (letters, numbers, underscore).");
+  }
+  return value;
+}
+
+function normalizePassword(password) {
+  const value = String(password || "");
+  if (value.length < 6) {
+    throw new Error("Password must be at least 6 characters.");
+  }
+  return value;
+}
+
+function sanitizeInterval(value, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(60, Math.floor(n));
+}
+
+function sanitizeSplits(value, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(1, Math.floor(n));
+}
+
+function sanitizeRange(value, fallback, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function sanitizeSol(value, fallback, min = 0, max = 10_000) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+const MODULE_TYPES = {
+  burn: "burn",
+  volume: "volume",
+  personalBurn: "personal_burn",
+};
+
+const MODULE_LOCK_SEED = "ember:module:lock";
+
+function normalizeModuleType(value, fallback = MODULE_TYPES.burn) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === MODULE_TYPES.volume) return MODULE_TYPES.volume;
+  if (raw === MODULE_TYPES.personalBurn) return MODULE_TYPES.personalBurn;
+  return fallback;
+}
+
+function toLamports(sol) {
+  const n = Number(sol || 0);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.floor(n * LAMPORTS_PER_SOL);
+}
+
+function fromLamports(lamports) {
+  const n = Number(lamports || 0);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n / LAMPORTS_PER_SOL;
+}
+
+function normalizeMint(value) {
+  const mint = String(value || "").trim();
+  if (mint.length < 32) throw new Error("Mint is required.");
+  try {
+    return new PublicKey(mint).toBase58();
+  } catch {
+    throw new Error("Mint address is invalid.");
+  }
+}
+
+function knownMintFromResolve(mint) {
+  const value = String(mint || "").trim();
+  if (!value) return null;
+  const resolved = resolveMint(value);
+  if (!resolved) return null;
+  const fallbackSymbol = value.slice(0, 4).toUpperCase();
+  const fallbackName = `Token (${value.slice(0, 6)}...)`;
+  const symbol = String(resolved.symbol || "").trim();
+  const name = String(resolved.name || "").trim();
+  const pictureUrl = normalizeMediaUrl(resolved.pictureUrl || "");
+  const isFallback = symbol === fallbackSymbol && name === fallbackName && !pictureUrl;
+  if (isFallback) return null;
+  return {
+    symbol: symbol.slice(0, 12),
+    name: name.slice(0, 64),
+    pictureUrl: pictureUrl.slice(0, 255),
+  };
+}
+
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 4500) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      ...options,
+      signal: ctrl.signal,
+    });
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    return data && typeof data === "object" ? data : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function normalizeMediaUrl(input) {
+  const value = String(input || "").trim();
+  if (!value) return "";
+  if (value.startsWith("ipfs://")) {
+    return `https://ipfs.io/ipfs/${value.slice("ipfs://".length).replace(/^ipfs\//i, "")}`;
+  }
+  if (value.startsWith("ar://")) {
+    return `https://arweave.net/${value.slice("ar://".length)}`;
+  }
+  return value;
+}
+
+async function resolveMintViaDas(mint) {
+  const rpcUrl = String(config.rpcUrl || "").trim();
+  if (!rpcUrl) return null;
+
+  const body = {
+    jsonrpc: "2.0",
+    id: "mint-meta",
+    method: "getAsset",
+    params: {
+      id: mint,
+      displayOptions: {
+        showFungible: true,
+      },
+    },
+  };
+
+  const data = await fetchJsonWithTimeout(
+    rpcUrl,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    5000
+  );
+  if (!data?.result) return null;
+
+  const result = data.result;
+  const metadata = result.content?.metadata || {};
+  const tokenInfo = result.token_info || {};
+  const files = Array.isArray(result.content?.files) ? result.content.files : [];
+  const file = files[0] || {};
+  const symbol = String(metadata.symbol || tokenInfo.symbol || "").trim();
+  const name = String(metadata.name || "").trim();
+  const pictureUrl = normalizeMediaUrl(
+    result.content?.links?.image || file.cdn_uri || file.uri || ""
+  );
+
+  if (!symbol && !name && !pictureUrl) return null;
+  return {
+    symbol: symbol.slice(0, 12),
+    name: name.slice(0, 64),
+    pictureUrl: pictureUrl.slice(0, 255),
+  };
+}
+
+async function resolveMintViaPump(mint) {
+  const data = await fetchJsonWithTimeout(`https://frontend-api.pump.fun/coins/${mint}`, {}, 4500);
+  if (!data) return null;
+  const symbol = String(data.symbol || "").trim();
+  const name = String(data.name || "").trim();
+  const pictureUrl = normalizeMediaUrl(data.image_uri || data.image || "");
+  if (!symbol && !name && !pictureUrl) return null;
+  return {
+    symbol: symbol.slice(0, 12),
+    name: name.slice(0, 64),
+    pictureUrl: pictureUrl.slice(0, 255),
+  };
+}
+
+async function resolveMintViaDexscreener(mint) {
+  const data = await fetchJsonWithTimeout(
+    `https://api.dexscreener.com/latest/dex/tokens/${mint}`,
+    {},
+    4500
+  );
+  const pairs = Array.isArray(data?.pairs) ? data.pairs : [];
+  if (!pairs.length) return null;
+
+  const match = pairs.find((p) => {
+    const baseAddr = String(p?.baseToken?.address || "");
+    const quoteAddr = String(p?.quoteToken?.address || "");
+    return baseAddr === mint || quoteAddr === mint;
+  }) || pairs[0];
+
+  const baseAddr = String(match?.baseToken?.address || "");
+  const picked =
+    baseAddr === mint
+      ? match?.baseToken
+      : String(match?.quoteToken?.address || "") === mint
+        ? match?.quoteToken
+        : match?.baseToken;
+
+  const symbol = String(picked?.symbol || "").trim();
+  const name = String(picked?.name || "").trim();
+  const pictureUrl = normalizeMediaUrl(match?.info?.imageUrl || "");
+  if (!symbol && !name && !pictureUrl) return null;
+  return {
+    symbol: symbol.slice(0, 12),
+    name: name.slice(0, 64),
+    pictureUrl: pictureUrl.slice(0, 255),
+  };
+}
+
+export async function resolveMintMetadata(mintInput) {
+  const mint = normalizeMint(mintInput);
+
+  const known = knownMintFromResolve(mint);
+  if (known?.symbol && known?.name) {
+    return { mint, ...known };
+  }
+
+  const sources = [
+    () => resolveMintViaDas(mint),
+    () => resolveMintViaPump(mint),
+    () => resolveMintViaDexscreener(mint),
+  ];
+
+  for (const source of sources) {
+    const data = await source();
+    if (!data) continue;
+    const symbol = String(data.symbol || "").trim().toUpperCase().slice(0, 12);
+    const name = String(data.name || "").trim().slice(0, 64);
+    if (!symbol || !name) continue;
+    return {
+      mint,
+      symbol,
+      name,
+      pictureUrl: normalizeMediaUrl(data.pictureUrl || "").slice(0, 255),
+    };
+  }
+
+  throw new Error("Unable to resolve token metadata for this mint.");
+}
+
+function moduleConfigIntervalSec(moduleType, configJson = {}) {
+  if (moduleType === MODULE_TYPES.volume) {
+    const speed = Math.max(0, Math.min(100, Number(configJson.speed ?? 35)));
+    const sec = 25 - Math.round(speed * 0.2);
+    return Math.max(3, sec);
+  }
+  if (moduleType === MODULE_TYPES.personalBurn) return 120;
+  const cycle = Number(configJson.burnIntervalSec ?? configJson.intervalSec ?? 120);
+  return Math.max(5, Math.floor(cycle));
+}
+
+function defaultBurnModuleConfig(tokenRow) {
+  return {
+    claimEnabled: true,
+    claimIntervalSec: Math.max(60, Number(tokenRow?.claim_sec || 120)),
+    burnIntervalSec: Math.max(60, Number(tokenRow?.burn_sec || 300)),
+    splitBuys: Math.max(1, Number(tokenRow?.splits || 1)),
+    minProcessSol: 0.01,
+    slippageBps: 1000,
+    pool: "auto",
+    reserveSol: Math.max(0.005, Number(config.botSolReserve || 0.01)),
+  };
+}
+
+function defaultVolumeModuleConfig() {
+  return {
+    claimEnabled: false,
+    claimIntervalSec: 120,
+    tradeWalletCount: 1,
+    speed: 35,
+    aggression: 35,
+    minTradeSol: Math.max(0.001, Number(config.volumeDefaultMinTradeSol || 0.01)),
+    maxTradeSol: Math.max(0.005, Number(config.volumeDefaultMaxTradeSol || 0.05)),
+    reserveSol: Math.max(0.005, Number(config.botSolReserve || 0.01)),
+    pool: "auto",
+  };
+}
+
+function mergeModuleConfig(moduleType, currentConfig, nextConfig = {}) {
+  const base =
+    moduleType === MODULE_TYPES.volume
+      ? defaultVolumeModuleConfig()
+      : moduleType === MODULE_TYPES.personalBurn
+        ? defaultBurnModuleConfig({})
+        : defaultBurnModuleConfig({});
+  return {
+    ...base,
+    ...(currentConfig || {}),
+    ...(nextConfig || {}),
+  };
+}
+
+function normalizeHttpUrl(value, label) {
+  const str = String(value || "").trim();
+  let parsed;
+  try {
+    parsed = new URL(str);
+  } catch {
+    throw new Error(`${label} must be a valid URL.`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`${label} must start with http:// or https://`);
+  }
+  return parsed.toString();
+}
+
+function sanitizeDeployString(value, maxLen, label) {
+  const v = String(value || "").trim();
+  if (!v) throw new Error(`${label} is required.`);
+  return v.slice(0, maxLen);
+}
+
+function sanitizeDeployNumber(value, fallback, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function parseDataUriMedia(dataUri) {
+  const raw = String(dataUri || "").trim();
+  const match = raw.match(/^data:([a-zA-Z0-9.+/-]+);base64,([A-Za-z0-9+/=]+)$/);
+  if (!match) {
+    throw new Error("Token media upload is invalid. Please choose a valid JPG, PNG, GIF, or MP4 file.");
+  }
+  const imageType = String(match[1] || "").toLowerCase();
+  const allowedImageTypes = new Set(["image/jpeg", "image/png", "image/gif"]);
+  const allowedVideoTypes = new Set(["video/mp4"]);
+  const isImage = allowedImageTypes.has(imageType);
+  const isVideo = allowedVideoTypes.has(imageType);
+  if (!isImage && !isVideo) {
+    throw new Error("Unsupported media type. Allowed: JPG, PNG, GIF, MP4.");
+  }
+  const base64 = match[2];
+  const bytes = Buffer.from(base64, "base64");
+  if (!bytes.length) {
+    throw new Error("Token media upload is empty.");
+  }
+  if (isImage && bytes.length > 15 * 1024 * 1024) {
+    throw new Error("Image must be 15MB or smaller.");
+  }
+  if (isVideo && bytes.length > 30 * 1024 * 1024) {
+    throw new Error("Video must be 30MB or smaller.");
+  }
+  return {
+    imageType,
+    imageBlob: new Blob([bytes], { type: imageType }),
+  };
+}
+
+function parseDataUriBanner(dataUri) {
+  const raw = String(dataUri || "").trim();
+  const match = raw.match(/^data:([a-zA-Z0-9.+/-]+);base64,([A-Za-z0-9+/=]+)$/);
+  if (!match) {
+    throw new Error("Banner upload is invalid. Please choose a valid JPG, PNG, or GIF file.");
+  }
+  const bannerType = String(match[1] || "").toLowerCase();
+  const allowedBannerTypes = new Set(["image/jpeg", "image/png", "image/gif"]);
+  if (!allowedBannerTypes.has(bannerType)) {
+    throw new Error("Unsupported banner type. Allowed: JPG, PNG, GIF.");
+  }
+  const base64 = match[2];
+  const bytes = Buffer.from(base64, "base64");
+  if (!bytes.length) {
+    throw new Error("Banner upload is empty.");
+  }
+  if (bytes.length > Math.floor(4.3 * 1024 * 1024)) {
+    throw new Error("Banner must be 4.3MB or smaller.");
+  }
+  return {
+    bannerType,
+    bannerBlob: new Blob([bytes], { type: bannerType }),
+  };
+}
+
+const DEPLOY_BOT_PRESETS = {
+  burn: { claimSec: 120, burnSec: 300, splits: 1 },
+  volume: { claimSec: 90, burnSec: 240, splits: 3 },
+  market_maker: { claimSec: 60, burnSec: 180, splits: 4 },
+  ai_trading: { claimSec: 60, burnSec: 120, splits: 5 },
+};
+
+function getDeployBotPreset(value) {
+  const key = String(value || "").trim();
+  return DEPLOY_BOT_PRESETS[key] || null;
+}
+
+function getConnection() {
+  if (!config.rpcUrl) {
+    throw new Error("SOLANA_RPC_URL is required for bot execution.");
+  }
+  return new Connection(config.rpcUrl, "confirmed");
+}
+
+function keypairFromBase58(secretKeyBase58) {
+  const raw = String(secretKeyBase58 || "").trim();
+  if (!raw) throw new Error("Missing secret key.");
+  const bytes = bs58.decode(raw);
+  return Keypair.fromSecretKey(bytes);
+}
+
+function clampPct(value, fallback = 0) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(1, n));
+}
+
+async function sendSolTransfer(connection, signer, toAddress, lamports) {
+  const amount = Math.floor(Number(lamports || 0));
+  if (amount <= 0) return null;
+  const toPubkey = new PublicKey(String(toAddress || "").trim());
+  const latest = await connection.getLatestBlockhash("confirmed");
+  const tx = new Transaction({
+    feePayer: signer.publicKey,
+    blockhash: latest.blockhash,
+    lastValidBlockHeight: latest.lastValidBlockHeight,
+  }).add(
+    SystemProgram.transfer({
+      fromPubkey: signer.publicKey,
+      toPubkey,
+      lamports: amount,
+    })
+  );
+  tx.sign(signer);
+  const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 5 });
+  await connection.confirmTransaction(
+    { signature: sig, blockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight },
+    "confirmed"
+  );
+  return sig;
+}
+
+async function getOwnerTokenBalanceUi(connection, owner, mint) {
+  const ownerPk = owner instanceof PublicKey ? owner : new PublicKey(owner);
+  const mintPk = mint instanceof PublicKey ? mint : new PublicKey(mint);
+  const res = await connection.getParsedTokenAccountsByOwner(ownerPk, { mint: mintPk }, "confirmed");
+  if (!res.value.length) return 0;
+  let total = 0;
+  for (const item of res.value) {
+    const ui = Number(item.account?.data?.parsed?.info?.tokenAmount?.uiAmount || 0);
+    if (Number.isFinite(ui)) total += ui;
+  }
+  return total;
+}
+
+function trimNumber(value, digits = 6) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return "0";
+  return n.toFixed(digits).replace(/\.?0+$/, "");
+}
+
+async function sendTelegramAnnouncement({ title, lines = [], imageUrl = "" }) {
+  if (!config.telegramBotToken || !config.telegramChatId) return;
+  const message = [title, ...lines].filter(Boolean).join("\n");
+  const apiBase = `https://api.telegram.org/bot${config.telegramBotToken}`;
+
+  const textPayload = {
+    chat_id: config.telegramChatId,
+    text: message,
+    disable_web_page_preview: false,
+  };
+  if (config.telegramTopicId) {
+    textPayload.message_thread_id = Number(config.telegramTopicId) || undefined;
+  }
+
+  try {
+    if (imageUrl) {
+      const photoPayload = {
+        chat_id: config.telegramChatId,
+        photo: imageUrl,
+        caption: message.slice(0, 1024),
+      };
+      if (config.telegramTopicId) {
+        photoPayload.message_thread_id = Number(config.telegramTopicId) || undefined;
+      }
+      const photoRes = await fetch(`${apiBase}/sendPhoto`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(photoPayload),
+      });
+      if (photoRes.ok) return;
+    }
+
+    await fetch(`${apiBase}/sendMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(textPayload),
+    });
+  } catch {
+    // Best effort. Announcement failures should never break attach/deploy flows.
+  }
+}
+
+async function sendTokenToIncinerator(connection, signer, mintAddress, uiAmount) {
+  const amountUi = Number(uiAmount || 0);
+  if (!Number.isFinite(amountUi) || amountUi <= 0) return null;
+  const mint = new PublicKey(mintAddress);
+  const owner = signer.publicKey;
+  const incineratorOwner = new PublicKey("1nc1nerator11111111111111111111111111111111");
+  const sourceAta = getAssociatedTokenAddressSync(mint, owner, false, TOKEN_PROGRAM_ID);
+  const destAta = getAssociatedTokenAddressSync(mint, incineratorOwner, true, TOKEN_PROGRAM_ID);
+
+  const sourceInfo = await connection.getParsedAccountInfo(sourceAta, "confirmed");
+  if (!sourceInfo.value) return null;
+  const decimals = Number(sourceInfo.value?.data?.parsed?.info?.tokenAmount?.decimals || 0);
+  const rawAmount = BigInt(Math.floor(amountUi * (10 ** decimals)));
+  if (rawAmount <= 0n) return null;
+
+  const instructions = [];
+  const destInfo = await connection.getAccountInfo(destAta, "confirmed");
+  if (!destInfo) {
+    instructions.push(
+      createAssociatedTokenAccountInstruction(
+        signer.publicKey,
+        destAta,
+        incineratorOwner,
+        mint
+      )
+    );
+  }
+
+  instructions.push(
+    createTransferInstruction(
+      sourceAta,
+      destAta,
+      signer.publicKey,
+      Number(rawAmount),
+      [],
+      TOKEN_PROGRAM_ID
+    )
+  );
+
+  const latest = await connection.getLatestBlockhash("confirmed");
+  const tx = new Transaction({
+    feePayer: signer.publicKey,
+    blockhash: latest.blockhash,
+    lastValidBlockHeight: latest.lastValidBlockHeight,
+  });
+  instructions.forEach((ix) => tx.add(ix));
+  tx.sign(signer);
+  const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 5 });
+  await connection.confirmTransaction(
+    { signature: sig, blockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight },
+    "confirmed"
+  );
+  return sig;
+}
+
+async function fetchPumpPortalLocalTx(requestBody) {
+  const res = await fetch("https://pumpportal.fun/api/trade-local", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(requestBody),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(txt || "PumpPortal local transaction build failed.");
+  }
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+async function signAndSendVersioned(connection, signer, txBytes) {
+  const tx = VersionedTransaction.deserialize(txBytes);
+  tx.sign([signer]);
+  const sig = await connection.sendRawTransaction(tx.serialize(), {
+    skipPreflight: false,
+    maxRetries: 5,
+  });
+  await connection.confirmTransaction(sig, "confirmed");
+  return sig;
+}
+
+async function pumpPortalTrade({
+  connection,
+  signer,
+  mint,
+  action,
+  amount,
+  denominatedInSol = true,
+  slippage = 10,
+  pool = "auto",
+}) {
+  const txBytes = await fetchPumpPortalLocalTx({
+    publicKey: signer.publicKey.toBase58(),
+    action,
+    mint,
+    denominatedInSol: denominatedInSol ? "true" : "false",
+    amount,
+    slippage,
+    priorityFee: Number(config.basePriorityFeeSol || 0.0005),
+    pool,
+  });
+  const sig = await signAndSendVersioned(connection, signer, txBytes);
+  return sig;
+}
+
+async function pumpPortalCollectCreatorFee({ connection, signer, mint, pool = "auto" }) {
+  const txBytes = await fetchPumpPortalLocalTx({
+    publicKey: signer.publicKey.toBase58(),
+    action: "collectCreatorFee",
+    mint,
+    priorityFee: Number(config.basePriorityFeeSol || 0.0005),
+    pool,
+  });
+  const sig = await signAndSendVersioned(connection, signer, txBytes);
+  return sig;
+}
+
+const DEPOSIT_POOL_MAX = 20;
+const DEPOSIT_POOL_LOCK_KEY = "884420002001";
+let depositPoolRefilling = false;
+
+function validateDepositVanityPrefix(input) {
+  const prefix = String(input || "").trim().toUpperCase();
+  if (!prefix) throw new Error("Deposit vanity prefix is empty.");
+  if (!/^[1-9A-HJ-NP-Z]{1,8}$/.test(prefix)) {
+    throw new Error("Deposit vanity prefix must be Base58-safe and <= 8 chars.");
+  }
+  return prefix;
+}
+
+let cachedDepositEncryptionKey = undefined;
+
+function getDepositEncryptionKey() {
+  if (cachedDepositEncryptionKey !== undefined) return cachedDepositEncryptionKey;
+  const raw = String(config.depositKeyEncryptionKey || "").trim();
+  if (!raw) {
+    cachedDepositEncryptionKey = null;
+    return cachedDepositEncryptionKey;
+  }
+  let key;
+  if (/^[0-9a-fA-F]{64}$/.test(raw)) {
+    key = Buffer.from(raw, "hex");
+  } else {
+    key = Buffer.from(raw, "base64");
+  }
+  if (!Buffer.isBuffer(key) || key.length !== 32) {
+    throw new Error("DEPOSIT_KEY_ENCRYPTION_KEY must be 32 bytes (hex-64 or base64).");
+  }
+  cachedDepositEncryptionKey = key;
+  return cachedDepositEncryptionKey;
+}
+
+function encryptDepositSecret(secretKeyBase58) {
+  const key = getDepositEncryptionKey();
+  const clear = String(secretKeyBase58 || "").trim();
+  if (!key) return clear;
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([cipher.update(clear, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `enc:v1:${iv.toString("base64")}:${tag.toString("base64")}:${ciphertext.toString("base64")}`;
+}
+
+function decryptDepositSecret(storedValue) {
+  const raw = String(storedValue || "").trim();
+  if (!raw.startsWith("enc:v1:")) return raw;
+  const key = getDepositEncryptionKey();
+  if (!key) {
+    throw new Error("Encrypted deposit key found but DEPOSIT_KEY_ENCRYPTION_KEY is not configured.");
+  }
+  const parts = raw.split(":");
+  if (parts.length !== 5) {
+    throw new Error("Encrypted deposit key format is invalid.");
+  }
+  const iv = Buffer.from(parts[2], "base64");
+  const tag = Buffer.from(parts[3], "base64");
+  const ciphertext = Buffer.from(parts[4], "base64");
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
+}
+
+async function runSolanaKeygenGrind(prefix) {
+  const safePrefix = validateDepositVanityPrefix(prefix);
+  const threads = Math.max(1, Math.floor(Number(config.depositVanityThreads) || 4));
+  const timeoutMs = Math.max(1000, Math.floor(Number(config.depositVanityTimeoutMs) || 300000));
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ember-vanity-"));
+
+  try {
+    await new Promise((resolve, reject) => {
+      const args = [
+        "grind",
+        "--starts-with",
+        `${safePrefix}:1`,
+        "--num-threads",
+        String(threads),
+        "--no-bip39-passphrase",
+      ];
+
+      const child = spawn(config.solanaKeygenBin, args, {
+        cwd: tempDir,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      let stderr = "";
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`Vanity deposit generation timed out after ${timeoutMs}ms.`));
+      }, timeoutMs);
+
+      child.stdout.on("data", () => {
+        // Drain stdout to avoid backpressure in long grind runs.
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr += String(chunk || "");
+      });
+
+      child.on("error", (error) => {
+        clearTimeout(timer);
+        reject(new Error(`Failed to start solana-keygen: ${error.message}`));
+      });
+
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        if (code !== 0) {
+          const detail = stderr.trim() || `exit code ${code}`;
+          reject(new Error(`solana-keygen grind failed: ${detail}`));
+          return;
+        }
+        resolve();
+      });
+    });
+
+    const files = await fs.readdir(tempDir);
+    const keyFile = files.find((name) => String(name || "").toLowerCase().endsWith(".json"));
+    if (!keyFile) {
+      throw new Error("solana-keygen did not produce a keypair file.");
+    }
+
+    const keyFilePath = path.join(tempDir, keyFile);
+    const raw = await fs.readFile(keyFilePath, "utf8");
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error("Generated vanity keypair file is invalid JSON.");
+    }
+    if (!Array.isArray(parsed) || parsed.length !== 64) {
+      throw new Error("Generated vanity keypair must contain 64 bytes.");
+    }
+
+    const invalid = parsed.some((n) => !Number.isInteger(n) || n < 0 || n > 255);
+    if (invalid) {
+      throw new Error("Generated vanity keypair contains invalid byte values.");
+    }
+
+    const secretKey = Uint8Array.from(parsed);
+    const keypair = Keypair.fromSecretKey(secretKey);
+    const pubkey = keypair.publicKey.toBase58();
+    if (!pubkey.startsWith(safePrefix)) {
+      throw new Error(`Generated pubkey prefix mismatch. Expected ${safePrefix}, got ${pubkey.slice(0, safePrefix.length)}.`);
+    }
+
+    return {
+      pubkey,
+      secretKeyBase58: bs58.encode(secretKey),
+    };
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function runJsVanityGrind(prefix) {
+  const safePrefix = validateDepositVanityPrefix(prefix);
+  const timeoutMs = Math.max(1000, Math.floor(Number(config.depositVanityTimeoutMs) || 300000));
+  const deadline = Date.now() + timeoutMs;
+  let attempts = 0;
+
+  while (Date.now() < deadline) {
+    const keypair = Keypair.generate();
+    const pubkey = keypair.publicKey.toBase58();
+    attempts += 1;
+    if (pubkey.startsWith(safePrefix)) {
+      return {
+        pubkey,
+        secretKeyBase58: bs58.encode(keypair.secretKey),
+      };
+    }
+    if (attempts % 5000 === 0) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
+
+  throw new Error(`Vanity deposit generation timed out after ${timeoutMs}ms.`);
+}
+
+async function generateVanityDeposit(prefix) {
+  try {
+    return await runSolanaKeygenGrind(prefix);
+  } catch (error) {
+    if (!config.depositVanityAllowJsFallback) {
+      throw error;
+    }
+    console.warn(`[deposit] solana-keygen unavailable or failed, using JS fallback: ${error?.message || error}`);
+    return runJsVanityGrind(prefix);
+  }
+}
+
+function clampDepositPoolTarget(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return DEPOSIT_POOL_MAX;
+  return Math.max(0, Math.min(DEPOSIT_POOL_MAX, Math.floor(n)));
+}
+
+function makeHttpError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function buildPoolWarmupMessage(required, available) {
+  const missing = Math.max(1, Number(required || 0) - Number(available || 0));
+  const etaPerAddress = Math.max(10, Math.floor(Number(config.depositPoolEtaPerAddressSec) || 45));
+  const minSec = Math.max(10, Math.floor(missing * etaPerAddress * 0.6));
+  const maxSec = Math.max(minSec + 10, Math.floor(missing * etaPerAddress * 1.8));
+  return `Address pool is warming up. Creating addresses 1 out of ${missing} needed. Approx ${minSec}-${maxSec}s remaining.`;
+}
+
+async function withDepositPoolLock(fn) {
+  const client = await pool.connect();
+  try {
+    const lockRes = await client.query("SELECT pg_try_advisory_lock($1::bigint) AS ok", [DEPOSIT_POOL_LOCK_KEY]);
+    const ok = Boolean(lockRes.rows[0]?.ok);
+    if (!ok) return { locked: false };
+    try {
+      const result = await fn(client);
+      return { locked: true, result };
+    } finally {
+      await client.query("SELECT pg_advisory_unlock($1::bigint)", [DEPOSIT_POOL_LOCK_KEY]).catch(() => {});
+    }
+  } finally {
+    client.release();
+  }
+}
+
+export async function ensureDepositPool(targetInput = config.depositPoolTarget) {
+  const target = clampDepositPoolTarget(targetInput);
+  if (target <= 0) return { target, created: 0, total: 0 };
+  if (depositPoolRefilling) return { target, created: 0, total: null, skipped: true };
+  depositPoolRefilling = true;
+  try {
+    const lockResult = await withDepositPoolLock(async (client) => {
+      let created = 0;
+      while (true) {
+        const countRes = await client.query("SELECT COUNT(*)::int AS c FROM token_deposit_pool");
+        const total = Number(countRes.rows[0]?.c || 0);
+        if (total >= target) {
+          return { target, created, total };
+        }
+        const generated = await generateVanityDeposit(config.depositVanityPrefix || "EMBR");
+        const storedSecret = encryptDepositSecret(generated.secretKeyBase58);
+        try {
+          await client.query(
+            `
+              INSERT INTO token_deposit_pool (deposit_pubkey, secret_key_base58, status)
+              VALUES ($1, $2, 'available')
+            `,
+            [generated.pubkey, storedSecret]
+          );
+          created += 1;
+        } catch {
+          // Duplicate key collisions are very unlikely; just retry loop.
+        }
+      }
+    });
+
+    if (!lockResult.locked) {
+      const countRes = await pool.query("SELECT COUNT(*)::int AS c FROM token_deposit_pool");
+      return { target, created: 0, total: Number(countRes.rows[0]?.c || 0), skipped: true };
+    }
+    return lockResult.result;
+  } finally {
+    depositPoolRefilling = false;
+  }
+}
+
+export async function reserveDepositAddresses(userId, countInput = 1) {
+  const count = Math.max(1, Math.min(DEPOSIT_POOL_MAX, Math.floor(Number(countInput) || 1)));
+  const availableRowsRes = await withTx(async (client) => {
+    const rowsRes = await client.query(
+      `
+        SELECT id, deposit_pubkey
+        FROM token_deposit_pool
+        WHERE status = 'available'
+        ORDER BY created_at ASC
+        LIMIT $1
+        FOR UPDATE SKIP LOCKED
+      `,
+      [count]
+    );
+    const rows = rowsRes.rows || [];
+    if (rows.length < count) {
+      return { ok: false, available: rows.length };
+    }
+
+    const reserved = [];
+    for (const row of rows) {
+      const reservationId = makeId("dep");
+      await client.query(
+        `
+          UPDATE token_deposit_pool
+          SET status = 'reserved', reservation_id = $1, reserved_user_id = $2, reserved_at = NOW()
+          WHERE id = $3
+        `,
+        [reservationId, userId, row.id]
+      );
+      reserved.push({
+        pendingDepositId: reservationId,
+        deposit: row.deposit_pubkey,
+      });
+    }
+    return { ok: true, reserved };
+  });
+
+  if (!availableRowsRes.ok) {
+    void ensureDepositPool();
+    throw makeHttpError(503, buildPoolWarmupMessage(count, availableRowsRes.available));
+  }
+
+  return availableRowsRes.reserved;
+}
+
+export async function generatePendingDepositAddress(userId, countInput = 1) {
+  const count = Math.max(1, Math.min(DEPOSIT_POOL_MAX, Math.floor(Number(countInput) || 1)));
+  const reserved = await reserveDepositAddresses(userId, count);
+  if (count === 1) {
+    return reserved[0];
+  }
+  return { deposits: reserved };
+}
+
+async function consumeReservedDepositAddress(client, userId, pendingDepositId) {
+  const key = String(pendingDepositId || "").trim();
+  if (!key) return null;
+  const res = await client.query(
+    `
+      SELECT id, deposit_pubkey, secret_key_base58
+      FROM token_deposit_pool
+      WHERE status = 'reserved' AND reservation_id = $1 AND reserved_user_id = $2
+      LIMIT 1
+      FOR UPDATE
+    `,
+    [key, userId]
+  );
+  if (!res.rowCount) {
+    throw new Error("Pending deposit address not found or expired. Generate a new one.");
+  }
+  const row = res.rows[0];
+  await client.query("DELETE FROM token_deposit_pool WHERE id = $1", [row.id]);
+  return {
+    pubkey: row.deposit_pubkey,
+    secretKeyBase58: decryptDepositSecret(row.secret_key_base58),
+  };
+}
+
+function sessionExpiryDate() {
+  return new Date(Date.now() + config.sessionTtlDays * 24 * 60 * 60 * 1000);
+}
+
+export function cookieMaxAgeMs() {
+  return config.sessionTtlDays * 24 * 60 * 60 * 1000;
+}
+
+export async function getTokenDepositSigningKey(userId, tokenId) {
+  const res = await pool.query(
+    `
+      SELECT secret_key_base58
+      FROM token_deposit_keys
+      WHERE user_id = $1 AND token_id = $2
+      LIMIT 1
+    `,
+    [userId, tokenId]
+  );
+  if (!res.rowCount) {
+    throw new Error("Deposit signing key not found.");
+  }
+  return decryptDepositSecret(res.rows[0].secret_key_base58);
+}
+
+export async function registerUser(usernameInput, passwordInput) {
+  const username = normalizeUsername(usernameInput);
+  const password = normalizePassword(passwordInput);
+  const passwordHash = await bcrypt.hash(password, 10);
+
+  const user = await withTx(async (client) => {
+    const existing = await client.query("SELECT id FROM users WHERE username = $1", [username]);
+    if (existing.rowCount > 0) {
+      throw new Error("Username already exists.");
+    }
+
+    const inserted = await client.query(
+      "INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id, username",
+      [username, passwordHash]
+    );
+
+    return inserted.rows[0];
+  });
+
+  const sessionToken = await createSession(user.id);
+  return {
+    user: { id: user.id, username: user.username },
+    sessionToken,
+  };
+}
+
+export async function loginUser(usernameInput, passwordInput) {
+  const username = normalizeUsername(usernameInput);
+  const password = normalizePassword(passwordInput);
+
+  const result = await pool.query(
+    "SELECT id, username, password_hash FROM users WHERE username = $1",
+    [username]
+  );
+
+  if (!result.rowCount) {
+    throw new Error("Invalid username or password.");
+  }
+
+  const user = result.rows[0];
+  const ok = await bcrypt.compare(password, user.password_hash);
+  if (!ok) {
+    throw new Error("Invalid username or password.");
+  }
+
+  const sessionToken = await createSession(user.id);
+  return {
+    user: { id: user.id, username: user.username },
+    sessionToken,
+  };
+}
+
+export async function createSession(userId) {
+  const token = makeSessionToken();
+  await pool.query("INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, $3)", [
+    token,
+    userId,
+    sessionExpiryDate(),
+  ]);
+  return token;
+}
+
+export async function clearSession(token) {
+  if (!token) return;
+  await pool.query("DELETE FROM sessions WHERE token = $1", [token]);
+}
+
+export async function getUserBySession(token) {
+  if (!token) return null;
+
+  const result = await pool.query(
+    `
+      SELECT u.id, u.username
+      FROM sessions s
+      JOIN users u ON u.id = s.user_id
+      WHERE s.token = $1 AND s.expires_at > NOW()
+      LIMIT 1
+    `,
+    [token]
+  );
+
+  if (!result.rowCount) return null;
+  return result.rows[0];
+}
+
+export async function getDashboard(userId) {
+  const [tokensRes, feedRes, logsRes, chartRes] = await Promise.all([
+    pool.query(
+      `
+        SELECT
+          t.*,
+          m.module_type,
+          m.enabled AS module_enabled,
+          m.config_json AS module_config,
+          m.state_json AS module_state,
+          m.last_error AS module_last_error
+        FROM tokens t
+        LEFT JOIN bot_modules m
+          ON m.token_id = t.id
+         AND m.module_type = t.selected_bot
+        WHERE t.user_id = $1
+        ORDER BY t.created_at DESC
+      `,
+      [userId]
+    ),
+    pool.query(
+      "SELECT id, token_id, token_symbol, module_type, event_type, amount, message, tx, created_at FROM token_events WHERE user_id = $1 ORDER BY created_at DESC LIMIT 30",
+      [userId]
+    ),
+    pool.query(
+      "SELECT id, token_id, token_symbol, module_type, event_type, amount, message, tx, created_at FROM token_events WHERE user_id = $1 ORDER BY created_at DESC LIMIT 200",
+      [userId]
+    ),
+    pool.query(
+      `
+        SELECT event_type, amount, message, created_at
+        FROM token_events
+        WHERE user_id = $1
+          AND event_type = 'burn'
+          AND created_at >= NOW() - INTERVAL '7 days'
+        ORDER BY created_at DESC
+      `,
+      [userId]
+    ),
+  ]);
+
+  return {
+    tokens: tokensRes.rows.map(toToken),
+    feed: feedRes.rows.map(toEvent),
+    logs: logsRes.rows.map(toEvent),
+    chartData: buildChartData(chartRes.rows),
+  };
+}
+
+async function readTokenWalletAddresses(client, userId, tokenRow) {
+  const tokenId = String(tokenRow.id);
+  const addresses = [
+    {
+      type: "deposit",
+      label: "Deposit Wallet",
+      pubkey: String(tokenRow.deposit),
+    },
+  ];
+
+  const isVolume =
+    String(tokenRow.selected_bot || "").toLowerCase() === MODULE_TYPES.volume;
+  if (!isVolume) return addresses;
+
+  const walletsRes = await client.query(
+    `
+      SELECT label, wallet_pubkey
+      FROM volume_trade_wallets
+      WHERE user_id = $1 AND token_id = $2
+      ORDER BY created_at ASC
+    `,
+    [userId, tokenId]
+  );
+
+  for (const row of walletsRes.rows) {
+    addresses.push({
+      type: "trade",
+      label: String(row.label || "trade"),
+      pubkey: String(row.wallet_pubkey || ""),
+    });
+  }
+  return addresses;
+}
+
+async function collectWalletBalances(tokenRow, addresses) {
+  const connection = getConnection();
+  const mint = String(tokenRow.mint || "");
+  const enriched = [];
+  for (const item of addresses) {
+    const pubkey = String(item.pubkey || "").trim();
+    if (!pubkey) continue;
+    try {
+      const [lamports, tokenBal] = await Promise.all([
+        connection.getBalance(new PublicKey(pubkey), "confirmed"),
+        getOwnerTokenBalanceUi(connection, pubkey, mint),
+      ]);
+      enriched.push({
+        ...item,
+        solBalance: fromLamports(lamports),
+        tokenBalance: Number(tokenBal || 0),
+      });
+    } catch {
+      enriched.push({
+        ...item,
+        solBalance: 0,
+        tokenBalance: 0,
+      });
+    }
+  }
+  return enriched;
+}
+
+export async function getTokenLiveDetails(userId, tokenId) {
+  const tokenRes = await pool.query(
+    `
+      SELECT id, symbol, name, mint, picture_url, deposit, selected_bot, active
+      FROM tokens
+      WHERE user_id = $1 AND id = $2
+      LIMIT 1
+    `,
+    [userId, tokenId]
+  );
+  if (!tokenRes.rowCount) throw new Error("Token not found.");
+  const tokenRow = tokenRes.rows[0];
+
+  const addresses = await withTx(async (client) =>
+    readTokenWalletAddresses(client, userId, tokenRow)
+  );
+
+  let enriched = [];
+  try {
+    enriched = await collectWalletBalances(tokenRow, addresses);
+  } catch {
+    enriched = addresses.map((a) => ({ ...a, solBalance: 0, tokenBalance: 0 }));
+  }
+
+  const totals = enriched.reduce(
+    (acc, item) => {
+      acc.sol += Number(item.solBalance || 0);
+      acc.token += Number(item.tokenBalance || 0);
+      return acc;
+    },
+    { sol: 0, token: 0 }
+  );
+
+  return {
+    token: {
+      id: String(tokenRow.id),
+      symbol: String(tokenRow.symbol),
+      name: String(tokenRow.name),
+      mint: String(tokenRow.mint),
+      pictureUrl: String(tokenRow.picture_url || ""),
+      selectedBot: String(tokenRow.selected_bot || "burn"),
+      active: Boolean(tokenRow.active),
+    },
+    addresses: enriched,
+    totals,
+  };
+}
+
+export async function deleteToken(userId, tokenId) {
+  const tokenRes = await pool.query(
+    `
+      SELECT id, symbol, name, mint, picture_url, deposit, selected_bot, active
+      FROM tokens
+      WHERE user_id = $1 AND id = $2
+      LIMIT 1
+    `,
+    [userId, tokenId]
+  );
+  if (!tokenRes.rowCount) throw new Error("Token not found.");
+  const tokenRow = tokenRes.rows[0];
+
+  const addresses = await withTx(async (client) =>
+    readTokenWalletAddresses(client, userId, tokenRow)
+  );
+  const balances = await collectWalletBalances(tokenRow, addresses);
+
+  const hasFunds = balances.some(
+    (a) => Number(a.solBalance || 0) > 0.00005 || Number(a.tokenBalance || 0) > 0.000001
+  );
+  if (hasFunds) {
+    throw new Error(
+      "Bot cannot be deleted while funds remain. Sweep/withdraw all wallet balances first."
+    );
+  }
+
+  await withTx(async (client) => {
+    await client.query(
+      `
+        INSERT INTO token_events (user_id, token_id, token_symbol, event_type, message, tx)
+        VALUES ($1, NULL, $2, 'delete', $3, NULL)
+      `,
+      [userId, String(tokenRow.symbol), `Token removed from Nexus: ${tokenRow.symbol} (${tokenRow.mint})`]
+    );
+    await client.query("DELETE FROM tokens WHERE user_id = $1 AND id = $2", [userId, tokenId]);
+  });
+
+  return { ok: true };
+}
+
+let holderCountCache = { mint: "", value: 0, at: 0 };
+
+async function getEmberHolderCount() {
+  const mint = String(config.emberTokenMint || "").trim();
+  if (!mint) return 0;
+  const now = Date.now();
+  if (holderCountCache.mint === mint && now - holderCountCache.at < 60_000) {
+    return holderCountCache.value;
+  }
+
+  if (!config.rpcUrl) return holderCountCache.mint === mint ? holderCountCache.value : 0;
+
+  try {
+    const connection = getConnection();
+    const mintPk = new PublicKey(mint);
+    const accounts = await connection.getParsedProgramAccounts(TOKEN_PROGRAM_ID, {
+      commitment: "confirmed",
+      filters: [
+        { dataSize: 165 },
+        { memcmp: { offset: 0, bytes: mintPk.toBase58() } },
+      ],
+    });
+
+    let holders = 0;
+    for (const account of accounts) {
+      const rawAmount = String(
+        account.account?.data?.parsed?.info?.tokenAmount?.amount || "0"
+      );
+      try {
+        if (BigInt(rawAmount) > 0n) holders += 1;
+      } catch {
+        // ignore malformed account payloads
+      }
+    }
+    holderCountCache = { mint, value: holders, at: now };
+    return holders;
+  } catch {
+    return holderCountCache.mint === mint ? holderCountCache.value : 0;
+  }
+}
+
+export async function getPublicMetrics() {
+  const [tokenAggRes, eventAggRes, totalHolders] = await Promise.all([
+    pool.query(`
+      SELECT
+        COUNT(*)::bigint AS active_tokens
+      FROM tokens
+    `),
+    pool.query(`
+      SELECT
+        COALESCE(SUM(CASE WHEN event_type = 'burn' THEN amount ELSE 0 END), 0)::numeric AS lifetime_incinerated,
+        COUNT(*) FILTER (WHERE tx IS NOT NULL)::bigint AS total_bot_transactions,
+        COUNT(*) FILTER (WHERE tx IS NOT NULL)::bigint AS burn_buyback_transactions,
+        COALESCE(SUM(CASE WHEN event_type = 'burn' AND UPPER(COALESCE(token_symbol, '')) = 'EMBER' THEN amount ELSE 0 END), 0)::numeric AS ember_incinerated,
+        COALESCE(SUM(CASE WHEN event_type = 'claim' THEN amount ELSE 0 END), 0)::numeric AS rewards_processed_sol,
+        COALESCE(SUM(CASE WHEN event_type = 'fee' THEN amount ELSE 0 END), 0)::numeric AS fees_taken_sol
+      FROM token_events
+    `),
+    getEmberHolderCount(),
+  ]);
+
+  const tokenAgg = tokenAggRes.rows[0] || {};
+  const eventAgg = eventAggRes.rows[0] || {};
+
+  return {
+    lifetimeIncinerated: Number(eventAgg.lifetime_incinerated) || 0,
+    totalBotTransactions: Number(eventAgg.total_bot_transactions) || 0,
+    transactions: Number(eventAgg.total_bot_transactions) || 0,
+    burnBuybackTransactions: Number(eventAgg.burn_buyback_transactions) || 0,
+    activeTokens: Number(tokenAgg.active_tokens) || 0,
+    totalHolders: Number(totalHolders) || 0,
+    emberIncinerated: Number(eventAgg.ember_incinerated) || 0,
+    totalRewardsProcessedSol: Number(eventAgg.rewards_processed_sol) || 0,
+    totalFeesTakenSol: Number(eventAgg.fees_taken_sol) || 0,
+  };
+}
+
+export async function deployToken(userId, payload) {
+  if (!config.pumpPortalApiKey) {
+    throw new Error("Deploy is not configured yet. Missing PUMPPORTAL_API_KEY.");
+  }
+
+  const deployUserId = userId || null;
+  const requestedAutoAttach = Boolean(payload.autoAttach);
+  const botPreset = getDeployBotPreset(payload.selectedBot);
+  const autoAttach = requestedAutoAttach && Boolean(botPreset);
+  if (autoAttach && !deployUserId) {
+    throw new Error("Sign in is required when Auto-Attach is enabled.");
+  }
+
+  const name = sanitizeDeployString(payload.name, 40, "Name");
+  const symbol = sanitizeDeployString(payload.symbol, 12, "Symbol").toUpperCase();
+  const description = sanitizeDeployString(payload.description, 300, "Description");
+  const initialBuyMode = String(payload.initialBuyMode || "sol").trim().toLowerCase() === "tokens" ? "tokens" : "sol";
+  const initialBuySol = sanitizeDeployNumber(payload.initialBuySol, 0.1, 0, 100);
+  const initialBuyTokens = sanitizeDeployNumber(payload.initialBuyTokens, 0, 0, 1_000_000_000_000);
+  const twitter = payload.twitter ? normalizeHttpUrl(payload.twitter, "Twitter URL") : "";
+  const telegram = payload.telegram ? normalizeHttpUrl(payload.telegram, "Telegram URL") : "";
+  const website = payload.website ? normalizeHttpUrl(payload.website, "Website URL") : "";
+  const mayhemMode = Boolean(payload.mayhemMode);
+  const slippage = 10;
+  const priorityFee = 0.0005;
+  if (initialBuyMode === "tokens" && initialBuyTokens < 0) {
+    throw new Error("Initial buy token amount cannot be negative.");
+  }
+  if (initialBuyMode === "sol" && initialBuySol < 0) {
+    throw new Error("Initial buy SOL amount cannot be negative.");
+  }
+
+  const uploadImageDataUri = String(payload.imageDataUri || "").trim();
+  const uploadImageFileName = String(payload.imageFileName || "token").trim().slice(0, 80) || "token";
+  const uploadBannerDataUri = String(payload.bannerDataUri || "").trim();
+  const uploadBannerFileName = String(payload.bannerFileName || "banner").trim().slice(0, 80) || "banner";
+  const fallbackBannerUrl = String(payload.bannerUrl || "").trim();
+  const fallbackImageUrl = String(payload.imageUrl || "").trim();
+  let imageType = "image/png";
+  let imageBlob = null;
+  if (uploadImageDataUri) {
+    const parsed = parseDataUriMedia(uploadImageDataUri);
+    imageType = parsed.imageType;
+    imageBlob = parsed.imageBlob;
+  } else if (fallbackImageUrl) {
+    const safeImageUrl = normalizeHttpUrl(fallbackImageUrl, "Image URL");
+    const imageRes = await fetch(safeImageUrl);
+    if (!imageRes.ok) {
+      throw new Error("Failed to fetch token image from provided URL.");
+    }
+    imageType = imageRes.headers.get("content-type") || "image/png";
+    imageBlob = await imageRes.blob();
+  } else {
+    throw new Error("Token media upload is required.");
+  }
+
+  let bannerType = "";
+  let bannerBlob = null;
+  if (uploadBannerDataUri) {
+    const parsedBanner = parseDataUriBanner(uploadBannerDataUri);
+    bannerType = parsedBanner.bannerType;
+    bannerBlob = parsedBanner.bannerBlob;
+  } else if (fallbackBannerUrl) {
+    const safeBannerUrl = normalizeHttpUrl(fallbackBannerUrl, "Banner URL");
+    const bannerRes = await fetch(safeBannerUrl);
+    if (!bannerRes.ok) {
+      throw new Error("Failed to fetch token banner from provided URL.");
+    }
+    bannerType = (bannerRes.headers.get("content-type") || "image/png").toLowerCase();
+    if (!new Set(["image/jpeg", "image/png", "image/gif"]).has(bannerType)) {
+      throw new Error("Unsupported banner type. Allowed: JPG, PNG, GIF.");
+    }
+    bannerBlob = await bannerRes.blob();
+    if (Number(bannerBlob.size || 0) > Math.floor(4.3 * 1024 * 1024)) {
+      throw new Error("Banner must be 4.3MB or smaller.");
+    }
+  }
+
+  const ext = imageType.includes("jpeg")
+    ? "jpg"
+    : imageType.includes("gif")
+      ? "gif"
+      : imageType.includes("mp4")
+        ? "mp4"
+        : imageType.includes("webp")
+          ? "webp"
+          : "png";
+
+  const formData = new FormData();
+  formData.append("file", imageBlob, `${uploadImageFileName}.${ext}`);
+  if (bannerBlob) {
+    const bannerExt = bannerType.includes("jpeg")
+      ? "jpg"
+      : bannerType.includes("gif")
+        ? "gif"
+        : "png";
+    formData.append("banner", bannerBlob, `${uploadBannerFileName}.${bannerExt}`);
+  }
+  formData.append("name", name);
+  formData.append("symbol", symbol);
+  formData.append("description", description);
+  formData.append("twitter", twitter);
+  formData.append("telegram", telegram);
+  formData.append("website", website);
+  formData.append("showName", "true");
+
+  const metadataRes = await fetch("https://pump.fun/api/ipfs", {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!metadataRes.ok) {
+    throw new Error("Metadata upload failed. Verify deploy inputs and uploaded image.");
+  }
+
+  const metadataJson = await metadataRes.json();
+  const metadataUri = String(metadataJson.metadataUri || "").trim();
+  if (!metadataUri) {
+    throw new Error("Metadata upload did not return a metadata URI.");
+  }
+
+  const mintKeypair = Keypair.generate();
+  const deployPayload = {
+    action: "create",
+    tokenMetadata: {
+      name,
+      symbol,
+      uri: metadataUri,
+    },
+    mint: bs58.encode(mintKeypair.secretKey),
+    denominatedInSol: initialBuyMode === "sol" ? "true" : "false",
+    amount: initialBuyMode === "sol" ? initialBuySol : initialBuyTokens,
+    slippage,
+    priorityFee,
+    pool: "pump",
+    isMayhemMode: mayhemMode ? "true" : "false",
+  };
+
+  const tradeRes = await fetch(
+    `https://pumpportal.fun/api/trade?api-key=${encodeURIComponent(config.pumpPortalApiKey)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(deployPayload),
+    }
+  );
+
+  const tradeText = await tradeRes.text();
+  let tradeJson = null;
+  try {
+    tradeJson = JSON.parse(tradeText);
+  } catch {
+    tradeJson = { raw: tradeText };
+  }
+
+  if (!tradeRes.ok) {
+    const reason =
+      (tradeJson && (tradeJson.error || tradeJson.message || tradeJson.raw)) ||
+      "PumpPortal deploy request failed.";
+    throw new Error(String(reason));
+  }
+
+  const signature =
+    (tradeJson && (tradeJson.signature || tradeJson.txSignature || tradeJson.result?.signature)) ||
+    null;
+  const mint = mintKeypair.publicKey.toBase58();
+  const metadataImage =
+    String(
+      metadataJson?.metadata?.image ||
+        metadataJson?.image ||
+        metadataJson?.imageUri ||
+        ""
+    ).trim() || null;
+
+  let attachedToken = null;
+  if (autoAttach && deployUserId && botPreset) {
+    attachedToken = await attachToken(deployUserId, {
+      mint,
+      symbol,
+      name,
+      pictureUrl: metadataImage || "",
+      claimSec: botPreset.claimSec,
+      burnSec: botPreset.burnSec,
+      splits: botPreset.splits,
+      selectedBot: payload.selectedBot,
+      attachSource: "deploy-auto-attach",
+    });
+  }
+
+  if (deployUserId) {
+    await pool.query(
+      `
+        INSERT INTO token_events (user_id, token_id, token_symbol, event_type, message, tx)
+        VALUES ($1, $2, $3, 'deploy', $4, $5)
+      `,
+      [
+        deployUserId,
+        attachedToken?.id || null,
+        symbol,
+        `Token deployed via EMBER Deploy: ${symbol} (${mint})`,
+        signature,
+      ]
+    );
+  }
+
+  return {
+    ok: true,
+    mint,
+    signature,
+    metadataUri,
+    metadataImage,
+    pumpfunUrl: `https://pump.fun/coin/${mint}`,
+    solscanTx: signature ? `https://solscan.io/tx/${signature}` : null,
+    solscanMint: `https://solscan.io/token/${mint}`,
+    autoAttached: Boolean(attachedToken),
+    attachedToken,
+  };
+}
+
+export async function recordDeployFromChain(userId, payload) {
+  const deployUserId = userId || null;
+  const mint = String(payload.mint || "").trim();
+  if (mint.length < 32) {
+    throw new Error("Mint is required.");
+  }
+
+  const symbolRaw = String(payload.symbol || "").trim();
+  const symbol = (symbolRaw || "TOKEN").toUpperCase().slice(0, 12);
+  const nameRaw = String(payload.name || "").trim();
+  const name = (nameRaw || symbol).slice(0, 64);
+  const signature = String(payload.signature || "").trim() || null;
+  const pictureUrl = String(payload.pictureUrl || payload.metadataImage || "").trim().slice(0, 255);
+
+  const requestedAutoAttach = Boolean(payload.autoAttach);
+  const botPreset = getDeployBotPreset(payload.selectedBot);
+  const autoAttach = requestedAutoAttach && Boolean(botPreset);
+  if (autoAttach && !deployUserId) {
+    throw new Error("Sign in is required when Auto-Attach is enabled.");
+  }
+
+  let attachedToken = null;
+  if (autoAttach && deployUserId && botPreset) {
+    const existingRes = await pool.query(
+      "SELECT * FROM tokens WHERE user_id = $1 AND mint = $2 LIMIT 1",
+      [deployUserId, mint]
+    );
+    if (existingRes.rowCount) {
+      attachedToken = toToken(existingRes.rows[0]);
+    } else {
+      attachedToken = await attachToken(deployUserId, {
+        mint,
+        symbol,
+        name,
+        pictureUrl,
+        claimSec: botPreset.claimSec,
+        burnSec: botPreset.burnSec,
+        splits: botPreset.splits,
+        selectedBot: payload.selectedBot,
+        attachSource: "deploy-auto-attach",
+      });
+    }
+  }
+
+  if (deployUserId) {
+    await pool.query(
+      `
+        INSERT INTO token_events (user_id, token_id, token_symbol, event_type, message, tx)
+        VALUES ($1, $2, $3, 'deploy', $4, $5)
+      `,
+      [
+        deployUserId,
+        attachedToken?.id || null,
+        symbol,
+        `Token deployed via wallet: ${symbol} (${mint})`,
+        signature,
+      ]
+    );
+  }
+
+  return {
+    ok: true,
+    mint,
+    signature,
+    pumpfunUrl: `https://pump.fun/coin/${mint}`,
+    autoAttached: Boolean(attachedToken),
+    attachedToken,
+  };
+}
+export async function attachToken(userId, payload) {
+  const mint = String(payload.mint || "").trim();
+  if (mint.length < 32) {
+    throw new Error("A valid mint address is required.");
+  }
+
+  const tokenCountPrecheck = await pool.query("SELECT COUNT(*)::int AS c FROM tokens WHERE user_id = $1", [
+    userId,
+  ]);
+  if (tokenCountPrecheck.rows[0].c >= config.maxTokensPerAccount) {
+    throw new Error(`Max ${config.maxTokensPerAccount} burners per account reached.`);
+  }
+
+  const existsPrecheck = await pool.query(
+    "SELECT id FROM tokens WHERE user_id = $1 AND mint = $2 LIMIT 1",
+    [userId, mint]
+  );
+  if (existsPrecheck.rowCount) {
+    throw new Error("That mint is already attached on your account.");
+  }
+
+  const claimSec = sanitizeInterval(payload.claimSec, 120);
+  const burnSec = sanitizeInterval(payload.burnSec, 300);
+  const splits = sanitizeSplits(payload.splits, 1);
+  const selectedBot = normalizeModuleType(payload.selectedBot, MODULE_TYPES.burn);
+  const resolved = resolveMint(mint) || {};
+  const symbol = String(payload.symbol || resolved.symbol || "TOK").toUpperCase().slice(0, 12);
+  const name = String(payload.name || resolved.name || "Token").slice(0, 64);
+  const pictureUrl = normalizeMediaUrl(payload.pictureUrl || resolved.pictureUrl || "").slice(0, 255);
+  const pendingDepositId = String(payload.pendingDepositId || "").trim();
+  const token = await withTx(async (client) => {
+    const tokenCountRes = await client.query("SELECT COUNT(*)::int AS c FROM tokens WHERE user_id = $1", [
+      userId,
+    ]);
+
+    if (tokenCountRes.rows[0].c >= config.maxTokensPerAccount) {
+      throw new Error(`Max ${config.maxTokensPerAccount} burners per account reached.`);
+    }
+
+    const existsRes = await client.query(
+      "SELECT id FROM tokens WHERE user_id = $1 AND mint = $2 LIMIT 1",
+      [userId, mint]
+    );
+    if (existsRes.rowCount) {
+      throw new Error("That mint is already attached on your account.");
+    }
+
+    const generatedDeposit = pendingDepositId
+      ? await consumeReservedDepositAddress(client, userId, pendingDepositId)
+      : await generateVanityDeposit(config.depositVanityPrefix || "EMBR");
+    const deposit = String(generatedDeposit?.pubkey || "").trim();
+    if (!deposit) {
+      throw new Error("Failed to generate deposit address.");
+    }
+    const depositSecretKeyBase58 = String(generatedDeposit?.secretKeyBase58 || "").trim();
+    if (!depositSecretKeyBase58) {
+      throw new Error("Failed to generate deposit private key.");
+    }
+    const storedDepositSecret = encryptDepositSecret(depositSecretKeyBase58);
+
+    const id = makeId("tok");
+    const now = Date.now();
+
+    const inserted = await client.query(
+      `
+        INSERT INTO tokens (
+          id, user_id, symbol, name, mint, picture_url, deposit,
+          claim_sec, burn_sec, splits, selected_bot, active, burned, pending, tx_count,
+          next_claim_at, next_burn_at
+        )
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7,
+          $8, $9, $10, $11, FALSE, 0, 0, 0,
+          to_timestamp($12 / 1000.0), to_timestamp($13 / 1000.0)
+        )
+        RETURNING *
+      `,
+      [
+        id,
+        userId,
+        symbol,
+        name,
+        mint,
+        pictureUrl,
+        deposit,
+        claimSec,
+        burnSec,
+        splits,
+        selectedBot,
+        now + claimSec * 1000,
+        now + burnSec * 1000,
+      ]
+    );
+
+    await client.query(
+      `
+        INSERT INTO token_deposit_keys (token_id, user_id, deposit_pubkey, secret_key_base58)
+        VALUES ($1, $2, $3, $4)
+      `,
+      [id, userId, deposit, storedDepositSecret]
+    );
+
+    await client.query(
+      `
+        INSERT INTO token_events (user_id, token_id, token_symbol, event_type, message, tx)
+        VALUES ($1, $2, $3, 'claim', $4, NULL)
+      `,
+      [userId, id, symbol, `Token attached: ${symbol} created in paused mode. Configure settings, then start.`]
+    );
+
+    const moduleType = selectedBot === MODULE_TYPES.volume ? MODULE_TYPES.volume : MODULE_TYPES.burn;
+    const volumeOverrides = {
+      claimIntervalSec: sanitizeInterval(payload.claimSec, claimSec),
+      tradeWalletCount: Math.floor(sanitizeRange(payload.tradeWalletCount, 1, 1, 5)),
+      speed: sanitizeRange(payload.speed, 35, 0, 100),
+      aggression: sanitizeRange(payload.aggression, 35, 0, 100),
+      minTradeSol: sanitizeSol(payload.minTradeSol, 0.01, 0.001, 10),
+      maxTradeSol: sanitizeSol(payload.maxTradeSol, 0.05, 0.001, 100),
+    };
+    if (payload.claimEnabled !== undefined) {
+      volumeOverrides.claimEnabled = Boolean(payload.claimEnabled);
+    }
+    const initialConfig =
+      moduleType === MODULE_TYPES.volume
+        ? mergeModuleConfig(MODULE_TYPES.volume, defaultVolumeModuleConfig(), volumeOverrides)
+        : mergeModuleConfig(
+            MODULE_TYPES.burn,
+            defaultBurnModuleConfig({ claim_sec: claimSec, burn_sec: burnSec, splits }),
+            {
+              claimIntervalSec: sanitizeInterval(payload.claimSec, claimSec),
+              burnIntervalSec: sanitizeInterval(payload.burnSec, burnSec),
+              splitBuys: sanitizeSplits(payload.splits, splits),
+            }
+          );
+    await client.query(
+      `
+        INSERT INTO bot_modules (id, user_id, token_id, module_type, enabled, config_json, state_json, next_run_at)
+        VALUES ($1, $2, $3, $4, FALSE, $5::jsonb, '{}'::jsonb, NOW())
+        ON CONFLICT (token_id, module_type) DO NOTHING
+      `,
+      [makeId("mod"), userId, id, moduleType, JSON.stringify(initialConfig)]
+    );
+
+    return toToken(inserted.rows[0]);
+  });
+
+  if (pendingDepositId) {
+    void ensureDepositPool();
+  }
+
+  const source = String(payload.attachSource || "attach").trim() || "attach";
+  void sendTelegramAnnouncement({
+    title:
+      source === "deploy-auto-attach"
+        ? "[EMBER] New coin launched + attached on EMBER.nexus"
+        : "[EMBER] New coin attached on EMBER.nexus",
+    lines: [
+      `Name: ${token.name}`,
+      `Symbol: $${token.symbol}`,
+      `CA: ${token.mint}`,
+      `Bot: ${String(token.selectedBot || "burn").toUpperCase()}`,
+      `Pump: https://pump.fun/coin/${token.mint}`,
+    ],
+    imageUrl: token.pictureUrl || "",
+  });
+
+  return token;
+}
+
+export async function updateToken(userId, tokenId, payload) {
+  return withTx(async (client) => {
+    const currentRes = await client.query("SELECT * FROM tokens WHERE user_id = $1 AND id = $2 LIMIT 1", [
+      userId,
+      tokenId,
+    ]);
+
+    if (!currentRes.rowCount) {
+      throw new Error("Token not found.");
+    }
+
+    const current = currentRes.rows[0];
+    const claimSec = payload.claimSec === undefined ? Number(current.claim_sec) : sanitizeInterval(payload.claimSec, Number(current.claim_sec));
+    const burnSec = payload.burnSec === undefined ? Number(current.burn_sec) : sanitizeInterval(payload.burnSec, Number(current.burn_sec));
+    const splits = payload.splits === undefined ? Number(current.splits) : sanitizeSplits(payload.splits, Number(current.splits));
+    const active = payload.active === undefined ? current.active : Boolean(payload.active);
+    const selectedBot = normalizeModuleType(payload.selectedBot || current.selected_bot, current.selected_bot || MODULE_TYPES.burn);
+
+    const now = Date.now();
+
+    const updatedRes = await client.query(
+      `
+        UPDATE tokens
+        SET
+          claim_sec = $1,
+          burn_sec = $2,
+          splits = $3,
+          active = $4,
+          selected_bot = $10,
+          next_claim_at = CASE
+            WHEN $5 OR $6 THEN to_timestamp($7 / 1000.0)
+            ELSE next_claim_at
+          END,
+          next_burn_at = CASE
+            WHEN $5 OR $6 THEN to_timestamp($8 / 1000.0)
+            ELSE next_burn_at
+          END
+        WHERE id = $9
+        RETURNING *
+      `,
+      [
+        claimSec,
+        burnSec,
+        splits,
+        active,
+        payload.active !== undefined,
+        payload.claimSec !== undefined || payload.burnSec !== undefined,
+        now + claimSec * 1000,
+        now + burnSec * 1000,
+        tokenId,
+        selectedBot,
+      ]
+    );
+
+    const moduleType = selectedBot === MODULE_TYPES.volume ? MODULE_TYPES.volume : MODULE_TYPES.burn;
+    const baseConfig =
+      moduleType === MODULE_TYPES.volume
+        ? defaultVolumeModuleConfig()
+        : defaultBurnModuleConfig({ claim_sec: claimSec, burn_sec: burnSec, splits });
+
+    const nextConfig = {};
+    if (payload.claimEnabled !== undefined) {
+      nextConfig.claimEnabled = Boolean(payload.claimEnabled);
+    }
+    if (payload.claimSec !== undefined) {
+      nextConfig.claimIntervalSec = sanitizeInterval(payload.claimSec, claimSec);
+    }
+    if (payload.burnSec !== undefined && moduleType === MODULE_TYPES.burn) {
+      nextConfig.burnIntervalSec = sanitizeInterval(payload.burnSec, burnSec);
+    }
+    if (payload.splits !== undefined && moduleType === MODULE_TYPES.burn) {
+      nextConfig.splitBuys = sanitizeSplits(payload.splits, splits);
+    }
+    if (payload.minProcessSol !== undefined && moduleType === MODULE_TYPES.burn) {
+      nextConfig.minProcessSol = sanitizeSol(payload.minProcessSol, 0.01, 0.001, 100);
+    }
+    if (payload.tradeWalletCount !== undefined && moduleType === MODULE_TYPES.volume) {
+      nextConfig.tradeWalletCount = Math.floor(
+        sanitizeRange(payload.tradeWalletCount, 1, 1, 5)
+      );
+    }
+    if (payload.speed !== undefined && moduleType === MODULE_TYPES.volume) {
+      nextConfig.speed = sanitizeRange(payload.speed, 35, 0, 100);
+    }
+    if (payload.aggression !== undefined && moduleType === MODULE_TYPES.volume) {
+      nextConfig.aggression = sanitizeRange(payload.aggression, 35, 0, 100);
+    }
+    if (payload.minTradeSol !== undefined && moduleType === MODULE_TYPES.volume) {
+      nextConfig.minTradeSol = sanitizeSol(payload.minTradeSol, 0.01, 0.001, 10);
+    }
+    if (payload.maxTradeSol !== undefined && moduleType === MODULE_TYPES.volume) {
+      nextConfig.maxTradeSol = sanitizeSol(payload.maxTradeSol, 0.05, 0.001, 100);
+    }
+    if (payload.reserveSol !== undefined) {
+      nextConfig.reserveSol = sanitizeSol(payload.reserveSol, Number(config.botSolReserve || 0.01), 0.001, 10);
+    }
+    if (payload.slippageBps !== undefined) {
+      nextConfig.slippageBps = Math.floor(sanitizeRange(payload.slippageBps, 1000, 100, 5000));
+    }
+    if (payload.pool !== undefined) {
+      nextConfig.pool = String(payload.pool || "auto").trim().toLowerCase() || "auto";
+    }
+
+    const existingModuleRes = await client.query(
+      "SELECT id, config_json FROM bot_modules WHERE token_id = $1 AND module_type = $2 LIMIT 1",
+      [tokenId, moduleType]
+    );
+    if (!existingModuleRes.rowCount) {
+      await client.query(
+        `
+          INSERT INTO bot_modules (id, user_id, token_id, module_type, enabled, config_json, state_json, next_run_at)
+          VALUES ($1, $2, $3, $4, $5, $6::jsonb, '{}'::jsonb, NOW())
+        `,
+        [
+          makeId("mod"),
+          userId,
+          tokenId,
+          moduleType,
+          active,
+          JSON.stringify({ ...baseConfig, ...nextConfig }),
+        ]
+      );
+    } else {
+      const shouldResetVolumeState =
+        moduleType === MODULE_TYPES.volume &&
+        payload.active !== undefined &&
+        active === true &&
+        current.active === false;
+      const merged = mergeModuleConfig(moduleType, existingModuleRes.rows[0].config_json, {
+        ...baseConfig,
+        ...nextConfig,
+      });
+      await client.query(
+        `
+          UPDATE bot_modules
+          SET enabled = $1,
+              config_json = $2::jsonb,
+              state_json = CASE WHEN $4 THEN '{}'::jsonb ELSE state_json END
+          WHERE id = $3
+        `,
+        [active, JSON.stringify(merged), existingModuleRes.rows[0].id, shouldResetVolumeState]
+      );
+    }
+
+    await client.query(
+      `
+        UPDATE bot_modules
+        SET enabled = FALSE
+        WHERE token_id = $1 AND module_type <> $2
+      `,
+      [tokenId, moduleType]
+    );
+
+    return toToken(updatedRes.rows[0]);
+  });
+}
+
+async function insertEvent(
+  client,
+  userId,
+  tokenId,
+  symbol,
+  type,
+  message,
+  tx = null,
+  options = {}
+) {
+  const amount = Number(options.amount || 0);
+  const moduleType = options.moduleType ? String(options.moduleType) : null;
+  const idempotencyKey = options.idempotencyKey ? String(options.idempotencyKey) : null;
+  const metadata = options.metadata && typeof options.metadata === "object" ? options.metadata : null;
+  await client.query(
+    `
+      INSERT INTO token_events (user_id, token_id, token_symbol, module_type, event_type, amount, message, tx, idempotency_key, metadata)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      ON CONFLICT (idempotency_key) DO NOTHING
+    `,
+    [userId, tokenId, symbol, moduleType, type, amount, message, tx, idempotencyKey, metadata ? JSON.stringify(metadata) : null]
+  );
+}
+
+function lockPairFromKey(key) {
+  const digest = crypto.createHash("sha256").update(`${MODULE_LOCK_SEED}:${key}`).digest();
+  return [digest.readInt32BE(0), digest.readInt32BE(4)];
+}
+
+async function withTokenModuleLock(client, key, fn) {
+  const [a, b] = lockPairFromKey(key);
+  const gotRes = await client.query("SELECT pg_try_advisory_lock($1, $2) AS ok", [a, b]);
+  if (!gotRes.rows[0]?.ok) return { locked: false };
+  try {
+    const result = await fn();
+    return { locked: true, result };
+  } finally {
+    await client.query("SELECT pg_advisory_unlock($1, $2)", [a, b]).catch(() => {});
+  }
+}
+
+async function ensureTokenModules(client) {
+  const rows = await client.query("SELECT id, user_id, selected_bot, claim_sec, burn_sec, splits FROM tokens");
+  for (const row of rows.rows) {
+    const moduleType = normalizeModuleType(row.selected_bot, MODULE_TYPES.burn);
+    const configJson =
+      moduleType === MODULE_TYPES.volume
+        ? defaultVolumeModuleConfig()
+        : defaultBurnModuleConfig(row);
+    await client.query(
+      `
+        INSERT INTO bot_modules (id, user_id, token_id, module_type, enabled, config_json, state_json, next_run_at)
+        VALUES ($1, $2, $3, $4, FALSE, $5::jsonb, '{}'::jsonb, NOW())
+        ON CONFLICT (token_id, module_type) DO NOTHING
+      `,
+      [makeId("mod"), row.user_id, row.id, moduleType, JSON.stringify(configJson)]
+    );
+  }
+}
+
+async function enqueueDueJobs(client) {
+  const limit = Math.max(1, Number(config.schedulerBatchLimit || 500));
+  const dueRes = await client.query(
+    `
+      SELECT m.id AS module_id, m.user_id, m.token_id, m.module_type, m.config_json, m.next_run_at
+      FROM bot_modules m
+      JOIN tokens t ON t.id = m.token_id
+      WHERE m.enabled = TRUE
+        AND t.active = TRUE
+        AND (m.next_run_at IS NULL OR m.next_run_at <= NOW())
+      ORDER BY m.next_run_at NULLS FIRST, m.id
+      LIMIT $1
+      FOR UPDATE SKIP LOCKED
+    `,
+    [limit]
+  );
+
+  let enqueued = 0;
+  for (const row of dueRes.rows) {
+    const baseTs = row.next_run_at ? new Date(row.next_run_at).getTime() : Date.now();
+    const idempotencyKey = `job:${row.module_id}:${Math.floor(baseTs / 1000)}`;
+    const ins = await client.query(
+      `
+        INSERT INTO bot_jobs (
+          id, module_id, user_id, token_id, module_type, status, run_after,
+          attempts, max_attempts, priority, idempotency_key, payload
+        )
+        VALUES ($1, $2, $3, $4, $5, 'queued', NOW(), 0, 5, 100, $6, $7::jsonb)
+        ON CONFLICT (idempotency_key) DO NOTHING
+      `,
+      [makeId("job"), row.module_id, row.user_id, row.token_id, row.module_type, idempotencyKey, JSON.stringify({})]
+    );
+    if (ins.rowCount > 0) enqueued += 1;
+
+    const intervalSec = moduleConfigIntervalSec(row.module_type, row.config_json || {});
+    await client.query(
+      "UPDATE bot_modules SET next_run_at = NOW() + ($1::text || ' seconds')::interval WHERE id = $2",
+      [String(intervalSec), row.module_id]
+    );
+  }
+  return { dueCount: dueRes.rowCount, enqueued };
+}
+
+async function leaseQueuedJobs(client) {
+  const limit = Math.max(1, Number(config.executorBatchLimit || 32));
+  const rowsRes = await client.query(
+    `
+      SELECT id
+      FROM bot_jobs
+      WHERE status = 'queued' AND run_after <= NOW()
+      ORDER BY priority ASC, created_at ASC
+      LIMIT $1
+      FOR UPDATE SKIP LOCKED
+    `,
+    [limit]
+  );
+  const ids = rowsRes.rows.map((r) => r.id);
+  if (!ids.length) return [];
+  await client.query(
+    `
+      UPDATE bot_jobs
+      SET status = 'running',
+          attempts = attempts + 1,
+          lease_until = NOW() + INTERVAL '60 seconds'
+      WHERE id = ANY($1::text[])
+    `,
+    [ids]
+  );
+  const jobsRes = await client.query(
+    `
+      SELECT j.*, m.config_json, m.state_json, t.symbol, t.mint, t.deposit, t.splits
+      FROM bot_jobs j
+      JOIN bot_modules m ON m.id = j.module_id
+      JOIN tokens t ON t.id = j.token_id
+      WHERE j.id = ANY($1::text[])
+    `,
+    [ids]
+  );
+  return jobsRes.rows;
+}
+
+async function upsertModuleState(client, moduleId, nextState, lastError = null) {
+  await client.query(
+    `
+      UPDATE bot_modules
+      SET state_json = $1::jsonb,
+          last_run_at = NOW(),
+          last_error = $2
+      WHERE id = $3
+    `,
+    [JSON.stringify(nextState || {}), lastError, moduleId]
+  );
+}
+
+async function markJobSuccess(client, jobId, resultJson = null) {
+  await client.query(
+    `
+      UPDATE bot_jobs
+      SET status = 'completed',
+          lease_until = NULL,
+          result_json = $2::jsonb,
+          error = NULL
+      WHERE id = $1
+    `,
+    [jobId, JSON.stringify(resultJson || {})]
+  );
+}
+
+async function markJobFailure(client, row, error) {
+  const message = String(error?.message || error || "Unknown executor error");
+  const attempts = Number(row.attempts || 1);
+  const maxAttempts = Number(row.max_attempts || 5);
+  const shouldRetry = attempts < maxAttempts;
+  if (shouldRetry) {
+    const backoffSec = Math.min(120, Math.max(2, attempts * 4));
+    await client.query(
+      `
+        UPDATE bot_jobs
+        SET status = 'queued',
+            lease_until = NULL,
+            error = $2,
+            run_after = NOW() + ($3::text || ' seconds')::interval
+        WHERE id = $1
+      `,
+      [row.id, message, String(backoffSec)]
+    );
+  } else {
+    await client.query(
+      `
+        UPDATE bot_jobs
+        SET status = 'failed',
+            lease_until = NULL,
+            error = $2
+        WHERE id = $1
+      `,
+      [row.id, message]
+    );
+  }
+  await client.query(
+    "UPDATE bot_modules SET last_error = $2 WHERE id = $1",
+    [row.module_id, message]
+  );
+}
+
+function pickTradeSol(configJson, walletSol) {
+  const minSol = Math.max(0.001, Number(configJson.minTradeSol || 0.01));
+  const maxSolInput = Math.max(minSol, Number(configJson.maxTradeSol || minSol));
+  const aggression = Math.max(0, Math.min(100, Number(configJson.aggression || 35)));
+  const curve = (aggression / 100) ** 1.5;
+  const maxSol = minSol + (maxSolInput - minSol) * curve;
+  const spendable = Math.max(0, walletSol - 0.002);
+  const upper = Math.max(minSol, Math.min(maxSol, spendable));
+  if (upper <= 0) return 0;
+  const rand = Math.random();
+  return Math.max(minSol, minSol + rand * (upper - minSol));
+}
+
+async function ensureVolumeTradeWallets(client, moduleRow, count) {
+  const desired = Math.max(1, Math.min(5, Math.floor(Number(count) || 1)));
+  const existingRes = await client.query(
+    `
+      SELECT id, wallet_pubkey, secret_key_base58, funded_from_deposit_lamports
+      FROM volume_trade_wallets
+      WHERE module_id = $1
+      ORDER BY created_at ASC
+    `,
+    [moduleRow.module_id]
+  );
+  const existing = existingRes.rows || [];
+  if (existing.length >= desired) return existing.slice(0, desired);
+
+  const need = desired - existing.length;
+  const created = [];
+  for (let i = 0; i < need; i += 1) {
+    const kp = await generateVanityDeposit(config.depositVanityPrefix || "EMBR");
+    const id = makeId("vw");
+    const storedSecret = encryptDepositSecret(kp.secretKeyBase58);
+    await client.query(
+      `
+        INSERT INTO volume_trade_wallets (
+          id, module_id, user_id, token_id, label, wallet_pubkey, secret_key_base58
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `,
+      [
+        id,
+        moduleRow.module_id,
+        moduleRow.user_id,
+        moduleRow.token_id,
+        `trade-${existing.length + i + 1}`,
+        kp.pubkey,
+        storedSecret,
+      ]
+    );
+    created.push({
+      id,
+      wallet_pubkey: kp.pubkey,
+      secret_key_base58: storedSecret,
+      funded_from_deposit_lamports: 0,
+    });
+  }
+
+  return existing.concat(created);
+}
+
+async function runBurnExecutor(client, row) {
+  const connection = getConnection();
+  const configJson = mergeModuleConfig(MODULE_TYPES.burn, row.config_json, {
+    burnIntervalSec: Number(row.burn_sec || 300),
+    splitBuys: Number(row.splits || 1),
+  });
+  const state = { ...(row.state_json || {}) };
+  const signerSecret = await getTokenDepositSigningKey(row.user_id, row.token_id);
+  const signer = keypairFromBase58(signerSecret);
+  const reserveLamports = toLamports(configJson.reserveSol || 0.01);
+  const minProcessLamports = toLamports(configJson.minProcessSol || 0.01);
+  const now = Date.now();
+  const eventPrefix = `${row.id}:${now}`;
+  let txCreated = 0;
+
+  if (configJson.claimEnabled && (!state.nextClaimAt || Number(state.nextClaimAt) <= now)) {
+    try {
+      const claimBalanceBefore = await connection.getBalance(signer.publicKey, "confirmed");
+      const claimSig = await pumpPortalCollectCreatorFee({
+        connection,
+        signer,
+        mint: row.mint,
+        pool: configJson.pool || "auto",
+      });
+      const claimBalanceAfter = await connection.getBalance(signer.publicKey, "confirmed");
+      const claimNetLamports = Math.max(0, claimBalanceAfter - claimBalanceBefore);
+      const claimNetSol = fromLamports(claimNetLamports);
+      txCreated += 1;
+      await insertEvent(
+        client,
+        row.user_id,
+        row.token_id,
+        row.symbol,
+        "claim",
+        `Creator rewards claimed (${claimNetSol.toFixed(6)} SOL)`,
+        claimSig,
+        {
+          moduleType: MODULE_TYPES.burn,
+          amount: claimNetSol,
+          idempotencyKey: `${eventPrefix}:claim`,
+        }
+      );
+    } catch (error) {
+      await insertEvent(
+        client,
+        row.user_id,
+        row.token_id,
+        row.symbol,
+        "error",
+        `Claim attempt failed: ${error.message}`,
+        null,
+        { moduleType: MODULE_TYPES.burn, idempotencyKey: `${eventPrefix}:claim:error` }
+      );
+    }
+    state.nextClaimAt = now + Math.max(60, Number(configJson.claimIntervalSec || 120)) * 1000;
+  }
+
+  const balanceBefore = await connection.getBalance(signer.publicKey, "confirmed");
+  const availableBefore = Math.max(0, balanceBefore - reserveLamports);
+  const last = Math.max(0, Number(state.lastBalanceLamports || 0));
+  const delta = Math.max(0, availableBefore - last);
+  if (delta <= minProcessLamports) {
+    state.lastBalanceLamports = availableBefore;
+    await upsertModuleState(client, row.module_id, state, null);
+    return { txCreated, burnedAmount: 0 };
+  }
+
+  const feeLamports = Math.floor(delta * 0.05);
+  const treasuryLamports = Math.floor(feeLamports / 2);
+  const devLamports = feeLamports - treasuryLamports;
+  const netLamports = Math.max(0, delta - feeLamports);
+
+  if (treasuryLamports > 0) {
+    const sig = await sendSolTransfer(connection, signer, config.treasuryWallet, treasuryLamports);
+    txCreated += sig ? 1 : 0;
+    await insertEvent(
+      client,
+      row.user_id,
+      row.token_id,
+      row.symbol,
+      "fee",
+      `Protocol fee sent to treasury (${fromLamports(treasuryLamports).toFixed(6)} SOL)`,
+      sig,
+      { moduleType: MODULE_TYPES.burn, amount: fromLamports(treasuryLamports), idempotencyKey: `${eventPrefix}:fee:treasury` }
+    );
+  }
+
+  if (devLamports > 0 && config.devWalletPublicKey) {
+    const sig = await sendSolTransfer(connection, signer, config.devWalletPublicKey, devLamports);
+    txCreated += sig ? 1 : 0;
+    await insertEvent(
+      client,
+      row.user_id,
+      row.token_id,
+      row.symbol,
+      "fee",
+      `Protocol fee sent to dev burn wallet (${fromLamports(devLamports).toFixed(6)} SOL)`,
+      sig,
+      { moduleType: MODULE_TYPES.burn, amount: fromLamports(devLamports), idempotencyKey: `${eventPrefix}:fee:dev` }
+    );
+  }
+
+  if (netLamports <= minProcessLamports) {
+    const balanceAfterFee = await connection.getBalance(signer.publicKey, "confirmed");
+    state.lastBalanceLamports = Math.max(0, balanceAfterFee - reserveLamports);
+    await upsertModuleState(client, row.module_id, state, null);
+    return { txCreated, burnedAmount: 0 };
+  }
+
+  const beforeToken = await getOwnerTokenBalanceUi(connection, signer.publicKey, row.mint);
+  const buySig = await pumpPortalTrade({
+    connection,
+    signer,
+    mint: row.mint,
+    action: "buy",
+    amount: Number(fromLamports(netLamports).toFixed(9)),
+    denominatedInSol: true,
+    slippage: Math.max(1, Math.floor(Number(configJson.slippageBps || 1000) / 100)),
+    pool: configJson.pool || "auto",
+  });
+  txCreated += 1;
+  await insertEvent(
+    client,
+    row.user_id,
+    row.token_id,
+    row.symbol,
+    "buyback",
+    `Buyback executed (${fromLamports(netLamports).toFixed(6)} SOL)`,
+    buySig,
+    { moduleType: MODULE_TYPES.burn, amount: fromLamports(netLamports), idempotencyKey: `${eventPrefix}:buyback` }
+  );
+
+  const afterToken = await getOwnerTokenBalanceUi(connection, signer.publicKey, row.mint);
+  const bought = Math.max(0, afterToken - beforeToken);
+  let burnSig = null;
+  if (bought > 0) {
+    burnSig = await sendTokenToIncinerator(connection, signer, row.mint, bought);
+    txCreated += burnSig ? 1 : 0;
+    await insertEvent(
+      client,
+      row.user_id,
+      row.token_id,
+      row.symbol,
+      "burn",
+      `Incinerated ${fmtInt(bought.toFixed(2))} ${row.symbol}`,
+      burnSig,
+      { moduleType: MODULE_TYPES.burn, amount: bought, idempotencyKey: `${eventPrefix}:burn` }
+    );
+  }
+
+  await client.query(
+    `
+      UPDATE tokens
+      SET burned = burned + $1,
+          tx_count = tx_count + $2
+      WHERE id = $3
+    `,
+    [bought, txCreated, row.token_id]
+  );
+
+  const balanceAfter = await connection.getBalance(signer.publicKey, "confirmed");
+  state.lastBalanceLamports = Math.max(0, balanceAfter - reserveLamports);
+  await upsertModuleState(client, row.module_id, state, null);
+  return { txCreated, burnedAmount: bought };
+}
+
+async function runVolumeExecutor(client, row) {
+  const connection = getConnection();
+  const configJson = mergeModuleConfig(MODULE_TYPES.volume, row.config_json, {});
+  const state = { ...(row.state_json || {}) };
+  const depositSecret = await getTokenDepositSigningKey(row.user_id, row.token_id);
+  const depositSigner = keypairFromBase58(depositSecret);
+  const reserveLamports = toLamports(configJson.reserveSol || 0.01);
+  const now = Date.now();
+  let txCreated = 0;
+  const eventPrefix = `${row.id}:${now}`;
+
+  const wallets = await ensureVolumeTradeWallets(client, row, configJson.tradeWalletCount || 1);
+
+  if (configJson.claimEnabled && (!state.nextClaimAt || Number(state.nextClaimAt) <= now)) {
+    try {
+      const claimBalanceBefore = await connection.getBalance(depositSigner.publicKey, "confirmed");
+      const claimSig = await pumpPortalCollectCreatorFee({
+        connection,
+        signer: depositSigner,
+        mint: row.mint,
+        pool: configJson.pool || "auto",
+      });
+      const claimBalanceAfter = await connection.getBalance(depositSigner.publicKey, "confirmed");
+      const claimNetLamports = Math.max(0, claimBalanceAfter - claimBalanceBefore);
+      const claimNetSol = fromLamports(claimNetLamports);
+      txCreated += 1;
+      await insertEvent(
+        client,
+        row.user_id,
+        row.token_id,
+        row.symbol,
+        "claim",
+        `Volume module claimed creator rewards (${claimNetSol.toFixed(6)} SOL)`,
+        claimSig,
+        {
+          moduleType: MODULE_TYPES.volume,
+          amount: claimNetSol,
+          idempotencyKey: `${eventPrefix}:claim`,
+        }
+      );
+    } catch (error) {
+      await insertEvent(
+        client,
+        row.user_id,
+        row.token_id,
+        row.symbol,
+        "error",
+        `Volume claim failed: ${error.message}`,
+        null,
+        { moduleType: MODULE_TYPES.volume, idempotencyKey: `${eventPrefix}:claim:error` }
+      );
+    }
+    state.nextClaimAt = now + Math.max(60, Number(configJson.claimIntervalSec || 120)) * 1000;
+  }
+
+  const depositBalance = await connection.getBalance(depositSigner.publicKey, "confirmed");
+  const availableDeposit = Math.max(0, depositBalance - reserveLamports);
+  const lastDeposit = Math.max(0, Number(state.lastDepositBalanceLamports || 0));
+  const rawDelta = Math.max(0, availableDeposit - lastDeposit);
+  const ignore = Math.max(0, Number(state.ignoreInflowLamports || 0));
+  const effectiveDelta = Math.max(0, rawDelta - ignore);
+  state.ignoreInflowLamports = Math.max(0, ignore - rawDelta);
+
+  if (effectiveDelta > toLamports(0.0001)) {
+    const feeLamports = Math.floor(effectiveDelta * 0.05);
+    const treasuryLamports = Math.floor(feeLamports / 2);
+    const devLamports = feeLamports - treasuryLamports;
+    if (treasuryLamports > 0) {
+      const sig = await sendSolTransfer(connection, depositSigner, config.treasuryWallet, treasuryLamports);
+      txCreated += sig ? 1 : 0;
+      await insertEvent(
+        client,
+        row.user_id,
+        row.token_id,
+        row.symbol,
+        "fee",
+        `Volume fee to treasury (${fromLamports(treasuryLamports).toFixed(6)} SOL)`,
+        sig,
+        { moduleType: MODULE_TYPES.volume, amount: fromLamports(treasuryLamports), idempotencyKey: `${eventPrefix}:fee:treasury` }
+      );
+    }
+    if (devLamports > 0 && config.devWalletPublicKey) {
+      const sig = await sendSolTransfer(connection, depositSigner, config.devWalletPublicKey, devLamports);
+      txCreated += sig ? 1 : 0;
+      await insertEvent(
+        client,
+        row.user_id,
+        row.token_id,
+        row.symbol,
+        "fee",
+        `Volume fee to dev burn wallet (${fromLamports(devLamports).toFixed(6)} SOL)`,
+        sig,
+        { moduleType: MODULE_TYPES.volume, amount: fromLamports(devLamports), idempotencyKey: `${eventPrefix}:fee:dev` }
+      );
+    }
+  }
+
+  if (!state.fannedOut && wallets.length) {
+    const freshBal = await connection.getBalance(depositSigner.publicKey, "confirmed");
+    const spendable = Math.max(0, freshBal - reserveLamports - toLamports(0.002));
+    if (spendable > 0) {
+      const each = Math.floor(spendable / wallets.length);
+      if (each > 0) {
+        for (const wallet of wallets) {
+          const sig = await sendSolTransfer(connection, depositSigner, wallet.wallet_pubkey, each);
+          txCreated += sig ? 1 : 0;
+        }
+        state.fannedOut = true;
+        state.ignoreInflowLamports = Math.max(0, Number(state.ignoreInflowLamports || 0)) + 0;
+      }
+    }
+  }
+
+  const wallet = wallets[Math.floor(Math.random() * wallets.length)];
+  if (wallet) {
+    const tradeSigner = keypairFromBase58(decryptDepositSecret(wallet.secret_key_base58));
+    const walletSol = fromLamports(await connection.getBalance(tradeSigner.publicKey, "confirmed"));
+    const tokenBal = await getOwnerTokenBalanceUi(connection, tradeSigner.publicKey, row.mint);
+    let action = Math.random() < 0.5 ? "buy" : "sell";
+    if (tokenBal <= 0.000001) action = "buy";
+    if (walletSol < Number(configJson.minTradeSol || 0.01) + 0.002) action = "sell";
+
+    if (action === "buy") {
+      const tradeSol = pickTradeSol(configJson, walletSol);
+      if (tradeSol > 0.0005) {
+        const sig = await pumpPortalTrade({
+          connection,
+          signer: tradeSigner,
+          mint: row.mint,
+          action: "buy",
+          amount: Number(tradeSol.toFixed(6)),
+          denominatedInSol: true,
+          slippage: Math.max(1, Math.floor(Number(configJson.slippageBps || 1000) / 100)),
+          pool: configJson.pool || "auto",
+        });
+        txCreated += 1;
+        await insertEvent(
+          client,
+          row.user_id,
+          row.token_id,
+          row.symbol,
+          "buyback",
+          `Volume buy (${tradeSol.toFixed(4)} SOL) via ${wallet.label}`,
+          sig,
+          { moduleType: MODULE_TYPES.volume, amount: tradeSol, idempotencyKey: `${eventPrefix}:buy` }
+        );
+      }
+    } else if (tokenBal > 0.000001) {
+      const sellAmount = Number((tokenBal * (0.2 + Math.random() * 0.5)).toFixed(6));
+      if (sellAmount > 0) {
+        const sig = await pumpPortalTrade({
+          connection,
+          signer: tradeSigner,
+          mint: row.mint,
+          action: "sell",
+          amount: sellAmount,
+          denominatedInSol: false,
+          slippage: Math.max(1, Math.floor(Number(configJson.slippageBps || 1000) / 100)),
+          pool: configJson.pool || "auto",
+        });
+        txCreated += 1;
+        await insertEvent(
+          client,
+          row.user_id,
+          row.token_id,
+          row.symbol,
+          "sell",
+          `Volume sell (${sellAmount.toFixed(4)} ${row.symbol}) via ${wallet.label}`,
+          sig,
+          { moduleType: MODULE_TYPES.volume, amount: sellAmount, idempotencyKey: `${eventPrefix}:sell` }
+        );
+      }
+    }
+  }
+
+  const depositAfter = await connection.getBalance(depositSigner.publicKey, "confirmed");
+  state.lastDepositBalanceLamports = Math.max(0, depositAfter - reserveLamports);
+  await upsertModuleState(client, row.module_id, state, null);
+
+  await client.query(
+    `
+      UPDATE tokens
+      SET tx_count = tx_count + $1
+      WHERE id = $2
+    `,
+    [txCreated, row.token_id]
+  );
+
+  return { txCreated };
+}
+
+async function runPersonalBurnExecutor(client) {
+  if (!config.devWalletPrivateKey || !config.devWalletPublicKey) return { ran: false, txCreated: 0 };
+  if (!config.personalCreatorMints?.length) return { ran: false, txCreated: 0 };
+  if (!config.emberTokenMint) return { ran: false, txCreated: 0 };
+
+  const connection = getConnection();
+  const signer = Keypair.fromSecretKey(config.devWalletPrivateKey);
+  const before = await connection.getBalance(signer.publicKey, "confirmed");
+  let txCreated = 0;
+
+  for (const mint of config.personalCreatorMints) {
+    try {
+      await pumpPortalCollectCreatorFee({
+        connection,
+        signer,
+        mint,
+        pool: "auto",
+      });
+      txCreated += 1;
+    } catch {
+      // best effort per mint
+    }
+  }
+
+  const afterClaim = await connection.getBalance(signer.publicKey, "confirmed");
+  const delta = Math.max(0, afterClaim - before);
+  if (delta <= toLamports(0.0005)) return { ran: true, txCreated };
+
+  const treasuryShare = Math.floor(delta * 0.5);
+  const burnShare = delta - treasuryShare;
+  if (treasuryShare > 0) {
+    await sendSolTransfer(connection, signer, config.treasuryWallet, treasuryShare);
+    txCreated += 1;
+  }
+  if (burnShare > 0) {
+    const beforeToken = await getOwnerTokenBalanceUi(connection, signer.publicKey, config.emberTokenMint);
+    await pumpPortalTrade({
+      connection,
+      signer,
+      mint: config.emberTokenMint,
+      action: "buy",
+      amount: Number(fromLamports(burnShare).toFixed(6)),
+      denominatedInSol: true,
+      slippage: 10,
+      pool: "auto",
+    });
+    txCreated += 1;
+    const afterToken = await getOwnerTokenBalanceUi(connection, signer.publicKey, config.emberTokenMint);
+    const bought = Math.max(0, afterToken - beforeToken);
+    if (bought > 0) {
+      await sendTokenToIncinerator(connection, signer, config.emberTokenMint, bought);
+      txCreated += 1;
+    }
+  }
+  return { ran: true, txCreated };
+}
+
+async function executeLeasedJob(client, row) {
+  const lockKey = `${row.token_id}:${row.module_type}`;
+  const lock = await withTokenModuleLock(client, lockKey, async () => {
+    if (row.module_type === MODULE_TYPES.volume) {
+      return runVolumeExecutor(client, row);
+    }
+    if (row.module_type === MODULE_TYPES.burn) {
+      return runBurnExecutor(client, row);
+    }
+    return { txCreated: 0 };
+  });
+  if (!lock.locked) {
+    throw new Error("Token/module is currently locked by another executor.");
+  }
+  return lock.result || { txCreated: 0 };
+}
+
+let lastPersonalBurnRunAt = 0;
+
+export async function runWorkerTick() {
+  const scheduleSummary = await withTx(async (client) => {
+    await ensureTokenModules(client);
+    return enqueueDueJobs(client);
+  });
+
+  const leasedJobs = await withTx(async (client) => leaseQueuedJobs(client));
+  let eventsCreated = 0;
+  let executedJobs = 0;
+
+  for (const row of leasedJobs) {
+    const client = await pool.connect();
+    try {
+      const result = await executeLeasedJob(client, row);
+      executedJobs += 1;
+      eventsCreated += Number(result?.txCreated || 0);
+      await markJobSuccess(client, row.id, result || {});
+    } catch (error) {
+      await markJobFailure(client, row, error);
+      await insertEvent(
+        client,
+        row.user_id,
+        row.token_id,
+        row.symbol,
+        "error",
+        `Job ${row.module_type} failed: ${error.message}`,
+        null,
+        { moduleType: row.module_type, idempotencyKey: `joberr:${row.id}:${row.attempts}` }
+      );
+    } finally {
+      client.release();
+    }
+  }
+
+  const now = Date.now();
+  if (now - lastPersonalBurnRunAt >= 120000) {
+    const client = await pool.connect();
+    try {
+      await runPersonalBurnExecutor(client);
+    } catch {
+      // best effort
+    } finally {
+      client.release();
+    }
+    lastPersonalBurnRunAt = now;
+  }
+
+  return {
+    dueTokens: scheduleSummary.dueCount,
+    eventsCreated,
+    enqueuedJobs: scheduleSummary.enqueued,
+    executedJobs,
+  };
+}
+
+

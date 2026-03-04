@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="EMBER.nexus">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#09020a" />
+      <stop offset="55%" stop-color="#13050d" />
+      <stop offset="100%" stop-color="#1b0608" />
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ff6a00" />
+      <stop offset="100%" stop-color="#ff2d55" />
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="10" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#bg)" />
+  <rect x="0" y="0" width="1200" height="3" fill="url(#accent)" />
+  <rect x="0" y="627" width="1200" height="3" fill="url(#accent)" />
+
+  <circle cx="930" cy="180" r="160" fill="#ff4d0022" />
+  <circle cx="1020" cy="420" r="210" fill="#ff6a0018" />
+  <circle cx="230" cy="500" r="170" fill="#ff2d5518" />
+
+  <g transform="translate(90 90)">
+    <rect x="0" y="0" width="66" height="66" rx="16" fill="#1c0c10" stroke="#ff6a0059" />
+    <path d="M33 13c6 10 12 16 12 25 0 8-5 14-12 14s-12-6-12-14c0-9 6-15 12-25z" fill="#ff7a1a" filter="url(#glow)" />
+  </g>
+
+  <text x="180" y="170" fill="#ffffff" font-size="68" font-weight="800" font-family="Segoe UI, Arial, sans-serif">
+    EMBER.nexus
+  </text>
+  <text x="180" y="240" fill="#ffb380" font-size="30" font-weight="700" font-family="Segoe UI, Arial, sans-serif">
+    ADVANCED SOLANA EXECUTION BOTS
+  </text>
+  <text x="180" y="305" fill="#f4d9c6" font-size="28" font-family="Segoe UI, Arial, sans-serif">
+    Continuous, high-impact on-chain automation.
+  </text>
+  <text x="180" y="355" fill="#d8b9a6" font-size="24" font-family="Segoe UI, Arial, sans-serif">
+    Branded EMBR/EMBER wallet attribution. Transparent execution.
+  </text>
+
+  <g transform="translate(180 420)">
+    <rect x="0" y="0" width="340" height="58" rx="14" fill="#17080d" stroke="#ff6a0060" />
+    <text x="20" y="38" fill="#ffd9bf" font-size="24" font-family="Consolas, Menlo, monospace">
+      EMBR...
+    </text>
+    <rect x="370" y="0" width="340" height="58" rx="14" fill="#17080d" stroke="#ff6a0060" />
+    <text x="390" y="38" fill="#ffd9bf" font-size="24" font-family="Consolas, Menlo, monospace">
+      EMBER...
+    </text>
+  </g>
+</svg>

@@ -1,0 +1,39 @@
+{
+  "name": "ember-burn-protocol",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:web\" \"npm run dev:api\" \"npm run dev:worker\"",
+    "dev:web": "vite --config web/vite.config.js",
+    "dev:api": "node --watch server/api.js",
+    "dev:worker": "node --watch worker/worker.js",
+    "build": "vite build --config web/vite.config.js",
+    "start": "node server/api.js",
+    "start:worker": "node worker/worker.js",
+    "db:status": "node scripts/db-portability.mjs status",
+    "db:export": "node scripts/db-portability.mjs export",
+    "db:import": "node scripts/db-portability.mjs import"
+  },
+  "dependencies": {
+    "@solana/spl-token": "^0.4.8",
+    "@solana/web3.js": "^1.98.4",
+    "bcryptjs": "^3.0.2",
+    "bs58": "^6.0.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "pg": "^8.16.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.2.1",
+    "vite": "^5.4.11"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

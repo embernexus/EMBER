@@ -1,0 +1,16 @@
+{
+  "name": "EMBER.nexus",
+  "short_name": "EMBER",
+  "description": "Advanced Solana execution bots with transparent on-chain automation.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#09020a",
+  "theme_color": "#0c0408",
+  "icons": [
+    {
+      "src": "/og/ember-og.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
