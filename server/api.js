@@ -12,13 +12,16 @@ import {
   ensureDepositPool,
   generatePendingDepositAddress,
   getTokenLiveDetails,
+  getVolumeWithdrawOptions,
   recordDeployFromChain,
   getPublicMetrics,
   getUserBySession,
   loginUser,
   resolveMintMetadata,
   registerUser,
+  sweepVolumeWallets,
   updateToken,
+  withdrawVolumeFunds,
 } from "./core.js";
 import { config } from "./config.js";
 import { initDb } from "./db.js";
@@ -184,6 +187,33 @@ app.patch("/api/tokens/:id", authRequired, async (req, res, next) => {
 app.get("/api/tokens/:id/details", authRequired, async (req, res, next) => {
   try {
     const data = await getTokenLiveDetails(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/tokens/:id/volume/withdraw-options", authRequired, async (req, res, next) => {
+  try {
+    const data = await getVolumeWithdrawOptions(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/tokens/:id/volume/sweep", authRequired, async (req, res, next) => {
+  try {
+    const data = await sweepVolumeWallets(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/tokens/:id/volume/withdraw", authRequired, async (req, res, next) => {
+  try {
+    const data = await withdrawVolumeFunds(req.user.id, req.params.id, req.body || {});
     res.json(data);
   } catch (error) {
     next(error);

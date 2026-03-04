@@ -231,6 +231,49 @@ export async function apiTokenLiveDetails(id) {
   };
 }
 
+export async function apiVolumeWithdrawOptions(id) {
+  const data = await requestJson(`/api/tokens/${id}/volume/withdraw-options`, { method: "GET" });
+  const sources = Array.isArray(data.sources) ? data.sources : [];
+  return {
+    deposit: str(data.deposit),
+    active: bool(data.active),
+    reserveSol: num(data.reserveSol),
+    withdrawableSol: num(data.withdrawableSol),
+    sources: sources.map((s) => ({
+      wallet: str(s.wallet),
+      totalSol: num(s.totalSol),
+    })),
+  };
+}
+
+export async function apiVolumeSweep(id) {
+  const data = await requestJson(`/api/tokens/${id}/volume/sweep`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return {
+    ok: bool(data.ok, true),
+    walletsTotal: num(data.walletsTotal),
+    walletsSwept: num(data.walletsSwept),
+    soldTokens: num(data.soldTokens),
+    sweptSol: num(data.sweptSol),
+    txCreated: num(data.txCreated),
+  };
+}
+
+export async function apiVolumeWithdraw(id, payload) {
+  const data = await requestJson(`/api/tokens/${id}/volume/withdraw`, {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+  return {
+    ok: bool(data.ok, true),
+    signature: str(data.signature),
+    sentSol: num(data.sentSol),
+    remainingSol: num(data.remainingSol),
+  };
+}
+
 export async function apiDeleteToken(id) {
   const data = await requestJson(`/api/tokens/${id}`, { method: "DELETE" });
   return { ok: bool(data.ok, true) };

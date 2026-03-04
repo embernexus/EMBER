@@ -6,6 +6,9 @@ import {
   apiDeleteToken,
   apiDashboard,
   apiGenerateDepositAddress,
+  apiVolumeSweep,
+  apiVolumeWithdraw,
+  apiVolumeWithdrawOptions,
   apiTokenLiveDetails,
   apiPublicMetrics,
   apiUpdateToken,
@@ -211,6 +214,18 @@ export default function App() {
     return true;
   }, [loadDashboard]);
 
+  const handleVolumeSweep = useCallback(async (tokenId) => {
+    const result = await apiVolumeSweep(tokenId);
+    await loadDashboard();
+    return result;
+  }, [loadDashboard]);
+
+  const handleVolumeWithdraw = useCallback(async (tokenId, payload) => {
+    const result = await apiVolumeWithdraw(tokenId, payload || {});
+    await loadDashboard();
+    return result;
+  }, [loadDashboard]);
+
   const onNavItemClick = useCallback((item) => {
     if (!item.enabled) return;
 
@@ -331,6 +346,9 @@ export default function App() {
           onUpdateToken={handleTokenUpdate}
           onDeleteToken={handleTokenDelete}
           onFetchTokenDetails={apiTokenLiveDetails}
+          onFetchVolumeWithdrawOptions={apiVolumeWithdrawOptions}
+          onVolumeSweep={handleVolumeSweep}
+          onVolumeWithdraw={handleVolumeWithdraw}
         />
       )}
 

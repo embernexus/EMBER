@@ -4,7 +4,20 @@ import TokenCard from "../components/dashboard/TokenCard";
 import { useI18n } from "../i18n/I18nProvider";
 import { fmt, fmtFull } from "../lib/format";
 
-export default function DashboardPage({ user, tokens, allLogs, chartData, feed, onShowAttach, onUpdateToken, onDeleteToken, onFetchTokenDetails }) {
+export default function DashboardPage({
+  user,
+  tokens,
+  allLogs,
+  chartData,
+  feed,
+  onShowAttach,
+  onUpdateToken,
+  onDeleteToken,
+  onFetchTokenDetails,
+  onFetchVolumeWithdrawOptions,
+  onVolumeSweep,
+  onVolumeWithdraw,
+}) {
   const { t } = useI18n();
   const totalBurned = tokens.reduce((sum, t) => sum + (Number(t.burned) || 0), 0);
   const activeCount = tokens.filter((t) => t.active).length;
@@ -72,6 +85,9 @@ export default function DashboardPage({ user, tokens, allLogs, chartData, feed, 
               onUpdate={onUpdateToken}
               onDelete={onDeleteToken}
               onFetchDetails={onFetchTokenDetails}
+              onFetchVolumeWithdrawOptions={onFetchVolumeWithdrawOptions}
+              onVolumeSweep={onVolumeSweep}
+              onVolumeWithdraw={onVolumeWithdraw}
             />
           ))}
 

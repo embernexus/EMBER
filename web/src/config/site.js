@@ -21,8 +21,8 @@ export const SOLANA_WEBSITE_URL = envOr(import.meta.env.VITE_SOLANA_URL, "https:
 
 export const SOCIAL_LINKS = {
   x: envOr(import.meta.env.VITE_X_URL, "https://x.com/satoshEH_"),
-  telegram: envOr(import.meta.env.VITE_TELEGRAM_URL, "https://t.me/"),
-  github: envOr(import.meta.env.VITE_GITHUB_URL, "https://github.com/"),
+  telegram: envOr(import.meta.env.VITE_TELEGRAM_URL, "https://t.me/ember_nexus"),
+  github: envOr(import.meta.env.VITE_GITHUB_URL, "https://github.com/embernexus"),
 };
 
 export const NAV_SOCIALS = [

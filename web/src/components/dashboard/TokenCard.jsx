@@ -370,7 +370,16 @@ function DeleteConfirmModal({ onClose, onConfirm, deleting, disableConfirm, reas
   );
 }
 
-export default function TokenCard({ token, onUpdate, allLogs, onDelete, onFetchDetails }) {
+export default function TokenCard({
+  token,
+  onUpdate,
+  allLogs,
+  onDelete,
+  onFetchDetails,
+  onFetchVolumeWithdrawOptions,
+  onVolumeSweep,
+  onVolumeWithdraw,
+}) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState("overview");
   const [editing, setEditing] = useState(false);
@@ -385,6 +394,12 @@ export default function TokenCard({ token, onUpdate, allLogs, onDelete, onFetchD
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [showCardImage, setShowCardImage] = useState(Boolean(normalizeImageUrl(token.pictureUrl)));
+  const [sweeping, setSweeping] = useState(false);
+  const [withdrawLoading, setWithdrawLoading] = useState(false);
+  const [withdrawing, setWithdrawing] = useState(false);
+  const [showWithdrawModal, setShowWithdrawModal] = useState(false);
+  const [withdrawOptions, setWithdrawOptions] = useState(null);
+  const [actionMsg, setActionMsg] = useState("");
   const clamp01 = (v) => Math.max(0.001, Number(v) || 0.001);
   const deriveMaxTradeSol = (minTrade, aggression) => {
     const min = clamp01(minTrade);
