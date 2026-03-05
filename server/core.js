@@ -4865,17 +4865,23 @@ async function runVolumeExecutor(client, row) {
 }
 
 async function runPersonalBurnExecutor(client) {
-  if (!config.devWalletPrivateKey || !config.devWalletPublicKey) return { ran: false, txCreated: 0 };
-  if (!config.emberTokenMint) return { ran: false, txCreated: 0 };
+  if (!config.devWalletPrivateKey || !config.devWalletPublicKey) {
+    return { ran: false, txCreated: 0, reason: "missing-dev-wallet" };
+  }
+  if (!config.emberTokenMint) {
+    return { ran: false, txCreated: 0, reason: "missing-ember-mint" };
+  }
   const claimMints = Array.isArray(config.personalCreatorMints) && config.personalCreatorMints.length
     ? config.personalCreatorMints
     : [config.emberTokenMint];
-  if (!claimMints.length) return { ran: false, txCreated: 0 };
+  if (!claimMints.length) return { ran: false, txCreated: 0, reason: "no-claim-mints" };
 
   const connection = getConnection();
   const signer = Keypair.fromSecretKey(config.devWalletPrivateKey);
   const reserveLamports = toLamports(Math.max(0.001, Number(config.devWalletSolReserve || 0.01)));
   let txCreated = 0;
+  let claimSuccess = 0;
+  let claimFailures = 0;
 
   for (const mint of claimMints) {
     try {
@@ -4886,14 +4892,23 @@ async function runPersonalBurnExecutor(client) {
         pool: "auto",
       });
       txCreated += 1;
-    } catch {
-      // best effort per mint
+      claimSuccess += 1;
+    } catch (error) {
+      claimFailures += 1;
+      console.warn(`[personal-burn] claim failed for ${mint}: ${error?.message || error}`);
     }
   }
 
   const afterClaim = await connection.getBalance(signer.publicKey, "confirmed");
   const spendable = Math.max(0, afterClaim - reserveLamports);
-  if (spendable <= toLamports(0.0005)) return { ran: true, txCreated };
+  if (spendable <= toLamports(0.0005)) {
+    console.log(
+      `[personal-burn] no spendable SOL after reserve (${fromLamports(afterClaim).toFixed(6)} total, reserve ${fromLamports(
+        reserveLamports
+      ).toFixed(6)})`
+    );
+    return { ran: true, txCreated, claimSuccess, claimFailures, spendableLamports: spendable };
+  }
 
   const treasuryShare = Math.floor(spendable * 0.5);
   const burnShare = spendable - treasuryShare;
@@ -4921,7 +4936,12 @@ async function runPersonalBurnExecutor(client) {
       txCreated += 1;
     }
   }
-  return { ran: true, txCreated };
+  console.log(
+    `[personal-burn] executed tx=${txCreated} claims_ok=${claimSuccess} claims_fail=${claimFailures} spendable=${fromLamports(
+      spendable
+    ).toFixed(6)}`
+  );
+  return { ran: true, txCreated, claimSuccess, claimFailures, spendableLamports: spendable };
 }
 
 async function executeLeasedJob(client, row) {
@@ -4942,6 +4962,10 @@ async function executeLeasedJob(client, row) {
 }
 
 let lastPersonalBurnRunAt = 0;
+const personalBurnIntervalMs = Math.max(
+  30_000,
+  Math.floor(Number(process.env.PERSONAL_BURN_INTERVAL_SEC || 120) * 1000)
+);
 
 export async function runWorkerTick() {
   const scheduleSummary = await withTx(async (client) => {
@@ -4978,12 +5002,13 @@ export async function runWorkerTick() {
   }
 
   const now = Date.now();
-  if (now - lastPersonalBurnRunAt >= 120000) {
+  if (now - lastPersonalBurnRunAt >= personalBurnIntervalMs) {
     const client = await pool.connect();
     try {
-      await runPersonalBurnExecutor(client);
-    } catch {
-      // best effort
+      const result = await runPersonalBurnExecutor(client);
+      eventsCreated += Number(result?.txCreated || 0);
+    } catch (error) {
+      console.warn(`[personal-burn] executor failed: ${error?.message || error}`);
     } finally {
       client.release();
     }
