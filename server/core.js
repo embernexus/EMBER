@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import bcrypt from "bcryptjs";
@@ -21,11 +22,12 @@ import {
   createTransferInstruction,
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
-import pumpSdkPkg from "@pump-fun/pump-sdk/dist/index.js";
 import { config } from "./config.js";
 import { makeId, makeSessionToken, pool, withTx } from "./db.js";
 import { fmtInt, resolveMint } from "./utils.js";
 
+const require = createRequire(import.meta.url);
+const pumpSdkPkg = require("@pump-fun/pump-sdk");
 const {
   OnlinePumpSdk,
   PumpSdk,
