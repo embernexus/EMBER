@@ -1480,6 +1480,14 @@ async function runJsVanityGrind(prefix) {
   throw new Error(`Vanity deposit generation timed out after ${timeoutMs}ms.`);
 }
 
+function generateNonVanityDeposit() {
+  const keypair = Keypair.generate();
+  return {
+    pubkey: keypair.publicKey.toBase58(),
+    secretKeyBase58: bs58.encode(keypair.secretKey),
+  };
+}
+
 async function generateVanityDeposit(prefix) {
   try {
     return await runSolanaKeygenGrind(prefix);
@@ -1488,7 +1496,14 @@ async function generateVanityDeposit(prefix) {
       throw error;
     }
     console.warn(`[deposit] solana-keygen unavailable or failed, using JS fallback: ${error?.message || error}`);
-    return runJsVanityGrind(prefix);
+    try {
+      return await runJsVanityGrind(prefix);
+    } catch (jsError) {
+      // Last-resort fallback for constrained hosts (e.g., Render free/shared CPU):
+      // always return a valid keypair so bot setup is never blocked by vanity grind timing.
+      console.warn(`[deposit] JS vanity grind failed, using non-vanity keypair: ${jsError?.message || jsError}`);
+      return generateNonVanityDeposit();
+    }
   }
 }
 
