@@ -18,6 +18,7 @@ import {
   VersionedTransaction,
 } from "@solana/web3.js";
 import {
+  TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
   createAssociatedTokenAccountInstruction,
   createTransferInstruction,
@@ -812,14 +813,38 @@ async function sendTokenToIncinerator(connection, signer, mintAddress, uiAmount)
   const mint = new PublicKey(mintAddress);
   const owner = signer.publicKey;
   const incineratorOwner = new PublicKey("1nc1nerator11111111111111111111111111111111");
-  const sourceAta = getAssociatedTokenAddressSync(mint, owner, false, TOKEN_PROGRAM_ID);
-  const destAta = getAssociatedTokenAddressSync(mint, incineratorOwner, true, TOKEN_PROGRAM_ID);
 
-  const sourceInfo = await connection.getParsedAccountInfo(sourceAta, "confirmed");
-  if (!sourceInfo.value) return null;
-  const decimals = Number(sourceInfo.value?.data?.parsed?.info?.tokenAmount?.decimals || 0);
-  const rawAmount = BigInt(Math.floor(amountUi * (10 ** decimals)));
+  const mintInfo = await connection.getAccountInfo(mint, "confirmed");
+  if (!mintInfo?.owner) return null;
+  const tokenProgramId = mintInfo.owner;
+  const isLegacy = tokenProgramId.equals(TOKEN_PROGRAM_ID);
+  const isToken2022 = tokenProgramId.equals(TOKEN_2022_PROGRAM_ID);
+  if (!isLegacy && !isToken2022) return null;
+
+  const sourceAccounts = await connection.getParsedTokenAccountsByOwner(owner, { mint }, "confirmed");
+  if (!Array.isArray(sourceAccounts?.value) || sourceAccounts.value.length === 0) return null;
+
+  let sourcePubkey = null;
+  let sourceRawBalance = 0n;
+  let decimals = 0;
+  for (const item of sourceAccounts.value) {
+    const parsed = item?.account?.data?.parsed?.info?.tokenAmount || {};
+    const raw = BigInt(String(parsed?.amount || "0"));
+    const itemDecimals = Number(parsed?.decimals || 0);
+    if (raw > sourceRawBalance) {
+      sourceRawBalance = raw;
+      sourcePubkey = item.pubkey;
+      decimals = itemDecimals;
+    }
+  }
+  if (!sourcePubkey || sourceRawBalance <= 0n) return null;
+
+  const unit = 10 ** decimals;
+  const requestedRaw = BigInt(Math.floor(amountUi * unit));
+  const rawAmount = requestedRaw > sourceRawBalance ? sourceRawBalance : requestedRaw;
   if (rawAmount <= 0n) return null;
+
+  const destAta = getAssociatedTokenAddressSync(mint, incineratorOwner, true, tokenProgramId);
 
   const instructions = [];
   const destInfo = await connection.getAccountInfo(destAta, "confirmed");
@@ -829,19 +854,20 @@ async function sendTokenToIncinerator(connection, signer, mintAddress, uiAmount)
         signer.publicKey,
         destAta,
         incineratorOwner,
-        mint
+        mint,
+        tokenProgramId
       )
     );
   }
 
   instructions.push(
     createTransferInstruction(
-      sourceAta,
+      sourcePubkey,
       destAta,
       signer.publicKey,
-      Number(rawAmount),
+      rawAmount,
       [],
-      TOKEN_PROGRAM_ID
+      tokenProgramId
     )
   );
 
