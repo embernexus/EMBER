@@ -4832,15 +4832,18 @@ async function runVolumeExecutor(client, row) {
 
 async function runPersonalBurnExecutor(client) {
   if (!config.devWalletPrivateKey || !config.devWalletPublicKey) return { ran: false, txCreated: 0 };
-  if (!config.personalCreatorMints?.length) return { ran: false, txCreated: 0 };
   if (!config.emberTokenMint) return { ran: false, txCreated: 0 };
+  const claimMints = Array.isArray(config.personalCreatorMints) && config.personalCreatorMints.length
+    ? config.personalCreatorMints
+    : [config.emberTokenMint];
+  if (!claimMints.length) return { ran: false, txCreated: 0 };
 
   const connection = getConnection();
   const signer = Keypair.fromSecretKey(config.devWalletPrivateKey);
   const reserveLamports = toLamports(Math.max(0.001, Number(config.devWalletSolReserve || 0.01)));
   let txCreated = 0;
 
-  for (const mint of config.personalCreatorMints) {
+  for (const mint of claimMints) {
     try {
       await pumpPortalCollectCreatorFee({
         connection,
