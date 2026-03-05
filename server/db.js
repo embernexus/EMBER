@@ -1,11 +1,7 @@
-﻿import crypto from "node:crypto";
-import { Pool } from "pg";
+import crypto from "node:crypto";`r`nimport dns from "node:dns";`r`nimport { Pool } from "pg";
 import { config } from "./config.js";
 
-if (!config.databaseUrl) {
-  throw new Error("DATABASE_URL is required.");
-}
-
+if (!config.databaseUrl) {`r`n  throw new Error("DATABASE_URL is required.");`r`n}`r`n`r`ntry {`r`n  // Prefer IPv4 first to avoid ENETUNREACH when host IPv6 egress is unavailable.`r`n  const order =`r`n    String(process.env.DNS_RESULT_ORDER || "").trim().toLowerCase() === "verbatim"`r`n      ? "verbatim"`r`n      : "ipv4first";`r`n  dns.setDefaultResultOrder(order);`r`n} catch {`r`n  // best effort`r`n}`r`n`r`n
 export const pool = new Pool({
   connectionString: config.databaseUrl,
   ssl: process.env.PGSSLMODE === "disable" ? false : { rejectUnauthorized: false },
