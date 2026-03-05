@@ -14,7 +14,10 @@ export const EMBER_TREASURY_WALLET = envOr(
   import.meta.env.VITE_EMBER_TREASURY_WALLET,
   "EMBERDnVaS8rc3mVVRjaiciCdFVCJdu2h22bYWeAm953"
 );
-export const EMBER_TOKEN_CONTRACT = envOr(import.meta.env.VITE_EMBER_TOKEN_CONTRACT, "xxxxx");
+export const EMBER_TOKEN_CONTRACT = envOr(
+  import.meta.env.VITE_EMBER_TOKEN_CONTRACT,
+  "EMBEReyhmvbc6hfdFsvkfLf4eb4jdKSoybnbJ8oUzL66"
+);
 
 export const BUY_EMBER_URL = envOr(import.meta.env.VITE_BUY_EMBER_URL, "https://pump.fun");
 export const SOLANA_WEBSITE_URL = envOr(import.meta.env.VITE_SOLANA_URL, "https://solana.com");
