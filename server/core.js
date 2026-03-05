@@ -824,24 +824,23 @@ async function sendTokenToIncinerator(connection, signer, mintAddress, uiAmount)
   const sourceAccounts = await connection.getParsedTokenAccountsByOwner(owner, { mint }, "confirmed");
   if (!Array.isArray(sourceAccounts?.value) || sourceAccounts.value.length === 0) return null;
 
-  let sourcePubkey = null;
-  let sourceRawBalance = 0n;
   let decimals = 0;
+  const parsedSources = [];
+  let totalRawBalance = 0n;
   for (const item of sourceAccounts.value) {
     const parsed = item?.account?.data?.parsed?.info?.tokenAmount || {};
     const raw = BigInt(String(parsed?.amount || "0"));
     const itemDecimals = Number(parsed?.decimals || 0);
-    if (raw > sourceRawBalance) {
-      sourceRawBalance = raw;
-      sourcePubkey = item.pubkey;
-      decimals = itemDecimals;
-    }
+    if (!decimals) decimals = itemDecimals;
+    if (raw <= 0n) continue;
+    parsedSources.push({ pubkey: item.pubkey, raw });
+    totalRawBalance += raw;
   }
-  if (!sourcePubkey || sourceRawBalance <= 0n) return null;
+  if (!parsedSources.length || totalRawBalance <= 0n) return null;
 
   const unit = 10 ** decimals;
   const requestedRaw = BigInt(Math.floor(amountUi * unit));
-  const rawAmount = requestedRaw > sourceRawBalance ? sourceRawBalance : requestedRaw;
+  const rawAmount = requestedRaw > totalRawBalance ? totalRawBalance : requestedRaw;
   if (rawAmount <= 0n) return null;
 
   const destAta = getAssociatedTokenAddressSync(mint, incineratorOwner, true, tokenProgramId);
@@ -860,16 +859,25 @@ async function sendTokenToIncinerator(connection, signer, mintAddress, uiAmount)
     );
   }
 
-  instructions.push(
-    createTransferInstruction(
-      sourcePubkey,
-      destAta,
-      signer.publicKey,
-      rawAmount,
-      [],
-      tokenProgramId
-    )
-  );
+  let remaining = rawAmount;
+  parsedSources.sort((a, b) => (a.raw > b.raw ? -1 : a.raw < b.raw ? 1 : 0));
+  for (const source of parsedSources) {
+    if (remaining <= 0n) break;
+    const take = source.raw > remaining ? remaining : source.raw;
+    if (take <= 0n) continue;
+    instructions.push(
+      createTransferInstruction(
+        source.pubkey,
+        destAta,
+        signer.publicKey,
+        take,
+        [],
+        tokenProgramId
+      )
+    );
+    remaining -= take;
+  }
+  if (remaining > 0n) return null;
 
   const latest = await connection.getLatestBlockhash("confirmed");
   const tx = new Transaction({
