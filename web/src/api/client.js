@@ -1,6 +1,6 @@
 import { API_BASE } from "../config/site";
 
-/** @typedef {{ id: string, symbol: string, name: string, mint: string, pictureUrl: string, deposit: string, claimSec: number, burnSec: number, splits: number, selectedBot: string, active: boolean, disconnected: boolean, burned: number, pending: number, txCount: number, moduleType: string, moduleEnabled: boolean, moduleConfig: Record<string, any>, moduleState: Record<string, any>, moduleLastError: string }} Token */
+/** @typedef {{ id: string, symbol: string, name: string, mint: string, pictureUrl: string, deposit: string, claimSec: number, burnSec: number, splits: number, selectedBot: string, active: boolean, disconnected: boolean, burned: number, pending: number, txCount: number, marketCap: number, moduleType: string, moduleEnabled: boolean, moduleConfig: Record<string, any>, moduleState: Record<string, any>, moduleLastError: string }} Token */
 /** @typedef {{ id: number|string, tokenId: string|null, token: string, moduleType: string, type: string, amount: number, msg: string, tx: string|null, age: number, createdAt: string }} FeedEvent */
 /** @typedef {{ key: string, d: string, v: number }} ChartPoint */
 /** @typedef {{ tokens: Token[], feed: FeedEvent[], logs: FeedEvent[], chartData: ChartPoint[] }} DashboardResponse */
@@ -97,6 +97,7 @@ function toToken(value) {
     burned: num(value.burned),
     pending: num(value.pending),
     txCount: num(value.txCount),
+    marketCap: num(value.marketCap),
     moduleType: str(value.moduleType, str(value.selectedBot, "burn")),
     moduleEnabled: bool(value.moduleEnabled, bool(value.active)),
     moduleConfig: isRecord(value.moduleConfig) ? value.moduleConfig : {},
@@ -210,6 +211,7 @@ export async function apiTokenLiveDetails(id) {
   const data = await requestJson(`/api/tokens/${id}/details`, { method: "GET" });
   const token = isRecord(data.token) ? data.token : {};
   const addresses = Array.isArray(data.addresses) ? data.addresses : [];
+  const creatorRewards = isRecord(data.creatorRewards) ? data.creatorRewards : {};
   return {
     token: {
       id: str(token.id),
@@ -231,6 +233,18 @@ export async function apiTokenLiveDetails(id) {
     totals: isRecord(data.totals)
       ? { sol: num(data.totals.sol), token: num(data.totals.token) }
       : { sol: 0, token: 0 },
+    creatorRewards: {
+      profileUrl: str(creatorRewards.profileUrl),
+      directSol: num(creatorRewards.directSol),
+      shareableSol: num(creatorRewards.shareableSol),
+      distributableSol: num(creatorRewards.distributableSol),
+      totalSol: num(creatorRewards.totalSol),
+      shareableEnabled: bool(creatorRewards.shareableEnabled),
+      isShareholder: bool(creatorRewards.isShareholder),
+      shareBps: num(creatorRewards.shareBps),
+      canDistribute: bool(creatorRewards.canDistribute),
+      isGraduated: bool(creatorRewards.isGraduated),
+    },
   };
 }
 

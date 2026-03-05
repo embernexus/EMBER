@@ -188,6 +188,7 @@ export const DOC_SECTIONS = [
     points: [
       "Each module can run on creator rewards only, external funding only, or hybrid mode.",
       "Creator reward claiming can be enabled/disabled per module where supported; if disabled, the module executes only from external deposits.",
+      "Shared/designated creator rewards can take a few minutes to become claimable; temporary 0.00 claimable states can occur before balances update.",
       "Protocol-owned creator rewards are allocated 50% to treasury and 50% to EMBER buyback + burn.",
       "Burn Bot: reward-to-buyback-to-incineration automation.",
       "Volume Bot: controlled market activity for stronger visibility.",
@@ -262,6 +263,10 @@ export const DOC_FAQ = [
   {
     q: "Can bots run from external funding only?",
     a: "Yes. For supported modules, disable creator-reward claiming and fund the bot wallet directly with SOL. The bot will execute using external funding only.",
+  },
+  {
+    q: "Why does claimable creator rewards sometimes show 0.00?",
+    a: "For shared/designated creator rewards, claimable balances are not always instant. It can take a few minutes before rewards appear as claimable.",
   },
   {
     q: "Why do bot wallets start with EMBR/EMBER?",

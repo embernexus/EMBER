@@ -7,6 +7,7 @@ import {
   apiDashboard,
   apiBurnWithdraw,
   apiGenerateDepositAddress,
+  apiResolveMint,
   apiVolumeSweep,
   apiVolumeWithdraw,
   apiVolumeWithdrawOptions,
@@ -15,6 +16,7 @@ import {
   apiUpdateToken,
   isApiError,
 } from "./api/client";
+import { EMBER_TOKEN_CONTRACT } from "./config/site";
 import { Embers, FireBg } from "./components/BackgroundFX";
 import TokenTicker from "./components/dashboard/TokenTicker";
 import Footer from "./components/layout/Footer";
@@ -42,6 +44,11 @@ const DEFAULT_PUBLIC_METRICS = {
   totalFeesTakenSol: 0,
 };
 const DASHBOARD_POLL_MS = 5000;
+const DEFAULT_EMBER_MINT = "xxxxx";
+
+function normalizedMint(value) {
+  return String(value || "").trim();
+}
 
 export default function App() {
   const [page, setPage] = useState("home");
@@ -57,6 +64,18 @@ export default function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [publicMetrics, setPublicMetrics] = useState(DEFAULT_PUBLIC_METRICS);
   const [activeOverrides, setActiveOverrides] = useState({});
+  const [emberTickerMeta, setEmberTickerMeta] = useState({
+    mint: "",
+    symbol: "",
+    name: "",
+    pictureUrl: "",
+  });
+
+  const configuredTickerMint = useMemo(() => {
+    const mint = normalizedMint(EMBER_TOKEN_CONTRACT);
+    if (!mint || mint === DEFAULT_EMBER_MINT) return "";
+    return mint;
+  }, []);
 
   const clearPrivateState = useCallback(() => {
     setTokens([]);
@@ -75,6 +94,88 @@ export default function App() {
       }),
     [tokens, activeOverrides]
   );
+
+  useEffect(() => {
+    if (!configuredTickerMint || !user) return;
+    const hasConfiguredToken = tokensForUi.some((t) => normalizedMint(t?.mint) === configuredTickerMint);
+    if (hasConfiguredToken) return;
+    if (normalizedMint(emberTickerMeta.mint) === configuredTickerMint) return;
+
+    let cancelled = false;
+    apiResolveMint(configuredTickerMint)
+      .then((meta) => {
+        if (cancelled) return;
+        setEmberTickerMeta({
+          mint: configuredTickerMint,
+          symbol: String(meta?.symbol || "").trim(),
+          name: String(meta?.name || "").trim(),
+          pictureUrl: String(meta?.pictureUrl || "").trim(),
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setEmberTickerMeta({
+          mint: configuredTickerMint,
+          symbol: "",
+          name: "",
+          pictureUrl: "",
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [configuredTickerMint, user, tokensForUi, emberTickerMeta.mint]);
+
+  const tickerTokens = useMemo(() => {
+    if (!configuredTickerMint) return tokensForUi;
+
+    const forcedBurning = (token, fallback = {}) => ({
+      ...token,
+      ...fallback,
+      active: true,
+      disconnected: false,
+      selectedBot: "burn",
+      moduleType: "burn",
+      burned: Number(publicMetrics?.emberIncinerated) || Number(token?.burned) || 0,
+    });
+
+    const existing = tokensForUi.find((t) => normalizedMint(t?.mint) === configuredTickerMint);
+    if (existing) {
+      return tokensForUi.map((t) => {
+        if (normalizedMint(t?.mint) !== configuredTickerMint) return t;
+        return forcedBurning(t, {
+          symbol: String(t?.symbol || emberTickerMeta.symbol || "EMBER").toUpperCase(),
+          name: String(t?.name || emberTickerMeta.name || "EMBER"),
+          pictureUrl: String(t?.pictureUrl || emberTickerMeta.pictureUrl || ""),
+        });
+      });
+    }
+
+    return [
+      ...tokensForUi,
+      forcedBurning(
+        {
+          id: "ember-ticker",
+          mint: configuredTickerMint,
+          symbol: "EMBER",
+          name: "EMBER",
+          pictureUrl: "",
+          txCount: 0,
+          marketCap: 0,
+          pending: 0,
+          claimSec: 0,
+          burnSec: 0,
+          splits: 1,
+        },
+        {
+          symbol: String(emberTickerMeta.symbol || "EMBER").toUpperCase(),
+          name: String(emberTickerMeta.name || "EMBER"),
+          pictureUrl: String(emberTickerMeta.pictureUrl || ""),
+        }
+      ),
+    ];
+  }, [tokensForUi, configuredTickerMint, emberTickerMeta, publicMetrics?.emberIncinerated]);
 
   const loadDashboard = useCallback(async () => {
     const data = await apiDashboard();
@@ -371,7 +472,7 @@ export default function App() {
         onBrandClick={handleBrandClick}
       />
 
-      <TokenTicker tokens={tokensForUi} />
+      <TokenTicker tokens={tickerTokens} />
       <div style={{ height: 102 }} />
 
       {page === "home" && (

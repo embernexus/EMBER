@@ -21,6 +21,12 @@ function activeStatus(token) {
   return "BURNING";
 }
 
+function fmtMarketCap(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return "$0";
+  return `$${fmt(n)}`;
+}
+
 export default function TokenTicker({ tokens }) {
   if(!tokens.length){
     return (
@@ -64,6 +70,9 @@ export default function TokenTicker({ tokens }) {
               </span>
               <span style={{fontSize:11,color:"rgba(255,255,255,.4)"}}>
                 {metric.icon} {metric.value}{metric.label ? ` ${metric.label}` : ""}
+              </span>
+              <span style={{fontSize:11,color:"rgba(255,255,255,.4)"}}>
+                MC {fmtMarketCap(t.marketCap)}
               </span>
                   </>
                 );

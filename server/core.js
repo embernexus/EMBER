@@ -66,6 +66,7 @@ function toToken(row) {
     ),
     pending: Number(row.pending),
     txCount: Number(row.tx_count),
+    marketCap: Number(row.market_cap) || 0,
     moduleType: String(row.module_type || row.selected_bot || "burn"),
     moduleEnabled:
       typeof row.module_enabled === "boolean"
@@ -429,6 +430,132 @@ function moduleConfigIntervalSec(moduleType, configJson = {}) {
   const claimSec = Math.max(60, Math.floor(Number(configJson.claimIntervalSec ?? 120)));
   const loopSec = claimEnabled ? Math.min(burnSec, claimSec) : burnSec;
   return Math.max(5, loopSec);
+}
+
+const MARKET_CAP_REFRESH_MS = 10_000;
+const MARKET_CAP_RETRY_MS = 7_500;
+const MARKET_CAP_CACHE_MAX = 2_000;
+const marketCapCache = new Map();
+
+function parseNumberish(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  if (typeof value === "string") {
+    const cleaned = value.replace(/[$,\s]/g, "");
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+function pickDexPairForMint(pairs, mint) {
+  const list = Array.isArray(pairs) ? pairs : [];
+  const relevant = list.filter((pair) => {
+    const base = String(pair?.baseToken?.address || "");
+    const quote = String(pair?.quoteToken?.address || "");
+    return base === mint || quote === mint;
+  });
+  const candidates = relevant.length ? relevant : list;
+  if (!candidates.length) return null;
+  return candidates
+    .slice()
+    .sort((a, b) => parseNumberish(b?.liquidity?.usd) - parseNumberish(a?.liquidity?.usd))[0];
+}
+
+async function fetchMarketCapViaDexscreener(mint) {
+  const data = await fetchJsonWithTimeout(
+    `https://api.dexscreener.com/latest/dex/tokens/${mint}`,
+    {},
+    3500
+  );
+  const pair = pickDexPairForMint(data?.pairs || [], mint);
+  if (!pair) return 0;
+  const marketCap = parseNumberish(pair?.marketCap);
+  if (marketCap > 0) return marketCap;
+  const fdv = parseNumberish(pair?.fdv);
+  return fdv > 0 ? fdv : 0;
+}
+
+async function fetchMarketCapViaPump(mint) {
+  const data = await fetchJsonWithTimeout(`https://frontend-api.pump.fun/coins/${mint}`, {}, 3500);
+  if (!data || typeof data !== "object") return 0;
+  const fields = [
+    data.usd_market_cap,
+    data.market_cap,
+    data.marketCap,
+    data.usdMarketCap,
+    data.fdv,
+  ];
+  for (const field of fields) {
+    const value = parseNumberish(field);
+    if (value > 0) return value;
+  }
+  return 0;
+}
+
+async function fetchMarketCapUsd(mint) {
+  const dex = await fetchMarketCapViaDexscreener(mint);
+  if (dex > 0) return dex;
+  const pump = await fetchMarketCapViaPump(mint);
+  return pump > 0 ? pump : 0;
+}
+
+function getMarketCapEntry(mint) {
+  const key = String(mint || "").trim();
+  if (!key) return null;
+  let entry = marketCapCache.get(key);
+  if (!entry) {
+    entry = { value: 0, at: 0, nextRefreshAt: 0, inflight: null };
+    marketCapCache.set(key, entry);
+    if (marketCapCache.size > MARKET_CAP_CACHE_MAX) {
+      const oldest = marketCapCache.keys().next().value;
+      if (oldest) marketCapCache.delete(oldest);
+    }
+  }
+  return entry;
+}
+
+function scheduleMarketCapRefresh(mint, entry) {
+  if (!entry || entry.inflight) return;
+  entry.inflight = (async () => {
+    try {
+      const value = await fetchMarketCapUsd(mint);
+      entry.value = value > 0 ? value : 0;
+      entry.at = Date.now();
+      entry.nextRefreshAt = entry.at + MARKET_CAP_REFRESH_MS;
+    } catch {
+      entry.nextRefreshAt = Date.now() + MARKET_CAP_RETRY_MS;
+    } finally {
+      entry.inflight = null;
+    }
+  })();
+}
+
+function readCachedMarketCapUsd(mint) {
+  const key = String(mint || "").trim();
+  if (!key) return 0;
+  const entry = getMarketCapEntry(key);
+  if (!entry) return 0;
+  if (Date.now() >= Number(entry.nextRefreshAt || 0)) {
+    scheduleMarketCapRefresh(key, entry);
+  }
+  return Number(entry.value) || 0;
+}
+
+function attachMarketCaps(rows) {
+  if (!Array.isArray(rows) || !rows.length) return [];
+  const byMint = new Map();
+  for (const row of rows) {
+    const mint = String(row?.mint || "").trim();
+    if (!mint || byMint.has(mint)) continue;
+    byMint.set(mint, readCachedMarketCapUsd(mint));
+  }
+  return rows.map((row) => {
+    const mint = String(row?.mint || "").trim();
+    return {
+      ...row,
+      market_cap: Number(byMint.get(mint)) || 0,
+    };
+  });
 }
 
 function defaultBurnModuleConfig(tokenRow) {
@@ -866,6 +993,146 @@ async function tryDistributeSharingCreatorFees({ connection, signer, mint }) {
     claimedLamports,
     isGraduated: Boolean(distribution?.isGraduated),
   };
+}
+
+function buildPumpCreatorRewardsProfileUrl(wallet) {
+  const addr = String(wallet || "").trim();
+  if (!addr) return "";
+  return `https://pump.fun/profile/${encodeURIComponent(addr)}?tab=creator-rewards`;
+}
+
+function bnToLamportsNumber(value) {
+  if (!value) return 0;
+  try {
+    const raw = String(value.toString?.() ?? value ?? "0");
+    const bi = BigInt(raw);
+    if (bi <= 0n) return 0;
+    const maxSafe = BigInt(Number.MAX_SAFE_INTEGER);
+    return Number(bi > maxSafe ? maxSafe : bi);
+  } catch {
+    return 0;
+  }
+}
+
+const CREATOR_REWARDS_CACHE_TTL_MS = 20_000;
+const CREATOR_REWARDS_CACHE_MAX = 1500;
+const creatorRewardsCache = new Map();
+
+function readCreatorRewardsCache(key) {
+  const hit = creatorRewardsCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - Number(hit.at || 0) > CREATOR_REWARDS_CACHE_TTL_MS) return null;
+  return hit.value || null;
+}
+
+function writeCreatorRewardsCache(key, value) {
+  creatorRewardsCache.set(key, { at: Date.now(), value });
+  if (creatorRewardsCache.size > CREATOR_REWARDS_CACHE_MAX) {
+    const oldest = creatorRewardsCache.keys().next().value;
+    if (oldest) creatorRewardsCache.delete(oldest);
+  }
+}
+
+async function getCreatorRewardsPreview({ connection, mint, wallet }) {
+  const mintText = String(mint || "").trim();
+  const walletText = String(wallet || "").trim();
+  const profileUrl = buildPumpCreatorRewardsProfileUrl(walletText);
+  const result = {
+    profileUrl,
+    directLamports: 0,
+    shareableLamports: 0,
+    distributableLamports: 0,
+    totalLamports: 0,
+    directSol: 0,
+    shareableSol: 0,
+    distributableSol: 0,
+    totalSol: 0,
+    shareableEnabled: false,
+    isShareholder: false,
+    shareBps: 0,
+    canDistribute: false,
+    isGraduated: false,
+  };
+
+  if (!mintText || !walletText) return result;
+  const cacheKey = `${mintText}:${walletText}`;
+  const cached = readCreatorRewardsCache(cacheKey);
+  if (cached) return cached;
+
+  if (!OnlinePumpSdk || !pumpOfflineSdk || !feeSharingConfigPda) {
+    writeCreatorRewardsCache(cacheKey, result);
+    return result;
+  }
+
+  let mintPk;
+  let walletPk;
+  try {
+    mintPk = new PublicKey(mintText);
+    walletPk = new PublicKey(walletText);
+  } catch {
+    writeCreatorRewardsCache(cacheKey, result);
+    return result;
+  }
+
+  const onlineSdk = new OnlinePumpSdk(connection);
+
+  try {
+    const directBn = await onlineSdk.getCreatorVaultBalanceBothPrograms(walletPk);
+    result.directLamports = Math.max(0, bnToLamportsNumber(directBn));
+  } catch {
+    result.directLamports = 0;
+  }
+
+  try {
+    const sharingConfigAddress = feeSharingConfigPda(mintPk);
+    const sharingInfo = await connection.getAccountInfo(sharingConfigAddress, "confirmed");
+    if (sharingInfo) {
+      result.shareableEnabled = true;
+      const sharingConfig = pumpOfflineSdk.decodeSharingConfig(sharingInfo);
+      const shareholders = Array.isArray(sharingConfig?.shareholders)
+        ? sharingConfig.shareholders
+        : [];
+      const shareholder = shareholders.find((item) =>
+        item?.address?.equals?.(walletPk)
+      );
+      if (shareholder) {
+        result.isShareholder = true;
+        result.shareBps = Math.max(0, Number(shareholder.shareBps || 0));
+        try {
+          const minimum = await onlineSdk.getMinimumDistributableFee(mintPk);
+          result.canDistribute = Boolean(minimum?.canDistribute);
+          result.isGraduated = Boolean(minimum?.isGraduated);
+          result.distributableLamports = Math.max(
+            0,
+            bnToLamportsNumber(minimum?.distributableFees)
+          );
+          result.shareableLamports =
+            result.canDistribute && result.shareBps > 0
+              ? Math.max(
+                  0,
+                  Math.floor((result.distributableLamports * result.shareBps) / 10_000)
+                )
+              : 0;
+        } catch {
+          // best effort: keep share flags without distributable estimate
+        }
+      }
+    }
+  } catch {
+    // best effort
+  }
+
+  result.totalLamports = Math.max(
+    0,
+    Number(result.directLamports || 0) + Number(result.shareableLamports || 0)
+  );
+  result.directSol = fromLamports(result.directLamports);
+  result.shareableSol = fromLamports(result.shareableLamports);
+  result.distributableSol = fromLamports(result.distributableLamports);
+  result.totalSol = fromLamports(result.totalLamports);
+
+  writeCreatorRewardsCache(cacheKey, result);
+  return result;
 }
 
 async function pumpPortalTrade({
@@ -1544,8 +1811,10 @@ export async function getDashboard(userId) {
     ),
   ]);
 
+  const tokenRows = attachMarketCaps(tokensRes.rows);
+
   return {
-    tokens: tokensRes.rows.map(toToken),
+    tokens: tokenRows.map(toToken),
     feed: feedRes.rows.map(toEvent),
     logs: logsRes.rows.map(toEvent),
     chartData: buildChartData(chartRes.rows),
@@ -1877,6 +2146,7 @@ export async function getTokenLiveDetails(userId, tokenId) {
   const addresses = await withTx(async (client) =>
     readTokenWalletAddresses(client, userId, tokenRow)
   );
+  const connection = getConnection();
 
   let enriched = [];
   try {
@@ -1894,6 +2164,32 @@ export async function getTokenLiveDetails(userId, tokenId) {
     { sol: 0, token: 0 }
   );
 
+  let creatorRewards = {
+    profileUrl: buildPumpCreatorRewardsProfileUrl(tokenRow.deposit),
+    directLamports: 0,
+    shareableLamports: 0,
+    distributableLamports: 0,
+    totalLamports: 0,
+    directSol: 0,
+    shareableSol: 0,
+    distributableSol: 0,
+    totalSol: 0,
+    shareableEnabled: false,
+    isShareholder: false,
+    shareBps: 0,
+    canDistribute: false,
+    isGraduated: false,
+  };
+  try {
+    creatorRewards = await getCreatorRewardsPreview({
+      connection,
+      mint: tokenRow.mint,
+      wallet: tokenRow.deposit,
+    });
+  } catch {
+    // keep zero preview on failure
+  }
+
   return {
     token: {
       id: String(tokenRow.id),
@@ -1907,6 +2203,7 @@ export async function getTokenLiveDetails(userId, tokenId) {
     },
     addresses: enriched,
     totals,
+    creatorRewards,
   };
 }
 

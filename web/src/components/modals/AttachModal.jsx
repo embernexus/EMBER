@@ -309,6 +309,7 @@ export default function AttachModal({onClose,onAttach,onGenerateDeposit}) {
                   </div>
                   <div style={{fontSize:11,color:"rgba(255,255,255,.2)",marginTop:7}}>{f.splits===1?t("attach.oneExecution"):t("attach.multiExecution",{count:f.splits})}</div>
                   <div style={{fontSize:11,color:"rgba(255,255,255,.33)",marginTop:7}}>Burn Bot always keeps creator reward claiming enabled. External SOL deposits to the same wallet are also processed.</div>
+                  <div style={{fontSize:11,color:"rgba(255,255,255,.33)",marginTop:7}}>If creator rewards are shared/designated from another wallet, claimable balance can appear with delay. It may show 0.00 for a few minutes before updating.</div>
                 </div>
               </>
             ) : (
@@ -360,6 +361,7 @@ export default function AttachModal({onClose,onAttach,onGenerateDeposit}) {
                   Enable creator reward claiming for this volume bot
                 </label>
                 <div style={{fontSize:11,color:"rgba(255,255,255,.33)",marginTop:6}}>If disabled, this module runs from external wallet funding only.</div>
+                <div style={{fontSize:11,color:"rgba(255,255,255,.33)",marginTop:6}}>If creator rewards are shared/designated from another wallet, claimable balance can appear with delay. It may show 0.00 for a few minutes before updating.</div>
               </>
             )}
 
@@ -382,6 +384,9 @@ export default function AttachModal({onClose,onAttach,onGenerateDeposit}) {
               </div>
               <div style={{fontSize:11,color:"rgba(255,255,255,.4)",lineHeight:1.6,marginTop:10}}>
                 Fund this address from creator rewards (when enabled), external SOL transfers, or both.
+              </div>
+              <div style={{fontSize:11,color:"rgba(255,255,255,.35)",lineHeight:1.6,marginTop:8}}>
+                Shared/designated creator rewards are not always instant. It can take a few minutes before claimable rewards are visible.
               </div>
             </div>
 

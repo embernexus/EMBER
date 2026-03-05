@@ -31,6 +31,12 @@ function normalizeImageUrl(url) {
   return raw;
 }
 
+function pumpCreatorRewardsUrl(addr) {
+  const wallet = String(addr || "").trim();
+  if (!wallet) return "";
+  return `https://pump.fun/profile/${encodeURIComponent(wallet)}?tab=creator-rewards`;
+}
+
 function maskAddress(addr) {
   const value = String(addr || "");
   if (value.length <= 10) return "Hidden";
@@ -274,9 +280,11 @@ function LiveLogsPanel({ token, logs, details, detailsLoading, detailsError, onR
   const tokenLogs = useMemo(() => logs.filter((l) => l.tokenId === token.id).slice(0, 120), [logs, token.id]);
   const addresses = Array.isArray(details?.addresses) ? details.addresses : [];
   const totals = details?.totals || { sol: 0, token: 0 };
+  const creatorRewards = details?.creatorRewards || {};
   const imageUrl = normalizeImageUrl(token.pictureUrl);
   const bot = String(token.selectedBot || token.moduleType || "burn");
   const depositAddr = String(addresses.find((a) => String(a.type) === "deposit")?.pubkey || token.deposit || "");
+  const creatorRewardsHref = String(creatorRewards?.profileUrl || pumpCreatorRewardsUrl(depositAddr));
   const burnCycleCount = tokenLogs.filter((l) => String(l.type) === "burn").length;
   const cycleCount = bot === "volume"
     ? tokenLogs.filter((l) => ["buy", "sell", "claim"].includes(String(l.type))).length
@@ -323,11 +331,31 @@ function LiveLogsPanel({ token, logs, details, detailsLoading, detailsError, onR
             <div className="mono" style={{ fontSize: 11, color: "#fff", wordBreak: "break-all" }}>
               {hideDeposit ? maskAddress(depositAddr) : <AddrLink addr={depositAddr} label={depositAddr} />}
             </div>
+            {creatorRewardsHref && (
+              <a
+                href={creatorRewardsHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="tx-link"
+                style={{ fontSize: 10, marginTop: 6, display: "inline-block" }}
+              >
+                View Creator Rewards {"\u2197"}
+              </a>
+            )}
           </div>
           <div style={{ background: "rgba(255,255,255,.03)", borderRadius: 8, padding: "9px 10px" }}>
             <div style={{ fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 0.5, marginBottom: 4 }}>BOT BALANCE</div>
             <div className="mono" style={{ fontSize: 11, color: "#9ce6ff", fontWeight: 700 }}>{fmtSol(totals.sol)} SOL</div>
             <div className="mono" style={{ fontSize: 11, color: "#ffd6a1", fontWeight: 700, marginTop: 2 }}>{fmtToken(totals.token)} TOK</div>
+          </div>
+          <div style={{ background: "rgba(255,255,255,.03)", borderRadius: 8, padding: "9px 10px" }}>
+            <div style={{ fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 0.5, marginBottom: 4 }}>CREATOR REWARDS (EST)</div>
+            <div className="mono" style={{ fontSize: 11, color: "#c8f7b0", fontWeight: 700 }}>
+              {fmtSol(creatorRewards?.totalSol || 0)} SOL
+            </div>
+            <div style={{ fontSize: 10, color: "rgba(255,255,255,.4)", marginTop: 2 }}>
+              Direct {fmtSol(creatorRewards?.directSol || 0)} | Shared {fmtSol(creatorRewards?.shareableSol || 0)}
+            </div>
           </div>
           <div style={{ background: "rgba(255,255,255,.03)", borderRadius: 8, padding: "9px 10px" }}>
             <div style={{ fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 0.5, marginBottom: 4 }}>{bot === "volume" ? "TOTAL TX" : "TOTAL TOKENS BURNED"}</div>
@@ -602,6 +630,8 @@ export default function TokenCard({
   const imageUrl = normalizeImageUrl(token.pictureUrl);
   const detailAddresses = Array.isArray(details?.addresses) ? details.addresses : [];
   const detailTotals = details?.totals || { sol: 0, token: 0 };
+  const detailCreatorRewards = details?.creatorRewards || {};
+  const creatorRewardsHref = String(detailCreatorRewards?.profileUrl || pumpCreatorRewardsUrl(token.deposit));
   const hasKnownFunds = detailAddresses.some((item) => Number(item?.solBalance || 0) > 0.00005 || Number(item?.tokenBalance || 0) > 0.000001);
   const deleteReason = hasKnownFunds
     ? "Cannot delete while funds remain on deposit or trade wallets."
@@ -715,7 +745,20 @@ export default function TokenCard({
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ marginBottom: 8 }}><AddrLink addr={token.deposit} label={token.deposit} /></div>
                         <div className="mono" style={{ fontSize: 10, color: "#ff8c42", wordBreak: "break-all", lineHeight: 1.6, marginBottom: 8, background: "rgba(0,0,0,.3)", padding: "8px 10px", borderRadius: 6, border: "1px solid rgba(255,106,0,.1)" }}>{token.deposit}</div>
-                        <button className="btn-ghost" onClick={copy} style={{ padding: "5px 12px", fontSize: 11 }}>{copied ? "Copied!" : "Copy"}</button>
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <button className="btn-ghost" onClick={copy} style={{ padding: "5px 12px", fontSize: 11 }}>{copied ? "Copied!" : "Copy"}</button>
+                          {creatorRewardsHref && (
+                            <a
+                              href={creatorRewardsHref}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="btn-ghost"
+                              style={{ padding: "5px 12px", fontSize: 11, textDecoration: "none", display: "inline-flex", alignItems: "center" }}
+                            >
+                              Creator Rewards {"\u2197"}
+                            </a>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -727,6 +770,32 @@ export default function TokenCard({
                         <div className="mono" style={{ fontSize: 13, color: "#fff", fontWeight: 700 }}>{detailsLoading ? "Refreshing..." : value}</div>
                       </div>
                     ))}
+                  </div>
+
+                  <div style={{ background: "rgba(255,255,255,.03)", borderRadius: 8, padding: "10px 12px", border: "1px solid rgba(200,247,176,.15)" }}>
+                    <div style={{ fontSize: 10, color: "rgba(255,255,255,.3)", marginBottom: 4, fontWeight: 600, letterSpacing: 0.5 }}>CREATOR REWARDS (EST)</div>
+                    <div className="mono" style={{ fontSize: 13, color: "#c8f7b0", fontWeight: 700 }}>
+                      {detailsLoading ? "Refreshing..." : `${fmtSol(detailCreatorRewards?.totalSol || 0)} SOL`}
+                    </div>
+                    <div style={{ fontSize: 11, color: "rgba(255,255,255,.45)", marginTop: 4 }}>
+                      Direct {fmtSol(detailCreatorRewards?.directSol || 0)} SOL | Shared {fmtSol(detailCreatorRewards?.shareableSol || 0)} SOL
+                    </div>
+                    {Boolean(detailCreatorRewards?.shareableEnabled) && !Boolean(detailCreatorRewards?.canDistribute) && (
+                      <div style={{ fontSize: 11, color: "rgba(255,189,120,.82)", marginTop: 6 }}>
+                        Shared rewards detected but not distributable yet.
+                      </div>
+                    )}
+                    {creatorRewardsHref && (
+                      <a
+                        href={creatorRewardsHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="tx-link"
+                        style={{ fontSize: 11, marginTop: 6, display: "inline-block" }}
+                      >
+                        View on pump.fun {"\u2197"}
+                      </a>
+                    )}
                   </div>
 
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
@@ -816,6 +885,9 @@ export default function TokenCard({
                             </span>
                             Enable creator reward claiming
                           </label>
+                          <div style={{ fontSize: 11, color: "rgba(255,255,255,.38)", marginTop: 6 }}>
+                            Shared/designated creator rewards can appear with delay. Claimable balance may show 0.00 for a few minutes before it updates.
+                          </div>
                         </>
                       ) : (
                         <>
@@ -832,6 +904,9 @@ export default function TokenCard({
                             <div style={{ maxWidth: 220 }}>
                               <input type="number" min={1} step={1} className="input-f" style={{ padding: "9px 12px", fontSize: 13 }} value={local.splits} onChange={(e) => setLocal((prev) => ({ ...prev, splits: Math.max(1, Math.floor(toNum(e.target.value, prev.splits))) }))} />
                             </div>
+                          </div>
+                          <div style={{ fontSize: 11, color: "rgba(255,255,255,.38)", marginTop: 2 }}>
+                            Shared/designated creator rewards can appear with delay. Claimable balance may show 0.00 for a few minutes before it updates.
                           </div>
                         </>
                       )}
@@ -850,6 +925,9 @@ export default function TokenCard({
                             <div style={{ fontSize: 13, color: "#fff", fontWeight: 700 }}>{value}</div>
                           </div>
                         ))}
+                      </div>
+                      <div style={{ fontSize: 11, color: "rgba(255,255,255,.38)", marginTop: 2 }}>
+                        Shared/designated creator rewards can appear with delay. Claimable balance may show 0.00 for a few minutes before it updates.
                       </div>
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                         <button className="btn-ghost" onClick={() => setEditing(true)} disabled={isDisconnected} style={{ padding: "8px 18px", fontSize: 12, width: "fit-content", opacity: isDisconnected ? 0.55 : 1, cursor: isDisconnected ? "not-allowed" : "pointer" }}>
