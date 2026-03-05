@@ -554,21 +554,38 @@ app.use((error, _req, res, _next) => {
   res.status(status).json({ error: safeMessage });
 });
 
+let dbReady = false;
+
+async function initDbWithRetry() {
+  const retryMs = Math.max(3000, Number(process.env.DB_INIT_RETRY_MS || 5000));
+  while (!dbReady) {
+    try {
+      await initDb();
+      dbReady = true;
+      console.log("[api] database initialized");
+      void ensureDepositPool().catch((error) => {
+        console.warn("[api] deposit pool warmup failed:", error?.message || error);
+      });
+      const refillMs = Math.max(5000, Number(config.depositPoolRefillIntervalMs || 15000));
+      setInterval(() => {
+        void ensureDepositPool().catch((error) => {
+          console.warn("[api] deposit pool refill failed:", error?.message || error);
+        });
+      }, refillMs);
+      return;
+    } catch (error) {
+      console.warn(`[api] database init failed, retrying in ${retryMs}ms:`, error?.message || error);
+      await new Promise((resolve) => setTimeout(resolve, retryMs));
+    }
+  }
+}
+
 async function start() {
-  await initDb();
-  void ensureDepositPool().catch((error) => {
-    console.warn("[api] deposit pool warmup failed:", error?.message || error);
-  });
-  const refillMs = Math.max(5000, Number(config.depositPoolRefillIntervalMs || 15000));
-  setInterval(() => {
-    void ensureDepositPool().catch((error) => {
-      console.warn("[api] deposit pool refill failed:", error?.message || error);
-    });
-  }, refillMs);
   const host = String(process.env.HOST || "0.0.0.0").trim() || "0.0.0.0";
   app.listen(config.port, host, () => {
     console.log(`[api] listening on ${host}:${config.port}`);
   });
+  void initDbWithRetry();
 }
 
 start().catch((error) => {
