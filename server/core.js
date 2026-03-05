@@ -1489,9 +1489,18 @@ function generateNonVanityDeposit() {
 }
 
 async function generateVanityDeposit(prefix) {
+  const isRenderRuntime =
+    String(process.env.RENDER || "").toLowerCase() === "true" ||
+    Boolean(process.env.RENDER_SERVICE_ID);
   try {
     return await runSolanaKeygenGrind(prefix);
   } catch (error) {
+    if (isRenderRuntime) {
+      console.warn(
+        `[deposit] solana-keygen unavailable on Render; using non-vanity keypair: ${error?.message || error}`
+      );
+      return generateNonVanityDeposit();
+    }
     if (!config.depositVanityAllowJsFallback) {
       throw error;
     }
