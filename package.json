@@ -17,6 +17,7 @@
     "db:reset": "node scripts/db-portability.mjs reset"
   },
   "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
     "@pump-fun/pump-sdk": "^1.30.0",
     "@pump-fun/pump-swap-sdk": "^1.14.1",
     "@solana/spl-token": "^0.4.8",
@@ -29,12 +30,11 @@
     "express": "^4.21.2",
     "pg": "^8.16.3",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "vite": "^5.4.11"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^4.3.4",
-    "concurrently": "^9.2.1",
-    "vite": "^5.4.11"
+    "concurrently": "^9.2.1"
   },
   "engines": {
     "node": ">=20"
