@@ -38,6 +38,13 @@ export default function TokenTicker({ tokens }) {
         <div className="ticker-track">
           {items.map((t,i)=>(
             <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"0 28px",borderRight:"1px solid rgba(255,255,255,.05)",height:38,whiteSpace:"nowrap"}}>
+              {(() => {
+                const bot = String(t?.selectedBot || t?.moduleType || "burn");
+                const metric = bot === "volume"
+                  ? { icon: "\u{1F504}", value: fmt(t.txCount), label: "tx" }
+                  : { icon: "\u{1F525}", value: fmt(t.burned), label: "" };
+                return (
+                  <>
               <div style={{position:"relative",width:20,height:20,borderRadius:6,background:"linear-gradient(135deg,#ff6a00,#cc2200)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:800,flexShrink:0,overflow:"hidden"}}>
                 <span style={{position:"relative",zIndex:0,color:"#fff"}}>{t.symbol[0]}</span>
                 {normalizeImageUrl(t.pictureUrl) && (
@@ -55,7 +62,12 @@ export default function TokenTicker({ tokens }) {
                 {t.active&&<span style={{width:5,height:5,borderRadius:"50%",background:"#ff6a00",display:"inline-block",animation:"pulse-dot 2s infinite"}}/>}
                 {activeStatus(t)}
               </span>
-              <span style={{fontSize:11,color:"rgba(255,255,255,.4)"}}>{"\u{1F525}"} {fmt(t.burned)}</span>
+              <span style={{fontSize:11,color:"rgba(255,255,255,.4)"}}>
+                {metric.icon} {metric.value}{metric.label ? ` ${metric.label}` : ""}
+              </span>
+                  </>
+                );
+              })()}
             </div>
           ))}
         </div>

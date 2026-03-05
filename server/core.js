@@ -1922,6 +1922,118 @@ export async function deleteToken(userId, tokenId) {
   );
   if (!tokenRes.rowCount) throw new Error("Token not found.");
   const tokenRow = tokenRes.rows[0];
+  const moduleType = normalizeModuleType(tokenRow.selected_bot, MODULE_TYPES.burn);
+  const connection = getConnection();
+
+  if (moduleType === MODULE_TYPES.burn) {
+    try {
+      const depositSecret = await getTokenDepositSigningKey(userId, String(tokenRow.id));
+      const depositSigner = keypairFromBase58(depositSecret);
+      const tokenBal = await getOwnerTokenBalanceUi(connection, depositSigner.publicKey, tokenRow.mint);
+      const burnAmount = Number(tokenBal.toFixed(6));
+      if (burnAmount > 0.000001) {
+        const burnSig = await sendTokenToIncinerator(connection, depositSigner, tokenRow.mint, burnAmount);
+        if (burnSig) {
+          await insertEvent(
+            pool,
+            userId,
+            String(tokenRow.id),
+            String(tokenRow.symbol || ""),
+            "burn",
+            `Delete cleanup incinerated ${fmtInt(burnAmount.toFixed(6))} ${tokenRow.symbol}`,
+            burnSig,
+            { moduleType: MODULE_TYPES.burn }
+          );
+        }
+      }
+    } catch (error) {
+      await insertEvent(
+        pool,
+        userId,
+        String(tokenRow.id),
+        String(tokenRow.symbol || ""),
+        "error",
+        `Delete cleanup burn failed: ${error.message}`,
+        null,
+        { moduleType: MODULE_TYPES.burn }
+      );
+    }
+  } else if (moduleType === MODULE_TYPES.volume) {
+    const moduleRes = await pool.query(
+      `
+        SELECT id, config_json
+        FROM bot_modules
+        WHERE token_id = $1 AND module_type = $2
+        LIMIT 1
+      `,
+      [String(tokenRow.id), MODULE_TYPES.volume]
+    );
+    const configJson = mergeModuleConfig(
+      MODULE_TYPES.volume,
+      moduleRes.rows[0]?.config_json || {},
+      {}
+    );
+    const signers = [];
+    try {
+      const depositSecret = await getTokenDepositSigningKey(userId, String(tokenRow.id));
+      signers.push({ signer: keypairFromBase58(depositSecret), label: "deposit" });
+    } catch {}
+    const walletRes = await pool.query(
+      `
+        SELECT label, secret_key_base58
+        FROM volume_trade_wallets
+        WHERE user_id = $1 AND token_id = $2
+      `,
+      [userId, String(tokenRow.id)]
+    );
+    for (const row of walletRes.rows || []) {
+      try {
+        signers.push({
+          signer: keypairFromBase58(decryptDepositSecret(row.secret_key_base58)),
+          label: String(row.label || "trade"),
+        });
+      } catch {}
+    }
+
+    for (const item of signers) {
+      const tokenBal = await getOwnerTokenBalanceUi(connection, item.signer.publicKey, tokenRow.mint);
+      const sellAmount = Number(tokenBal.toFixed(6));
+      if (sellAmount <= 0.000001) continue;
+      try {
+        const sellSig = await pumpPortalTrade({
+          connection,
+          signer: item.signer,
+          mint: tokenRow.mint,
+          action: "sell",
+          amount: sellAmount,
+          denominatedInSol: false,
+          slippage: Math.max(1, Math.floor(Number(configJson.slippageBps || 1000) / 100)),
+          pool: configJson.pool || "auto",
+        });
+        await insertEvent(
+          pool,
+          userId,
+          String(tokenRow.id),
+          String(tokenRow.symbol || ""),
+          "sell",
+          `Delete cleanup sold ${sellAmount.toFixed(6)} ${tokenRow.symbol} from ${item.label}`,
+          sellSig,
+          { moduleType: MODULE_TYPES.volume }
+        );
+      } catch (error) {
+        await insertEvent(
+          pool,
+          userId,
+          String(tokenRow.id),
+          String(tokenRow.symbol || ""),
+          "error",
+          `Delete cleanup sell failed (${item.label}): ${error.message}`,
+          null,
+          { moduleType: MODULE_TYPES.volume }
+        );
+      }
+    }
+  }
 
   const addresses = await withTx(async (client) =>
     readTokenWalletAddresses(client, userId, tokenRow)
@@ -3204,12 +3316,61 @@ export async function withdrawBurnFunds(userId, tokenId, payload = {}) {
       const connection = getConnection();
       const depositSecret = await getTokenDepositSigningKey(userId, tokenIdText);
       const depositSigner = keypairFromBase58(depositSecret);
+      const eventPrefix = `manual:withdraw:burn:${moduleRow.module_id}:${Date.now()}`;
+      let burnedToken = 0;
+      const tokenBal = await getOwnerTokenBalanceUi(connection, depositSigner.publicKey, tokenRow.mint);
+      const burnAmount = Number(tokenBal.toFixed(6));
+      if (burnAmount > 0.000001) {
+        const burnSig = await sendTokenToIncinerator(connection, depositSigner, tokenRow.mint, burnAmount);
+        const tokenAfter = await getOwnerTokenBalanceUi(connection, depositSigner.publicKey, tokenRow.mint);
+        burnedToken = Math.max(0, burnAmount - tokenAfter);
+        await insertEvent(
+          client,
+          userId,
+          tokenIdText,
+          tokenRow.symbol,
+          "burn",
+          `Withdraw cleanup incinerated ${fmtInt(burnedToken.toFixed(6))} ${tokenRow.symbol}`,
+          burnSig,
+          {
+            moduleType: MODULE_TYPES.burn,
+            amount: burnedToken,
+            idempotencyKey: `${eventPrefix}:burn`,
+          }
+        );
+      }
+
       const sweep = await sendAllSolTransfer(connection, depositSigner, destination);
       if (!sweep.signature || sweep.sentLamports <= 0) {
-        throw new Error("No withdrawable SOL available in the burn deposit wallet.");
+        if (burnedToken > 0) {
+          const balanceAfterToken = await connection.getBalance(depositSigner.publicKey, "confirmed");
+          const configJson = mergeModuleConfig(MODULE_TYPES.burn, moduleRow.config_json, {
+            burnIntervalSec: Number(tokenRow.burn_sec || 300),
+            splitBuys: Number(tokenRow.splits || 1),
+          });
+          const reserveLamports = toLamports(configJson.reserveSol || config.botSolReserve || 0.005);
+          const state = { ...(moduleRow.state_json || {}) };
+          state.lastBalanceLamports = Math.max(0, balanceAfterToken - reserveLamports);
+          await upsertModuleState(client, moduleRow.module_id, state, null);
+          await client.query(
+            `
+              UPDATE tokens
+              SET tx_count = tx_count + 1
+              WHERE id = $1
+            `,
+            [tokenIdText]
+          );
+          return {
+            ok: true,
+            signature: null,
+            sentSol: 0,
+            remainingSol: fromLamports(balanceAfterToken),
+            sentTokenBurned: burnedToken,
+          };
+        }
+        throw new Error("No withdrawable SOL or token balance available in the burn deposit wallet.");
       }
       const balanceAfter = await connection.getBalance(depositSigner.publicKey, "confirmed");
-      const eventPrefix = `manual:withdraw:burn:${moduleRow.module_id}:${Date.now()}`;
       await insertEvent(
         client,
         userId,
@@ -3248,6 +3409,7 @@ export async function withdrawBurnFunds(userId, tokenId, payload = {}) {
         signature: sweep.signature,
         sentSol: fromLamports(sweep.sentLamports),
         remainingSol: fromLamports(balanceAfter),
+        sentTokenBurned: burnedToken,
       };
     });
 

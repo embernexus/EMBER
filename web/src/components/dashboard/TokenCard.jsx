@@ -576,7 +576,15 @@ export default function TokenCard({
     setWithdrawing(true);
     try {
       const result = await onBurnWithdraw(token.id, { destinationWallet });
-      setActionMsg(`Withdrawn ${fmtSol(result?.sentSol || 0)} SOL to ${destinationWallet}`);
+      const sentSol = Number(result?.sentSol || 0);
+      const sentToken = Number(result?.sentToken || 0);
+      if (sentSol > 0 && sentToken > 0) {
+        setActionMsg(`Withdrawn ${fmtSol(sentSol)} SOL + ${fmtToken(sentToken)} ${token.symbol} to ${destinationWallet}`);
+      } else if (sentToken > 0) {
+        setActionMsg(`Withdrawn ${fmtToken(sentToken)} ${token.symbol} to ${destinationWallet}`);
+      } else {
+        setActionMsg(`Withdrawn ${fmtSol(sentSol)} SOL to ${destinationWallet}`);
+      }
       void fetchDetails(true);
     } catch (error) {
       setErr(error?.message || "Unable to withdraw burn wallet funds.");
