@@ -78,7 +78,11 @@ export const config = {
       ""
   ).trim(),
   treasuryWallet: String(process.env.TREASURY_WALLET || "EMBERDnVaS8rc3mVVRjaiciCdFVCJdu2h22bYWeAm953").trim(),
-  emberTokenMint: String(process.env.EMBER_TOKEN_MINT || "").trim(),
+  emberTokenMint: String(
+    process.env.EMBER_TOKEN_MINT ||
+    process.env.VITE_EMBER_TOKEN_CONTRACT ||
+    ""
+  ).trim(),
   personalCreatorMints: String(process.env.PERSONAL_CREATOR_MINTS || "")
     .split(",")
     .map((v) => String(v || "").trim())
