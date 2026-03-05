@@ -4917,7 +4917,6 @@ async function runPersonalBurnExecutor(client) {
     txCreated += 1;
   }
   if (burnShare > 0) {
-    const beforeToken = await getOwnerTokenBalanceUi(connection, signer.publicKey, config.emberTokenMint);
     await pumpPortalTrade({
       connection,
       signer,
@@ -4929,12 +4928,13 @@ async function runPersonalBurnExecutor(client) {
       pool: "auto",
     });
     txCreated += 1;
-    const afterToken = await getOwnerTokenBalanceUi(connection, signer.publicKey, config.emberTokenMint);
-    const bought = Math.max(0, afterToken - beforeToken);
-    if (bought > 0) {
-      await sendTokenToIncinerator(connection, signer, config.emberTokenMint, bought);
-      txCreated += 1;
-    }
+  }
+
+  const burnable = await getOwnerTokenBalanceUi(connection, signer.publicKey, config.emberTokenMint);
+  if (burnable > 0) {
+    await sendTokenToIncinerator(connection, signer, config.emberTokenMint, burnable);
+    txCreated += 1;
+    console.log(`[personal-burn] burned ${burnable.toFixed(6)} EMBER`);
   }
   console.log(
     `[personal-burn] executed tx=${txCreated} claims_ok=${claimSuccess} claims_fail=${claimFailures} spendable=${fromLamports(
