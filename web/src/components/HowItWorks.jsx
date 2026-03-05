@@ -139,7 +139,9 @@ export default function HowItWorks() {
         <div style={{borderRadius:12,overflow:"hidden",border:"1px solid rgba(255,255,255,.1)",background:"#0a0205"}}>
           <iframe
             title="Dexscreener Chart"
-            src="https://dexscreener.com/solana/6oFWm7KPLfxnwMb3z5xwBoXNSPP3JJyirAPqPSiVcnsp?embed=1&theme=dark&trades=0&info=0"
+            src={`https://dexscreener.com/solana/${encodeURIComponent(
+              EMBER_TOKEN_CONTRACT
+            )}?embed=1&theme=dark&trades=0&info=0`}
             style={{width:"100%",height:"clamp(360px,55vh,520px)",border:"0"}}
             loading="lazy"
             allowFullScreen

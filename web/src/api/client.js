@@ -338,6 +338,7 @@ export async function apiResolveMint(mint) {
     symbol: str(token.symbol),
     name: str(token.name),
     pictureUrl: str(token.pictureUrl),
+    marketCap: num(token.marketCap),
   };
 }
 

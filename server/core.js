@@ -389,10 +389,16 @@ async function resolveMintViaDexscreener(mint) {
 
 export async function resolveMintMetadata(mintInput) {
   const mint = normalizeMint(mintInput);
+  let marketCap = 0;
+  try {
+    marketCap = await fetchMarketCapUsd(mint);
+  } catch {
+    marketCap = 0;
+  }
 
   const known = knownMintFromResolve(mint);
   if (known?.symbol && known?.name) {
-    return { mint, ...known };
+    return { mint, ...known, marketCap };
   }
 
   const sources = [
@@ -412,6 +418,7 @@ export async function resolveMintMetadata(mintInput) {
       symbol,
       name,
       pictureUrl: normalizeMediaUrl(data.pictureUrl || "").slice(0, 255),
+      marketCap,
     };
   }
 

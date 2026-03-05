@@ -23,7 +23,7 @@ function activeStatus(token) {
 
 function fmtMarketCap(value) {
   const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return "$0";
+  if (!Number.isFinite(n) || n <= 0) return "...";
   return `$${fmt(n)}`;
 }
 

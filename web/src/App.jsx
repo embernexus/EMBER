@@ -69,6 +69,7 @@ export default function App() {
     symbol: "",
     name: "",
     pictureUrl: "",
+    marketCap: 0,
   });
 
   const configuredTickerMint = useMemo(() => {
@@ -110,6 +111,7 @@ export default function App() {
           symbol: String(meta?.symbol || "").trim(),
           name: String(meta?.name || "").trim(),
           pictureUrl: String(meta?.pictureUrl || "").trim(),
+          marketCap: Number(meta?.marketCap) || 0,
         });
       })
       .catch(() => {
@@ -119,6 +121,7 @@ export default function App() {
           symbol: "",
           name: "",
           pictureUrl: "",
+          marketCap: 0,
         });
       });
 
@@ -148,6 +151,7 @@ export default function App() {
           symbol: String(t?.symbol || emberTickerMeta.symbol || "EMBER").toUpperCase(),
           name: String(t?.name || emberTickerMeta.name || "EMBER"),
           pictureUrl: String(t?.pictureUrl || emberTickerMeta.pictureUrl || ""),
+          marketCap: Number(t?.marketCap) || Number(emberTickerMeta.marketCap) || 0,
         });
       });
     }
@@ -162,7 +166,7 @@ export default function App() {
           name: "EMBER",
           pictureUrl: "",
           txCount: 0,
-          marketCap: 0,
+          marketCap: Number(emberTickerMeta.marketCap) || 0,
           pending: 0,
           claimSec: 0,
           burnSec: 0,
@@ -172,6 +176,7 @@ export default function App() {
           symbol: String(emberTickerMeta.symbol || "EMBER").toUpperCase(),
           name: String(emberTickerMeta.name || "EMBER"),
           pictureUrl: String(emberTickerMeta.pictureUrl || ""),
+          marketCap: Number(emberTickerMeta.marketCap) || 0,
         }
       ),
     ];
