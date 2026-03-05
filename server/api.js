@@ -565,8 +565,9 @@ async function start() {
       console.warn("[api] deposit pool refill failed:", error?.message || error);
     });
   }, refillMs);
-  app.listen(config.port, () => {
-    console.log(`[api] listening on :${config.port}`);
+  const host = String(process.env.HOST || "0.0.0.0").trim() || "0.0.0.0";
+  app.listen(config.port, host, () => {
+    console.log(`[api] listening on ${host}:${config.port}`);
   });
 }
 
