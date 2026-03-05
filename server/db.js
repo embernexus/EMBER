@@ -25,12 +25,30 @@ try {
     const parsed = new URL(resolvedDatabaseUrl);
     const host = String(parsed.hostname || "").trim();
     const isIpv4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
-    if (host && !isIpv4) {
-      const resolved = await dns.promises.lookup(host, { family: 4 });
-      if (resolved?.address) {
-        parsed.hostname = resolved.address;
+    const looksLikeSupabaseDirectHost =
+      host.startsWith("db.") && host.endsWith(".supabase.co");
+    if (looksLikeSupabaseDirectHost) {
+      const fallbackPoolerHost = String(
+        process.env.SUPABASE_POOLER_HOST || "aws-0-us-west-2.pooler.supabase.com"
+      ).trim();
+      const fallbackPoolerPort = String(process.env.SUPABASE_POOLER_PORT || "6543").trim();
+      if (fallbackPoolerHost) {
+        parsed.hostname = fallbackPoolerHost;
+        if (!parsed.port || parsed.port === "5432") parsed.port = fallbackPoolerPort;
         resolvedDatabaseUrl = parsed.toString();
-        console.log(`[db] resolved ${host} -> ${resolved.address} (ipv4)`);
+        console.warn(
+          `[db] swapped Supabase direct host (${host}) for pooler (${parsed.hostname}:${parsed.port})`
+        );
+      }
+    }
+    if (host && !isIpv4) {
+      const lookupHost = String(new URL(resolvedDatabaseUrl).hostname || "").trim();
+      const resolved = await dns.promises.lookup(lookupHost, { family: 4 });
+      if (resolved?.address) {
+        const resolvedParsed = new URL(resolvedDatabaseUrl);
+        resolvedParsed.hostname = resolved.address;
+        resolvedDatabaseUrl = resolvedParsed.toString();
+        console.log(`[db] resolved ${lookupHost} -> ${resolved.address} (ipv4)`);
       }
     }
   }
@@ -38,8 +56,23 @@ try {
   console.warn(`[db] ipv4 resolution skipped: ${error?.message || error}`);
 }
 
+let poolConnectionString = resolvedDatabaseUrl;
+try {
+  const parsed = new URL(poolConnectionString);
+  const hadSslMode = parsed.searchParams.has("sslmode");
+  const hadLibpqCompat = parsed.searchParams.has("uselibpqcompat");
+  if (hadSslMode) parsed.searchParams.delete("sslmode");
+  if (hadLibpqCompat) parsed.searchParams.delete("uselibpqcompat");
+  poolConnectionString = parsed.toString();
+  if (hadSslMode || hadLibpqCompat) {
+    console.warn("[db] stripped sslmode/uselibpqcompat from DATABASE_URL; using pg ssl config instead");
+  }
+} catch {
+  // best effort
+}
+
 export const pool = new Pool({
-  connectionString: resolvedDatabaseUrl,
+  connectionString: poolConnectionString,
   ssl: process.env.PGSSLMODE === "disable" ? false : { rejectUnauthorized: false },
 });
 
