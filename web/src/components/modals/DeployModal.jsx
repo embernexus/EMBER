@@ -99,16 +99,27 @@ async function fetchPumpGlobalReserves(rpcUrl) {
   return { ...PUMP_GLOBAL_DEFAULT_RESERVES };
 }
 
-function getInjectedWallet() {
-  if (typeof window === "undefined") return null;
+function getInjectedWallets() {
+  if (typeof window === "undefined") return [];
+  const out = [];
+  const pushWallet = (key, provider, label) => {
+    if (!provider) return;
+    if (typeof provider.connect !== "function") return;
+    if (out.some((w) => w.key === key)) return;
+    out.push({ key, provider, label });
+  };
+
   const phantom = window?.phantom?.solana;
-  if (phantom?.isPhantom) return { provider: phantom, label: "Phantom" };
+  if (phantom?.isPhantom) pushWallet("phantom", phantom, "Phantom");
+
   const solflare = window?.solflare;
-  if (solflare?.isSolflare) return { provider: solflare, label: "Solflare" };
+  if (solflare?.isSolflare) pushWallet("solflare", solflare, "Solflare");
+
   const generic = window?.solana;
-  if (generic?.isPhantom) return { provider: generic, label: "Phantom" };
-  if (generic?.isSolflare) return { provider: generic, label: "Solflare" };
-  return null;
+  if (generic?.isPhantom) pushWallet("phantom", generic, "Phantom");
+  if (generic?.isSolflare) pushWallet("solflare", generic, "Solflare");
+
+  return out;
 }
 
 function getDeployMediaKind(file) {
@@ -162,6 +173,67 @@ function validateDeployBannerFile(file) {
   return "";
 }
 
+function fileToDataUri(file) {
+  return new Promise((resolve, reject) => {
+    if (!file) {
+      reject(new Error("File is required."));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Failed to read file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function base64ToBytes(base64Text) {
+  const raw = atob(String(base64Text || ""));
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) {
+    out[i] = raw.charCodeAt(i);
+  }
+  return out;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 35000, label = "Request") {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`${label} timed out. Please try again.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+async function readErrorFromResponse(res, fallbackMessage) {
+  const text = await res.text().catch(() => "");
+  if (!text) return fallbackMessage;
+  try {
+    const json = JSON.parse(text);
+    const msg = String(json?.error || json?.message || "").trim();
+    return msg || fallbackMessage;
+  } catch {
+    return text.trim() || fallbackMessage;
+  }
+}
+
+async function withTimeout(promise, timeoutMs, label) {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out. Please try again.`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboard, onAutoAttach }) {
   const { t } = useI18n();
   const [form, setForm] = useState({
@@ -176,6 +248,7 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
     mayhemMode: false,
   });
   const [loading, setLoading] = useState(false);
+  const [deployStep, setDeployStep] = useState("");
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   const [selectedBot, setSelectedBot] = useState("");
@@ -185,7 +258,9 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
   const [bannerPreviewUrl, setBannerPreviewUrl] = useState("");
   const [walletProvider, setWalletProvider] = useState(null);
   const [walletAddress, setWalletAddress] = useState("");
+  const [walletChoice, setWalletChoice] = useState("");
   const [walletConnecting, setWalletConnecting] = useState(false);
+  const [showWalletSelect, setShowWalletSelect] = useState(false);
   const [globalReserves, setGlobalReserves] = useState(null);
   const [quoteLoading, setQuoteLoading] = useState(true);
   const [quoteError, setQuoteError] = useState("");
@@ -274,18 +349,49 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
     return () => { mounted = false; };
   }, []);
 
-  const connectWallet = async () => {
+  const connectWallet = async (preferredKey = "") => {
     setError("");
-    const found = getInjectedWallet();
-    if (!found) {
+    const wallets = getInjectedWallets();
+    if (!wallets.length) {
       setError("No supported wallet found. Install Phantom or Solflare.");
       return null;
     }
+    let found = null;
+    if (preferredKey) {
+      found = wallets.find((w) => w.key === preferredKey) || null;
+      if (!found) {
+        const label = preferredKey === "solflare" ? "Solflare" : preferredKey === "phantom" ? "Phantom" : "Selected wallet";
+        setError(`${label} was not detected. Make sure the extension is installed and unlocked.`);
+        return null;
+      }
+    }
+    if (!found && wallets.length === 1) {
+      found = wallets[0];
+    }
+    if (!found) {
+      setError("Select Phantom or Solflare first.");
+      return null;
+    }
+    setWalletChoice(found.key);
     setWalletConnecting(true);
     try {
-      const res = found.provider?.isConnected
-        ? { publicKey: found.provider.publicKey }
-        : await found.provider.connect();
+      if (found.key === "phantom" && !found.provider?.isPhantom) {
+        throw new Error("Phantom is not available in this browser session.");
+      }
+      if (found.key === "solflare" && !found.provider?.isSolflare) {
+        throw new Error("Solflare is not available in this browser session.");
+      }
+      setDeployStep(`Connecting ${found.label}...`);
+      const res =
+        found.provider?.isConnected && found.provider?.publicKey
+          ? { publicKey: found.provider.publicKey }
+          : await withTimeout(
+              found.key === "phantom"
+                ? found.provider.connect({ onlyIfTrusted: false })
+                : found.provider.connect(),
+              45000,
+              `${found.label} connection`
+            );
       const address =
         found.provider?.publicKey?.toString?.() ||
         res?.publicKey?.toString?.() ||
@@ -297,18 +403,21 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
       setWalletAddress(address);
       return { provider: found.provider, label: found.label, address };
     } catch (e) {
-      setError(e?.message || "Wallet connection failed.");
-      return null;
+      const msg = e?.message || "Wallet connection failed.";
+      setError(msg);
+      throw new Error(msg);
     } finally {
       setWalletConnecting(false);
     }
   };
 
-  const submit = async () => {
+  const submit = async (preferredWalletKey = "") => {
     let activeProvider = walletProvider || null;
     let activeWalletAddress = walletAddress || "";
+    let resolvedWalletKey = preferredWalletKey || walletChoice;
     setError("");
     setResult(null);
+    setDeployStep("");
     if (requiresLoginForSubmit) {
       setError(t("deploy.errors.signInRequired"));
       return;
@@ -338,17 +447,38 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
       setError(t("deploy.errors.solNegative"));
       return;
     }
+    if (initialBuySolNum <= 0) {
+      setError("Pump deploy requires an initial buy greater than 0 SOL.");
+      return;
+    }
     if (Number(form.initialBuyTokens || 0) < 0) {
       setError(t("deploy.errors.tokensNegative"));
       return;
     }
 
+    if (!activeProvider || !activeWalletAddress) {
+      const wallets = getInjectedWallets();
+      if (resolvedWalletKey && !wallets.some((w) => w.key === resolvedWalletKey)) {
+        resolvedWalletKey = "";
+        setWalletChoice("");
+      }
+      if (!resolvedWalletKey) {
+        if (wallets.length > 0) {
+          setShowWalletSelect(true);
+          return;
+        }
+        setError("No supported wallet found. Install Phantom or Solflare.");
+        return;
+      }
+      setWalletChoice(resolvedWalletKey);
+    }
+
     setLoading(true);
     try {
       if (!activeProvider || !activeWalletAddress) {
-        const connected = await connectWallet();
+        const connected = await connectWallet(resolvedWalletKey);
         if (!connected) {
-          throw new Error("Wallet connection is required to deploy.");
+          throw new Error("Wallet connection failed. Select Phantom or Solflare and try again.");
         }
         activeProvider = connected.provider;
         activeWalletAddress = connected.address;
@@ -368,26 +498,56 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
       const name = form.name.trim();
       const description = form.description.trim();
 
-      const metadataForm = new FormData();
-      metadataForm.append("file", imageFile, imageFile.name || "token-media");
-      if (bannerFile) {
-        metadataForm.append("banner", bannerFile, bannerFile.name || "token-banner");
-      }
-      metadataForm.append("name", name);
-      metadataForm.append("symbol", symbol);
-      metadataForm.append("description", description);
-      metadataForm.append("twitter", form.twitter.trim());
-      metadataForm.append("telegram", form.telegram.trim());
-      metadataForm.append("website", form.website.trim());
-      metadataForm.append("showName", "true");
-
-      const metadataRes = await fetch("https://pump.fun/api/ipfs", {
-        method: "POST",
-        body: metadataForm,
-      });
-      const metadataData = await metadataRes.json().catch(() => ({}));
-      if (!metadataRes.ok) {
-        throw new Error(metadataData?.error || "Metadata upload failed.");
+      setDeployStep("Uploading metadata...");
+      const imageDataUri = await fileToDataUri(imageFile);
+      const bannerDataUri = bannerFile ? await fileToDataUri(bannerFile) : "";
+      let metadataData = {};
+      let metadataProxyError = "";
+      try {
+        const metadataRes = await fetchWithTimeout("/api/deploy/pump-ipfs", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            imageDataUri,
+            imageFileName: imageFile?.name || "token-media",
+            bannerDataUri,
+            bannerFileName: bannerFile?.name || "token-banner",
+            name,
+            symbol,
+            description,
+            twitter: form.twitter.trim(),
+            telegram: form.telegram.trim(),
+            website: form.website.trim(),
+          }),
+        }, 45000, "Metadata upload");
+        if (!metadataRes.ok) {
+          const message = await readErrorFromResponse(metadataRes, "Metadata upload failed.");
+          throw new Error(message);
+        }
+        metadataData = await metadataRes.json().catch(() => ({}));
+      } catch (proxyError) {
+        metadataProxyError = proxyError?.message || "proxy upload failed";
+        setDeployStep("Uploading metadata (fallback)...");
+        const metadataForm = new FormData();
+        metadataForm.append("file", imageFile, imageFile?.name || "token-media");
+        if (bannerFile) metadataForm.append("banner", bannerFile, bannerFile?.name || "token-banner");
+        metadataForm.append("name", name);
+        metadataForm.append("symbol", symbol);
+        metadataForm.append("description", description);
+        metadataForm.append("twitter", form.twitter.trim());
+        metadataForm.append("telegram", form.telegram.trim());
+        metadataForm.append("website", form.website.trim());
+        metadataForm.append("showName", "true");
+        const metadataResDirect = await fetchWithTimeout("https://pump.fun/api/ipfs", {
+          method: "POST",
+          body: metadataForm,
+        }, 45000, "Metadata upload fallback");
+        if (!metadataResDirect.ok) {
+          const directMessage = await readErrorFromResponse(metadataResDirect, "direct upload failed");
+          throw new Error(`Metadata upload failed (${metadataProxyError} | ${directMessage})`);
+        }
+        metadataData = await metadataResDirect.json().catch(() => ({}));
       }
       const metadataUri = String(metadataData?.metadataUri || "").trim();
       if (!metadataUri) {
@@ -404,41 +564,91 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
       const mintKeypair = Keypair.generate();
       const amount = initialBuySolNum;
 
-      const tradeRes = await fetch("https://pumpportal.fun/api/trade-local", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          publicKey: activeWalletAddress,
-          action: "create",
-          tokenMetadata: {
-            name,
-            symbol,
-            uri: metadataUri,
-          },
-          mint: mintKeypair.publicKey.toBase58(),
-          denominatedInSol: "true",
-          amount,
-          slippage: DEPLOY_SLIPPAGE,
-          priorityFee: DEPLOY_PRIORITY_FEE,
-          pool: "pump",
-          isMayhemMode: form.mayhemMode ? "true" : "false",
-        }),
-      });
-      if (!tradeRes.ok) {
-        const txt = await tradeRes.text().catch(() => "");
-        throw new Error(txt || "Failed to build deploy transaction.");
+      setDeployStep("Building transaction...");
+      const basePayload = {
+        publicKey: activeWalletAddress,
+        action: "create",
+        tokenMetadata: { name, symbol, uri: metadataUri },
+        denominatedInSol: "true",
+        amount,
+        slippage: DEPLOY_SLIPPAGE,
+        priorityFee: DEPLOY_PRIORITY_FEE,
+        pool: "pump",
+      };
+      const payloadCandidates = [
+        { ...basePayload, mint: mintKeypair.publicKey.toBase58() },
+        { ...basePayload, mint: bs58.encode(mintKeypair.secretKey) },
+      ];
+      if (form.mayhemMode) {
+        payloadCandidates.push(
+          { ...basePayload, mint: mintKeypair.publicKey.toBase58(), isMayhemMode: "true" },
+          { ...basePayload, mint: bs58.encode(mintKeypair.secretKey), isMayhemMode: "true" }
+        );
       }
-      const txBytes = new Uint8Array(await tradeRes.arrayBuffer());
+
+      let txBytes = null;
+      const buildErrors = [];
+      for (const candidate of payloadCandidates) {
+        if (txBytes) break;
+        try {
+          const tradeRes = await fetchWithTimeout("/api/deploy/pump-trade-local", {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(candidate),
+          }, 30000, "Transaction build");
+          if (tradeRes.ok) {
+            const tradeData = await tradeRes.json().catch(() => ({}));
+            if (tradeData?.txBase64) {
+              txBytes = base64ToBytes(tradeData.txBase64);
+              break;
+            }
+            buildErrors.push("proxy: missing tx payload");
+          } else {
+            const message = await readErrorFromResponse(tradeRes, "proxy bad request");
+            buildErrors.push(`proxy: ${message}`);
+          }
+        } catch (err) {
+          buildErrors.push(`proxy: ${err?.message || "request failed"}`);
+        }
+
+        if (txBytes) break;
+        setDeployStep("Building transaction (fallback)...");
+        try {
+          const tradeResDirect = await fetchWithTimeout("https://pumpportal.fun/api/trade-local", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(candidate),
+          }, 30000, "Transaction build fallback");
+          if (tradeResDirect.ok) {
+            txBytes = new Uint8Array(await tradeResDirect.arrayBuffer());
+            break;
+          }
+          const message = await readErrorFromResponse(tradeResDirect, "direct bad request");
+          buildErrors.push(`direct: ${message}`);
+        } catch (err) {
+          buildErrors.push(`direct: ${err?.message || "request failed"}`);
+        }
+      }
+      if (!txBytes) {
+        throw new Error(`Transaction build failed: ${buildErrors.slice(0, 4).join(" | ") || "Bad Request"}`);
+      }
+      if (!txBytes || !txBytes.length) {
+        throw new Error("Transaction build failed: empty transaction payload.");
+      }
       const tx = VersionedTransaction.deserialize(txBytes);
       tx.sign([mintKeypair]);
+      setDeployStep("Waiting for wallet signature...");
       const signedTx = await activeProvider.signTransaction(tx);
 
       const connection = new Connection(DEPLOY_RPC_URL, "confirmed");
-      const signature = await connection.sendRawTransaction(signedTx.serialize(), {
+      setDeployStep("Sending transaction...");
+      const signature = await withTimeout(connection.sendRawTransaction(signedTx.serialize(), {
         maxRetries: 5,
         skipPreflight: false,
-      });
-      await connection.confirmTransaction(signature, "confirmed");
+      }), 30000, "Transaction submit");
+      setDeployStep("Confirming on-chain...");
+      await withTimeout(connection.confirmTransaction(signature, "confirmed"), 45000, "Transaction confirmation");
 
       const mint = mintKeypair.publicKey.toBase58();
       let recordData = {};
@@ -482,8 +692,24 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
       }
       setWalletProvider(null);
       setWalletAddress("");
+      setDeployStep("");
       setLoading(false);
     }
+  };
+
+  const handleDeployClick = () => {
+    if (loading || walletConnecting || requiresLoginForSubmit) return;
+    setError("");
+    const wallets = getInjectedWallets();
+    if (!walletProvider || !walletAddress) {
+      if (!wallets.length) {
+        setError("No supported wallet found. Install Phantom or Solflare.");
+        return;
+      }
+      setShowWalletSelect(true);
+      return;
+    }
+    void submit(walletChoice || "");
   };
 
   const labelStyle = {
@@ -496,8 +722,8 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
   };
 
   return (
-    <div style={{position:"fixed",inset:0,zIndex:999,display:"flex",alignItems:"center",justifyContent:"center",animation:"fadeIn .2s ease"}} onClick={onClose}>
-      <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,.82)",backdropFilter:"blur(10px)"}}/>
+    <div style={{position:"fixed",inset:0,zIndex:999,display:"flex",alignItems:"center",justifyContent:"center",animation:"fadeIn .2s ease"}}>
+      <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,.82)",backdropFilter:"blur(10px)"}} onClick={onClose}/>
       <div className="glass deploy-panel" onClick={e=>e.stopPropagation()} style={{position:"relative",zIndex:1,animation:"slideUp .25s ease",boxShadow:"0 32px 80px rgba(0,0,0,.6),0 0 60px rgba(255,106,0,.07)"}}>
         <div className="deploy-header" style={{position:"relative",display:"flex",justifyContent:"center",alignItems:"center"}}>
           <div style={{textAlign:"center"}}>
@@ -508,7 +734,6 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
             <div style={{fontWeight:800,fontSize:24,color:"#fff",marginBottom:4}}>{t("deploy.launchToken")}</div>
             <div style={{fontSize:12,color:"rgba(255,255,255,.45)"}}>{t("deploy.subtitle")}</div>
           </div>
-          <button onClick={onClose} style={{position:"absolute",right:0,background:"none",border:"none",color:"rgba(255,255,255,.35)",fontSize:22,cursor:"pointer"}} aria-label="Close deploy modal">x</button>
         </div>
 
         <div className="deploy-body">
@@ -737,6 +962,9 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
         )}
 
         {error && <div style={{marginTop:12,background:"rgba(255,64,96,.1)",border:"1px solid rgba(255,64,96,.2)",borderRadius:8,padding:"10px 12px",fontSize:13,color:"#ff8080"}}>{error}</div>}
+        {loading && deployStep && (
+          <div style={{marginTop:10,fontSize:12,color:"rgba(255,255,255,.68)"}}>{deployStep}</div>
+        )}
 
         {result && (
           <div style={{marginTop:12,background:"rgba(56,189,248,.08)",border:"1px solid rgba(56,189,248,.26)",borderRadius:10,padding:"12px 14px"}}>
@@ -763,11 +991,49 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
 
         <div className="deploy-actions">
           <button className="btn-ghost" onClick={onClose} style={{padding:"10px 16px",fontSize:13}}>{t("common.close")}</button>
-          <button className="btn-fire" onClick={submit} disabled={loading || requiresLoginForSubmit || walletConnecting} style={{padding:"10px 18px",fontSize:13}}>
+          <button className="btn-fire" onClick={handleDeployClick} disabled={loading || requiresLoginForSubmit || walletConnecting} style={{padding:"10px 18px",fontSize:13}}>
             {loading ? t("deploy.deploying") : walletConnecting ? t("deploy.connectingWallet") : t("deploy.deploy")}
           </button>
         </div>
       </div>
+      {showWalletSelect && (
+        <div
+          style={{position:"fixed",inset:0,zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center"}}
+          onClick={()=>setShowWalletSelect(false)}
+        >
+          <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,.72)"}} />
+          <div
+            className="glass"
+            onClick={(e)=>e.stopPropagation()}
+            style={{position:"relative",zIndex:1,width:"min(360px,92vw)",padding:"16px 16px",border:"1px solid rgba(255,106,0,.24)"}}
+          >
+            <div style={{fontSize:16,fontWeight:800,color:"#fff",marginBottom:6}}>Select Wallet</div>
+            <div style={{fontSize:12,color:"rgba(255,255,255,.5)",marginBottom:12}}>Choose which wallet signs this deploy.</div>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {getInjectedWallets().map((w) => (
+                <button
+                  key={w.key}
+                  className="btn-fire"
+                  style={{padding:"10px 12px",fontSize:13}}
+                  onClick={() => {
+                    setShowWalletSelect(false);
+                    setWalletChoice(w.key);
+                    void submit(w.key);
+                  }}
+                >
+                  {w.label}
+                </button>
+              ))}
+              {!getInjectedWallets().length && (
+                <div style={{fontSize:12,color:"#ff8f8f"}}>No supported wallet found. Install Phantom or Solflare.</div>
+              )}
+            </div>
+            <div style={{display:"flex",justifyContent:"flex-end",marginTop:12}}>
+              <button className="btn-ghost" style={{padding:"8px 12px",fontSize:12}} onClick={()=>setShowWalletSelect(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -67,6 +67,7 @@ export async function initDb() {
       splits INTEGER NOT NULL,
       selected_bot TEXT NOT NULL DEFAULT 'burn',
       active BOOLEAN NOT NULL DEFAULT FALSE,
+      disconnected BOOLEAN NOT NULL DEFAULT FALSE,
       burned BIGINT NOT NULL DEFAULT 0,
       pending BIGINT NOT NULL DEFAULT 0,
       tx_count BIGINT NOT NULL DEFAULT 0,
@@ -89,6 +90,11 @@ export async function initDb() {
   await pool.query(`
     ALTER TABLE tokens
     ADD COLUMN IF NOT EXISTS selected_bot TEXT NOT NULL DEFAULT 'burn';
+  `);
+
+  await pool.query(`
+    ALTER TABLE tokens
+    ADD COLUMN IF NOT EXISTS disconnected BOOLEAN NOT NULL DEFAULT FALSE;
   `);
 
   await pool.query(`

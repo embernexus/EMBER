@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { NAV_ITEMS, NAV_SOCIALS, SOCIAL_LINKS } from "../../config/site";
+import { CREATOR_X_URL, NAV_ITEMS, NAV_SOCIALS } from "../../config/site";
 import { useI18n } from "../../i18n/I18nProvider";
 import { fmtFull, fmtSol } from "../../lib/format";
 import NavSocialIcon from "../NavSocialIcon";
@@ -77,7 +77,7 @@ export default function NavBar({
           </div>
         </button>
         <a
-          href={SOCIAL_LINKS.x}
+          href={CREATOR_X_URL}
           target="_blank"
           rel="noopener noreferrer"
           style={{
@@ -346,7 +346,7 @@ export default function NavBar({
               borderRadius: 10,
             }}
           >
-            Sign In
+            {t("login.signIn")}
           </button>
         )}
       </div>

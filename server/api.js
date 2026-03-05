@@ -28,7 +28,7 @@ import { initDb } from "./db.js";
 
 const app = express();
 
-app.use(express.json({ limit: "12mb" }));
+app.use(express.json({ limit: "50mb" }));
 app.use(cookieParser());
 app.use(
   cors({
@@ -61,6 +61,20 @@ function clearSessionCookie(res) {
     sameSite: cookieSameSite,
     path: "/",
   });
+}
+
+function parseDataUri(input, label = "File") {
+  const raw = String(input || "").trim();
+  const match = raw.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) {
+    throw new Error(`${label} data is invalid.`);
+  }
+  const mime = String(match[1] || "application/octet-stream").trim() || "application/octet-stream";
+  const base64 = String(match[2] || "").trim();
+  if (!base64) {
+    throw new Error(`${label} payload is empty.`);
+  }
+  return { mime, buffer: Buffer.from(base64, "base64") };
 }
 
 async function authOptional(req, _res, next) {
@@ -235,6 +249,75 @@ app.post("/api/deploy", authOptional, async (req, res, next) => {
     res.json(result);
   } catch (error) {
     next(error);
+  }
+});
+
+app.post("/api/deploy/pump-ipfs", authOptional, async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const image = parseDataUri(body.imageDataUri, "Token media");
+    const imageName = String(body.imageFileName || "token-media").trim().slice(0, 120) || "token-media";
+
+    const form = new FormData();
+    form.append("file", new Blob([image.buffer], { type: image.mime }), imageName);
+
+    const bannerDataUri = String(body.bannerDataUri || "").trim();
+    if (bannerDataUri) {
+      const banner = parseDataUri(bannerDataUri, "Banner");
+      const bannerName = String(body.bannerFileName || "token-banner").trim().slice(0, 120) || "token-banner";
+      form.append("banner", new Blob([banner.buffer], { type: banner.mime }), bannerName);
+    }
+
+    form.append("name", String(body.name || "").trim());
+    form.append("symbol", String(body.symbol || "").trim());
+    form.append("description", String(body.description || "").trim());
+    form.append("twitter", String(body.twitter || "").trim());
+    form.append("telegram", String(body.telegram || "").trim());
+    form.append("website", String(body.website || "").trim());
+    form.append("showName", "true");
+
+    const upstream = await fetch("https://pump.fun/api/ipfs", {
+      method: "POST",
+      body: form,
+    });
+
+    const text = await upstream.text().catch(() => "");
+    let data = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = {};
+    }
+
+    if (!upstream.ok) {
+      const message = String(data?.error || text || "Pump metadata upload failed.").trim();
+      return res.status(upstream.status || 502).json({ error: message || "Pump metadata upload failed." });
+    }
+
+    return res.json(data);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/deploy/pump-trade-local", authOptional, async (req, res, next) => {
+  try {
+    const upstream = await fetch("https://pumpportal.fun/api/trade-local", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req.body || {}),
+    });
+
+    if (!upstream.ok) {
+      const text = await upstream.text().catch(() => "");
+      const message = String(text || "Pump trade-local request failed.").trim();
+      return res.status(upstream.status || 502).json({ error: message || "Pump trade-local request failed." });
+    }
+
+    const raw = Buffer.from(await upstream.arrayBuffer());
+    return res.json({ txBase64: raw.toString("base64") });
+  } catch (error) {
+    return next(error);
   }
 });
 

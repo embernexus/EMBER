@@ -219,6 +219,25 @@ async function status() {
   }
 }
 
+async function resetAll() {
+  await initDb();
+  await pool.query(`
+    TRUNCATE TABLE
+      token_funding_sources,
+      volume_trade_wallets,
+      bot_jobs,
+      bot_modules,
+      token_events,
+      token_deposit_pool,
+      token_deposit_keys,
+      tokens,
+      sessions,
+      users
+    RESTART IDENTITY CASCADE
+  `);
+  console.log("[db-portability] reset complete (all runtime data cleared)");
+}
+
 async function main() {
   const cmd = String(process.argv[2] || "").trim().toLowerCase();
   const file = argValue("--file");
@@ -230,11 +249,14 @@ async function main() {
       await importSnapshot(file);
     } else if (cmd === "status") {
       await status();
+    } else if (cmd === "reset") {
+      await resetAll();
     } else {
       console.log("Usage:");
       console.log("  node scripts/db-portability.mjs export --file <snapshot.json>");
       console.log("  node scripts/db-portability.mjs import --file <snapshot.json>");
       console.log("  node scripts/db-portability.mjs status");
+      console.log("  node scripts/db-portability.mjs reset");
       process.exitCode = 1;
     }
   } finally {

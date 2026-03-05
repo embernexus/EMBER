@@ -18,9 +18,10 @@ export const EMBER_TOKEN_CONTRACT = envOr(import.meta.env.VITE_EMBER_TOKEN_CONTR
 
 export const BUY_EMBER_URL = envOr(import.meta.env.VITE_BUY_EMBER_URL, "https://pump.fun");
 export const SOLANA_WEBSITE_URL = envOr(import.meta.env.VITE_SOLANA_URL, "https://solana.com");
+export const CREATOR_X_URL = envOr(import.meta.env.VITE_CREATOR_X_URL, "https://x.com/satoshEH_");
 
 export const SOCIAL_LINKS = {
-  x: envOr(import.meta.env.VITE_X_URL, "https://x.com/satoshEH_"),
+  x: envOr(import.meta.env.VITE_COMMUNITY_X_URL || import.meta.env.VITE_X_URL, "https://x.com/satoshEH_"),
   telegram: envOr(import.meta.env.VITE_TELEGRAM_URL, "https://t.me/ember_nexus"),
   github: envOr(import.meta.env.VITE_GITHUB_URL, "https://github.com/embernexus"),
 };

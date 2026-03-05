@@ -46,12 +46,15 @@ function toToken(row) {
     splits: Number(row.splits),
     selectedBot: String(row.selected_bot || "burn"),
     active: row.active,
+    disconnected: Boolean(row.disconnected),
     burned: Number(row.burned),
     pending: Number(row.pending),
     txCount: Number(row.tx_count),
     moduleType: String(row.module_type || row.selected_bot || "burn"),
     moduleEnabled:
-      typeof row.module_enabled === "boolean" ? row.module_enabled : Boolean(row.active),
+      typeof row.module_enabled === "boolean"
+        ? row.module_enabled
+        : Boolean(row.active) && !Boolean(row.disconnected),
     moduleConfig,
     moduleState,
     moduleLastError: row.module_last_error ? String(row.module_last_error) : "",
@@ -1560,6 +1563,7 @@ export async function getTokenLiveDetails(userId, tokenId) {
       pictureUrl: String(tokenRow.picture_url || ""),
       selectedBot: String(tokenRow.selected_bot || "burn"),
       active: Boolean(tokenRow.active),
+      disconnected: Boolean(tokenRow.disconnected),
     },
     addresses: enriched,
     totals,
@@ -1569,7 +1573,7 @@ export async function getTokenLiveDetails(userId, tokenId) {
 export async function deleteToken(userId, tokenId) {
   const tokenRes = await pool.query(
     `
-      SELECT id, symbol, name, mint, picture_url, deposit, selected_bot, active
+      SELECT id, symbol, name, mint, picture_url, deposit, selected_bot, active, disconnected
       FROM tokens
       WHERE user_id = $1 AND id = $2
       LIMIT 1
@@ -1597,11 +1601,27 @@ export async function deleteToken(userId, tokenId) {
     await client.query(
       `
         INSERT INTO token_events (user_id, token_id, token_symbol, event_type, message, tx)
-        VALUES ($1, NULL, $2, 'delete', $3, NULL)
+        VALUES ($1, $2, $3, 'delete', $4, NULL)
       `,
-      [userId, String(tokenRow.symbol), `Token removed from Nexus: ${tokenRow.symbol} (${tokenRow.mint})`]
+      [userId, tokenId, String(tokenRow.symbol), `Token disconnected from Nexus: ${tokenRow.symbol} (${tokenRow.mint})`]
     );
-    await client.query("DELETE FROM tokens WHERE user_id = $1 AND id = $2", [userId, tokenId]);
+    await client.query(
+      `
+        UPDATE tokens
+        SET active = FALSE,
+            disconnected = TRUE
+        WHERE user_id = $1 AND id = $2
+      `,
+      [userId, tokenId]
+    );
+    await client.query(
+      `
+        UPDATE bot_modules
+        SET enabled = FALSE
+        WHERE token_id = $1
+      `,
+      [tokenId]
+    );
   });
 
   return { ok: true };
@@ -2240,18 +2260,19 @@ export async function attachToken(userId, payload) {
     throw new Error("A valid mint address is required.");
   }
 
-  const tokenCountPrecheck = await pool.query("SELECT COUNT(*)::int AS c FROM tokens WHERE user_id = $1", [
-    userId,
-  ]);
+  const tokenCountPrecheck = await pool.query(
+    "SELECT COUNT(*)::int AS c FROM tokens WHERE user_id = $1 AND disconnected = FALSE",
+    [userId]
+  );
   if (tokenCountPrecheck.rows[0].c >= config.maxTokensPerAccount) {
     throw new Error(`Max ${config.maxTokensPerAccount} burners per account reached.`);
   }
 
   const existsPrecheck = await pool.query(
-    "SELECT id FROM tokens WHERE user_id = $1 AND mint = $2 LIMIT 1",
+    "SELECT id, disconnected FROM tokens WHERE user_id = $1 AND mint = $2 LIMIT 1",
     [userId, mint]
   );
-  if (existsPrecheck.rowCount) {
+  if (existsPrecheck.rowCount && !Boolean(existsPrecheck.rows[0].disconnected)) {
     throw new Error("That mint is already attached on your account.");
   }
 
@@ -2264,120 +2285,213 @@ export async function attachToken(userId, payload) {
   const name = String(payload.name || resolved.name || "Token").slice(0, 64);
   const pictureUrl = normalizeMediaUrl(payload.pictureUrl || resolved.pictureUrl || "").slice(0, 255);
   const pendingDepositId = String(payload.pendingDepositId || "").trim();
+  const moduleType = selectedBot === MODULE_TYPES.volume ? MODULE_TYPES.volume : MODULE_TYPES.burn;
+  const volumeOverrides = {
+    claimIntervalSec: sanitizeInterval(payload.claimSec, claimSec),
+    tradeWalletCount: Math.floor(sanitizeRange(payload.tradeWalletCount, 1, 1, 5)),
+    speed: sanitizeRange(payload.speed, 35, 0, 100),
+    aggression: sanitizeRange(payload.aggression, 35, 0, 100),
+    minTradeSol: sanitizeSol(payload.minTradeSol, 0.01, 0.001, 10),
+    maxTradeSol: sanitizeSol(payload.maxTradeSol, 0.05, 0.001, 100),
+  };
+  if (payload.claimEnabled !== undefined) {
+    volumeOverrides.claimEnabled = Boolean(payload.claimEnabled);
+  }
+  const initialConfig =
+    moduleType === MODULE_TYPES.volume
+      ? mergeModuleConfig(MODULE_TYPES.volume, defaultVolumeModuleConfig(), volumeOverrides)
+      : mergeModuleConfig(
+          MODULE_TYPES.burn,
+          defaultBurnModuleConfig({ claim_sec: claimSec, burn_sec: burnSec, splits }),
+          {
+            claimIntervalSec: sanitizeInterval(payload.claimSec, claimSec),
+            burnIntervalSec: sanitizeInterval(payload.burnSec, burnSec),
+            splitBuys: sanitizeSplits(payload.splits, splits),
+          }
+        );
   const token = await withTx(async (client) => {
-    const tokenCountRes = await client.query("SELECT COUNT(*)::int AS c FROM tokens WHERE user_id = $1", [
-      userId,
-    ]);
+    const tokenCountRes = await client.query(
+      "SELECT COUNT(*)::int AS c FROM tokens WHERE user_id = $1 AND disconnected = FALSE",
+      [userId]
+    );
 
     if (tokenCountRes.rows[0].c >= config.maxTokensPerAccount) {
       throw new Error(`Max ${config.maxTokensPerAccount} burners per account reached.`);
     }
 
     const existsRes = await client.query(
-      "SELECT id FROM tokens WHERE user_id = $1 AND mint = $2 LIMIT 1",
+      "SELECT * FROM tokens WHERE user_id = $1 AND mint = $2 LIMIT 1 FOR UPDATE",
       [userId, mint]
     );
-    if (existsRes.rowCount) {
+    if (existsRes.rowCount && !Boolean(existsRes.rows[0].disconnected)) {
       throw new Error("That mint is already attached on your account.");
     }
 
-    const generatedDeposit = pendingDepositId
-      ? await consumeReservedDepositAddress(client, userId, pendingDepositId)
-      : await generateVanityDeposit(config.depositVanityPrefix || "EMBR");
-    const deposit = String(generatedDeposit?.pubkey || "").trim();
-    if (!deposit) {
-      throw new Error("Failed to generate deposit address.");
-    }
-    const depositSecretKeyBase58 = String(generatedDeposit?.secretKeyBase58 || "").trim();
-    if (!depositSecretKeyBase58) {
-      throw new Error("Failed to generate deposit private key.");
-    }
-    const storedDepositSecret = encryptDepositSecret(depositSecretKeyBase58);
-
-    const id = makeId("tok");
     const now = Date.now();
+    let tokenId;
+    let tokenRow;
 
-    const inserted = await client.query(
-      `
-        INSERT INTO tokens (
-          id, user_id, symbol, name, mint, picture_url, deposit,
-          claim_sec, burn_sec, splits, selected_bot, active, burned, pending, tx_count,
-          next_claim_at, next_burn_at
-        )
-        VALUES (
-          $1, $2, $3, $4, $5, $6, $7,
-          $8, $9, $10, $11, FALSE, 0, 0, 0,
-          to_timestamp($12 / 1000.0), to_timestamp($13 / 1000.0)
-        )
-        RETURNING *
-      `,
-      [
-        id,
-        userId,
-        symbol,
-        name,
-        mint,
-        pictureUrl,
-        deposit,
-        claimSec,
-        burnSec,
-        splits,
-        selectedBot,
-        now + claimSec * 1000,
-        now + burnSec * 1000,
-      ]
-    );
+    if (existsRes.rowCount && Boolean(existsRes.rows[0].disconnected)) {
+      const existing = existsRes.rows[0];
+      tokenId = String(existing.id);
+      let deposit = String(existing.deposit || "").trim();
 
-    await client.query(
-      `
-        INSERT INTO token_deposit_keys (token_id, user_id, deposit_pubkey, secret_key_base58)
-        VALUES ($1, $2, $3, $4)
-      `,
-      [id, userId, deposit, storedDepositSecret]
-    );
+      if (pendingDepositId) {
+        const generatedDeposit = await consumeReservedDepositAddress(client, userId, pendingDepositId);
+        const nextDeposit = String(generatedDeposit?.pubkey || "").trim();
+        if (!nextDeposit) {
+          throw new Error("Failed to generate deposit address.");
+        }
+        const depositSecretKeyBase58 = String(generatedDeposit?.secretKeyBase58 || "").trim();
+        if (!depositSecretKeyBase58) {
+          throw new Error("Failed to generate deposit private key.");
+        }
+        const storedDepositSecret = encryptDepositSecret(depositSecretKeyBase58);
+        deposit = nextDeposit;
+        await client.query(
+          `
+            INSERT INTO token_deposit_keys (token_id, user_id, deposit_pubkey, secret_key_base58)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (token_id)
+            DO UPDATE SET
+              deposit_pubkey = EXCLUDED.deposit_pubkey,
+              secret_key_base58 = EXCLUDED.secret_key_base58
+          `,
+          [tokenId, userId, deposit, storedDepositSecret]
+        );
+      }
 
-    await client.query(
-      `
-        INSERT INTO token_events (user_id, token_id, token_symbol, event_type, message, tx)
-        VALUES ($1, $2, $3, 'claim', $4, NULL)
-      `,
-      [userId, id, symbol, `Token attached: ${symbol} created in paused mode. Configure settings, then start.`]
-    );
+      const updated = await client.query(
+        `
+          UPDATE tokens
+          SET symbol = $1,
+              name = $2,
+              picture_url = $3,
+              deposit = $4,
+              claim_sec = $5,
+              burn_sec = $6,
+              splits = $7,
+              selected_bot = $8,
+              active = FALSE,
+              disconnected = FALSE,
+              next_claim_at = to_timestamp($9 / 1000.0),
+              next_burn_at = to_timestamp($10 / 1000.0)
+          WHERE id = $11
+          RETURNING *
+        `,
+        [
+          symbol,
+          name,
+          pictureUrl,
+          deposit,
+          claimSec,
+          burnSec,
+          splits,
+          selectedBot,
+          now + claimSec * 1000,
+          now + burnSec * 1000,
+          tokenId,
+        ]
+      );
+      tokenRow = updated.rows[0];
 
-    const moduleType = selectedBot === MODULE_TYPES.volume ? MODULE_TYPES.volume : MODULE_TYPES.burn;
-    const volumeOverrides = {
-      claimIntervalSec: sanitizeInterval(payload.claimSec, claimSec),
-      tradeWalletCount: Math.floor(sanitizeRange(payload.tradeWalletCount, 1, 1, 5)),
-      speed: sanitizeRange(payload.speed, 35, 0, 100),
-      aggression: sanitizeRange(payload.aggression, 35, 0, 100),
-      minTradeSol: sanitizeSol(payload.minTradeSol, 0.01, 0.001, 10),
-      maxTradeSol: sanitizeSol(payload.maxTradeSol, 0.05, 0.001, 100),
-    };
-    if (payload.claimEnabled !== undefined) {
-      volumeOverrides.claimEnabled = Boolean(payload.claimEnabled);
+      await client.query(
+        `
+          INSERT INTO token_events (user_id, token_id, token_symbol, event_type, message, tx)
+          VALUES ($1, $2, $3, 'claim', $4, NULL)
+        `,
+        [userId, tokenId, symbol, `Token re-attached: ${symbol} reconnected in paused mode. Configure settings, then start.`]
+      );
+    } else {
+      const generatedDeposit = pendingDepositId
+        ? await consumeReservedDepositAddress(client, userId, pendingDepositId)
+        : await generateVanityDeposit(config.depositVanityPrefix || "EMBR");
+      const deposit = String(generatedDeposit?.pubkey || "").trim();
+      if (!deposit) {
+        throw new Error("Failed to generate deposit address.");
+      }
+      const depositSecretKeyBase58 = String(generatedDeposit?.secretKeyBase58 || "").trim();
+      if (!depositSecretKeyBase58) {
+        throw new Error("Failed to generate deposit private key.");
+      }
+      const storedDepositSecret = encryptDepositSecret(depositSecretKeyBase58);
+      tokenId = makeId("tok");
+
+      const inserted = await client.query(
+        `
+          INSERT INTO tokens (
+            id, user_id, symbol, name, mint, picture_url, deposit,
+            claim_sec, burn_sec, splits, selected_bot, active, disconnected, burned, pending, tx_count,
+            next_claim_at, next_burn_at
+          )
+          VALUES (
+            $1, $2, $3, $4, $5, $6, $7,
+            $8, $9, $10, $11, FALSE, FALSE, 0, 0, 0,
+            to_timestamp($12 / 1000.0), to_timestamp($13 / 1000.0)
+          )
+          RETURNING *
+        `,
+        [
+          tokenId,
+          userId,
+          symbol,
+          name,
+          mint,
+          pictureUrl,
+          deposit,
+          claimSec,
+          burnSec,
+          splits,
+          selectedBot,
+          now + claimSec * 1000,
+          now + burnSec * 1000,
+        ]
+      );
+      tokenRow = inserted.rows[0];
+
+      await client.query(
+        `
+          INSERT INTO token_deposit_keys (token_id, user_id, deposit_pubkey, secret_key_base58)
+          VALUES ($1, $2, $3, $4)
+        `,
+        [tokenId, userId, deposit, storedDepositSecret]
+      );
+
+      await client.query(
+        `
+          INSERT INTO token_events (user_id, token_id, token_symbol, event_type, message, tx)
+          VALUES ($1, $2, $3, 'claim', $4, NULL)
+        `,
+        [userId, tokenId, symbol, `Token attached: ${symbol} created in paused mode. Configure settings, then start.`]
+      );
     }
-    const initialConfig =
-      moduleType === MODULE_TYPES.volume
-        ? mergeModuleConfig(MODULE_TYPES.volume, defaultVolumeModuleConfig(), volumeOverrides)
-        : mergeModuleConfig(
-            MODULE_TYPES.burn,
-            defaultBurnModuleConfig({ claim_sec: claimSec, burn_sec: burnSec, splits }),
-            {
-              claimIntervalSec: sanitizeInterval(payload.claimSec, claimSec),
-              burnIntervalSec: sanitizeInterval(payload.burnSec, burnSec),
-              splitBuys: sanitizeSplits(payload.splits, splits),
-            }
-          );
+
     await client.query(
       `
         INSERT INTO bot_modules (id, user_id, token_id, module_type, enabled, config_json, state_json, next_run_at)
         VALUES ($1, $2, $3, $4, FALSE, $5::jsonb, '{}'::jsonb, NOW())
-        ON CONFLICT (token_id, module_type) DO NOTHING
+        ON CONFLICT (token_id, module_type)
+        DO UPDATE SET
+          enabled = FALSE,
+          config_json = EXCLUDED.config_json,
+          state_json = '{}'::jsonb,
+          next_run_at = NOW(),
+          last_error = NULL
       `,
-      [makeId("mod"), userId, id, moduleType, JSON.stringify(initialConfig)]
+      [makeId("mod"), userId, tokenId, moduleType, JSON.stringify(initialConfig)]
     );
 
-    return toToken(inserted.rows[0]);
+    await client.query(
+      `
+        UPDATE bot_modules
+        SET enabled = FALSE
+        WHERE token_id = $1
+          AND module_type <> $2
+      `,
+      [tokenId, moduleType]
+    );
+
+    return toToken(tokenRow);
   });
 
   if (pendingDepositId) {
@@ -2415,6 +2529,9 @@ export async function updateToken(userId, tokenId, payload) {
     }
 
     const current = currentRes.rows[0];
+    if (current.disconnected) {
+      throw new Error("Token is disconnected. Re-attach this mint to resume automation.");
+    }
     const claimSec = payload.claimSec === undefined ? Number(current.claim_sec) : sanitizeInterval(payload.claimSec, Number(current.claim_sec));
     const burnSec = payload.burnSec === undefined ? Number(current.burn_sec) : sanitizeInterval(payload.burnSec, Number(current.burn_sec));
     const splits = payload.splits === undefined ? Number(current.splits) : sanitizeSplits(payload.splits, Number(current.splits));

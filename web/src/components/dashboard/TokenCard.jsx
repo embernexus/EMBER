@@ -49,7 +49,8 @@ function botModeUpper(bot) {
   return "BURN";
 }
 
-function runningLabel(bot, active) {
+function runningLabel(bot, active, disconnected) {
+  if (disconnected) return `${botModeUpper(bot)} DISCONNECTED`;
   if (!active) return `${botModeUpper(bot)} PAUSED`;
   if (bot === "volume") return "VOLUME RUNNING";
   if (bot === "market_maker") return "MM RUNNING";
@@ -62,6 +63,7 @@ function normalizeTokenState(token) {
   return {
     ...token,
     selectedBot: String(token?.selectedBot || token?.moduleType || "burn"),
+    disconnected: Boolean(token?.disconnected),
     claimSec: Math.max(60, Math.floor(toNum(token?.claimSec, 120))),
     burnSec: Math.max(60, Math.floor(toNum(token?.burnSec, 300))),
     splits: Math.max(1, Math.floor(toNum(token?.splits, 1))),
@@ -295,7 +297,9 @@ function LiveLogsPanel({ token, logs, details, detailsLoading, detailsError, onR
             )}
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 16, fontWeight: 800, color: "#fff" }}>Live Logs - ${token.symbol}</div>
-              <div style={{ fontSize: 12, color: "rgba(255,255,255,.35)" }}>{botModeName(bot)} - {token.active ? "Active" : "Paused"} - TX {fmtFull(token.txCount)}</div>
+              <div style={{ fontSize: 12, color: "rgba(255,255,255,.35)" }}>
+                {botModeName(bot)} - {token.disconnected ? "Disconnected" : token.active ? "Active" : "Paused"} - TX {fmtFull(token.txCount)}
+              </div>
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -356,7 +360,7 @@ function DeleteConfirmModal({ onClose, onConfirm, deleting, disableConfirm, reas
       <div className="glass" style={{ position: "relative", zIndex: 1, width: "min(520px,92vw)", padding: "20px 22px" }} onClick={(e) => e.stopPropagation()}>
         <div style={{ fontSize: 18, fontWeight: 800, color: "#fff", marginBottom: 10 }}>Delete Bot</div>
         <div style={{ fontSize: 13, color: "rgba(255,255,255,.68)", lineHeight: 1.55, marginBottom: 10 }}>
-          This permanently removes this bot from your account. Sweep and withdraw first.
+          This deletes the bot from active execution and keeps the token in your ticker history as disconnected. Sweep and withdraw first.
         </div>
         <div style={{ fontSize: 12, color: disableConfirm ? "#ff8f8f" : "rgba(255,255,255,.45)", marginBottom: 14 }}>{reason || "This action cannot be undone."}</div>
         <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
@@ -513,6 +517,7 @@ export default function TokenCard({
   const toggle = async (e) => {
     e.stopPropagation();
     if (saving) return;
+    if (token.disconnected) return;
     setErr("");
     setSaving(true);
     try {
@@ -543,16 +548,17 @@ export default function TokenCard({
     }
   };
 
-  const isActive = token.active;
+  const isDisconnected = Boolean(token.disconnected);
+  const isActive = Boolean(token.active) && !isDisconnected;
   const bot = String(token.selectedBot || token.moduleType || "burn");
-  const statusLabel = runningLabel(bot, isActive);
+  const statusLabel = runningLabel(bot, isActive, isDisconnected);
   const imageUrl = normalizeImageUrl(token.pictureUrl);
   const detailAddresses = Array.isArray(details?.addresses) ? details.addresses : [];
   const detailTotals = details?.totals || { sol: 0, token: 0 };
   const hasKnownFunds = detailAddresses.some((item) => Number(item?.solBalance || 0) > 0.00005 || Number(item?.tokenBalance || 0) > 0.000001);
   const deleteReason = hasKnownFunds
     ? "Cannot delete while funds remain on deposit or trade wallets."
-    : "Deleting removes this bot and its settings from your account.";
+    : "Deleting keeps this token in your ticker and marks it as disconnected.";
 
   return (
     <>
@@ -581,7 +587,7 @@ export default function TokenCard({
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
               <span style={{ fontWeight: 800, fontSize: 16, color: "#fff" }}>${token.symbol}</span>
               <span style={{ fontSize: 12, color: "rgba(255,255,255,.3)" }}>{token.name}</span>
-              <span className={isActive ? "tag-on" : "tag-off"}>
+              <span className={isActive ? "tag-on" : "tag-off"} style={isDisconnected ? { color: "#ff9f9f", borderColor: "rgba(255,140,140,.35)", background: "rgba(255,120,120,.08)" } : {}}>
                 {isActive && <span style={{ width: 5, height: 5, borderRadius: "50%", background: "#ff6a00", animation: "pulse-dot 2s infinite", display: "inline-block" }} />}
                 {statusLabel}
               </span>
@@ -602,8 +608,8 @@ export default function TokenCard({
 
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
             {isActive && <Ring total={Math.max(3, cycleSeconds)} />}
-            <button className="btn-ghost" onClick={toggle} disabled={saving} style={{ padding: "6px 14px", fontSize: 12 }}>
-              {saving ? "Saving..." : isActive ? "Pause" : "Start"}
+            <button className="btn-ghost" onClick={toggle} disabled={saving || isDisconnected} style={{ padding: "6px 14px", fontSize: 12, opacity: isDisconnected ? 0.55 : 1, cursor: isDisconnected ? "not-allowed" : "pointer" }}>
+              {saving ? "Saving..." : isDisconnected ? "Disconnected" : isActive ? "Pause" : "Start"}
             </button>
             <span style={{ color: "rgba(255,255,255,.2)", fontSize: 18, transform: open ? "rotate(180deg)" : "none", transition: "transform .2s", userSelect: "none" }}>{"\u2304"}</span>
           </div>
@@ -774,7 +780,7 @@ export default function TokenCard({
                   ) : (
                     <>
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                        {[["Mode", botModeName(bot)], ["Claim Every", fmtSec(token.claimSec)], ["Cycle Every", fmtSec(cycleSeconds)], ["Status", token.active ? "Active" : "Paused"]].map(([key, value]) => (
+                        {[["Mode", botModeName(bot)], ["Claim Every", fmtSec(token.claimSec)], ["Cycle Every", fmtSec(cycleSeconds)], ["Status", token.disconnected ? "Disconnected" : token.active ? "Active" : "Paused"]].map(([key, value]) => (
                           <div key={key} style={{ background: "rgba(255,255,255,.03)", borderRadius: 8, padding: "10px 12px" }}>
                             <div style={{ fontSize: 10, color: "rgba(255,255,255,.3)", marginBottom: 4, fontWeight: 600, letterSpacing: 0.5 }}>{String(key).toUpperCase()}</div>
                             <div style={{ fontSize: 13, color: "#fff", fontWeight: 700 }}>{value}</div>
@@ -782,9 +788,26 @@ export default function TokenCard({
                         ))}
                       </div>
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                        <button className="btn-ghost" onClick={() => setEditing(true)} style={{ padding: "8px 18px", fontSize: 12, width: "fit-content" }}>Edit Settings</button>
+                        <button className="btn-ghost" onClick={() => setEditing(true)} disabled={isDisconnected} style={{ padding: "8px 18px", fontSize: 12, width: "fit-content", opacity: isDisconnected ? 0.55 : 1, cursor: isDisconnected ? "not-allowed" : "pointer" }}>
+                          {isDisconnected ? "Reattach To Edit" : "Edit Settings"}
+                        </button>
                         <button className="btn-ghost" onClick={() => setShowLiveLogs(true)} style={{ padding: "8px 18px", fontSize: 12, width: "fit-content" }}>Live Logs</button>
-                        <button className="btn-ghost" onClick={() => { void fetchDetails(false); setShowDeleteConfirm(true); }} style={{ padding: "8px 18px", fontSize: 12, width: "fit-content", borderColor: "rgba(255,90,90,.3)", color: "#ff9f9f" }}>Delete Bot</button>
+                        <button
+                          className="btn-ghost"
+                          onClick={() => { void fetchDetails(false); setShowDeleteConfirm(true); }}
+                          disabled={isDisconnected}
+                          style={{
+                            padding: "8px 18px",
+                            fontSize: 12,
+                            width: "fit-content",
+                            borderColor: "rgba(255,90,90,.3)",
+                            color: "#ff9f9f",
+                            opacity: isDisconnected ? 0.55 : 1,
+                            cursor: isDisconnected ? "not-allowed" : "pointer",
+                          }}
+                        >
+                          Delete Bot
+                        </button>
                       </div>
                     </>
                   )}

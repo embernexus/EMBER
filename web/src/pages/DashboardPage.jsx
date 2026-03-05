@@ -19,8 +19,17 @@ export default function DashboardPage({
   onVolumeWithdraw,
 }) {
   const { t } = useI18n();
+  const visibleTokens = tokens.filter((t) => !t?.disconnected);
   const totalBurned = tokens.reduce((sum, t) => sum + (Number(t.burned) || 0), 0);
-  const activeCount = tokens.filter((t) => t.active).length;
+  const totalTransactions = tokens.reduce((sum, t) => sum + (Number(t.txCount) || 0), 0);
+  const activeCount = visibleTokens.filter((t) => t.active).length;
+  const getBotType = (token) => String(token?.selectedBot || token?.moduleType || "burn");
+  const burnBots = visibleTokens.filter((t) => getBotType(t) === "burn");
+  const volumeBots = visibleTokens.filter((t) => getBotType(t) === "volume");
+  const otherBots = visibleTokens.filter((t) => !["burn", "volume"].includes(getBotType(t)));
+  const activeBurnBots = burnBots.filter((t) => t.active).length;
+  const activeVolumeBots = volumeBots.filter((t) => t.active).length;
+  const activeOtherBots = otherBots.filter((t) => t.active).length;
 
   const pieColors = ["#22d3ee", "#a78bfa", "#34d399", "#facc15", "#f472b6", "#60a5fa"];
   const tokenBreakdown = tokens
@@ -41,7 +50,7 @@ export default function DashboardPage({
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14, marginBottom: 28 }}>
         {[
-          { l: t("dashboard.tokensConnected"), v: tokens.length, s: t("dashboard.integrations"), i: "\u{1FA99}", c: "#ff8c42" },
+          { l: t("dashboard.tokensConnected"), v: visibleTokens.length, s: t("dashboard.integrations"), i: "\u{1FA99}", c: "#ff8c42" },
           { l: t("dashboard.totalIncinerated"), v: fmt(totalBurned), s: t("dashboard.tokensGone"), i: "\u{1F525}", c: "#ff4500" },
           { l: t("dashboard.activeBots"), v: activeCount, s: t("dashboard.runningNow"), i: "\u26A1", c: "#ffd700" },
         ].map((k, i) => (
@@ -77,7 +86,7 @@ export default function DashboardPage({
             </button>
           </div>
 
-          {tokens.map((t) => (
+          {visibleTokens.map((t) => (
             <TokenCard
               key={t.id}
               token={t}
@@ -90,6 +99,11 @@ export default function DashboardPage({
               onVolumeWithdraw={onVolumeWithdraw}
             />
           ))}
+          {!visibleTokens.length && (
+            <div className="glass" style={{ padding: "18px 20px", fontSize: 13, color: "rgba(255,255,255,.5)", textAlign: "center" }}>
+              No active bots on dashboard. Use Attach to connect a token.
+            </div>
+          )}
 
           <div className="glass" style={{ padding: "22px 24px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
@@ -184,8 +198,11 @@ export default function DashboardPage({
             <div style={{ fontSize: 14, fontWeight: 800, color: "#fff", marginBottom: 14, textAlign: "center" }}>{t("dashboard.protocolStats")}</div>
             {[
               [t("dashboard.allTimeBurned"), `${fmt(totalBurned)} ${t("dashboard.tokens")}`],
-              [t("dashboard.totalTransactions"), fmtFull(tokens.reduce((sum, t) => sum + (Number(t.txCount) || 0), 0))],
-              [t("dashboard.activeSchedulers"), `${activeCount} / ${tokens.length}`],
+              [t("dashboard.totalTransactions"), fmtFull(totalTransactions)],
+              [t("dashboard.activeSchedulers"), `${activeCount} / ${visibleTokens.length}`],
+              [t("dashboard.burnBots"), `${activeBurnBots} / ${burnBots.length}`],
+              [t("dashboard.volumeBots"), `${activeVolumeBots} / ${volumeBots.length}`],
+              [t("dashboard.otherBots"), `${activeOtherBots} / ${otherBots.length}`],
             ].map(([k, v]) => (
               <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "9px 0", borderBottom: "1px solid rgba(255,255,255,.04)", fontSize: 13 }}>
                 <span style={{ color: "rgba(255,255,255,.32)", fontWeight: 600 }}>{k}</span>

@@ -13,7 +13,8 @@
     "start:worker": "node worker/worker.js",
     "db:status": "node scripts/db-portability.mjs status",
     "db:export": "node scripts/db-portability.mjs export",
-    "db:import": "node scripts/db-portability.mjs import"
+    "db:import": "node scripts/db-portability.mjs import",
+    "db:reset": "node scripts/db-portability.mjs reset"
   },
   "dependencies": {
     "@solana/spl-token": "^0.4.8",

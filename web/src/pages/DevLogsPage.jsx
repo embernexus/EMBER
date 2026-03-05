@@ -1,10 +1,9 @@
-import { DEV_LOGS, DEV_QUEUE } from "../config/content";
+import { DEV_LOGS } from "../config/content";
 import { useI18n } from "../i18n/I18nProvider";
 
 export default function DevLogsPage() {
   const { t } = useI18n();
   const logs = DEV_LOGS;
-  const queue = DEV_QUEUE;
 
   return (
     <section style={{position:"relative",zIndex:2,maxWidth:1240,margin:"0 auto",padding:"84px 24px 80px"}}>
@@ -62,17 +61,6 @@ export default function DevLogsPage() {
             <div style={{fontSize:11,color:"#ff9f5a",fontWeight:800,letterSpacing:.9,textTransform:"uppercase",marginBottom:8}}>{t("devlogs.releasePolicy")}</div>
             <div style={{fontSize:13,color:"rgba(255,255,255,.68)",lineHeight:1.7}}>
               {t("devlogs.releasePolicyBody")}
-            </div>
-          </div>
-          <div className="glass" style={{padding:"14px 14px 12px",border:"1px solid rgba(255,255,255,.09)",textAlign:"center"}}>
-            <div style={{fontSize:11,color:"#ff9f5a",fontWeight:800,letterSpacing:.9,textTransform:"uppercase",marginBottom:8}}>{t("devlogs.queue")}</div>
-            <div style={{display:"flex",flexDirection:"column",gap:7}}>
-              {queue.map(item=>(
-                <div key={item} style={{display:"flex",gap:8,alignItems:"flex-start",justifyContent:"center",fontSize:13,color:"rgba(255,255,255,.72)",lineHeight:1.55,textAlign:"center"}}>
-                  <span style={{color:"#ff8c42",marginTop:1}}>{"\u2022"}</span>
-                  <span>{item}</span>
-                </div>
-              ))}
             </div>
           </div>
         </div>

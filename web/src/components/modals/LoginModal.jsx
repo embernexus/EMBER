@@ -58,8 +58,8 @@ export default function LoginModal({onClose,onLogin}) {
             </div>
           ))}
           {err&&<div style={{background:"rgba(255,64,96,.1)",border:"1px solid rgba(255,64,96,.2)",borderRadius:8,padding:"10px 14px",fontSize:13,color:"#ff8080"}}>{err}</div>}
-          <button className="btn-fire" onClick={submit} disabled={loading} style={{padding:"13px",fontSize:14,marginTop:4}}>
-            {loading?<span style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><span style={{width:14,height:14,border:"2px solid rgba(255,255,255,.3)",borderTopColor:"#fff",borderRadius:"50%",animation:"spin .7s linear infinite",display:"inline-block"}}/>{t("login.authenticating")}</span>:tab==="login"?t("login.enter"):t("login.createAccount")}
+          <button className="btn-fire" onClick={submit} disabled={loading} style={{padding:"13px",fontSize:14,marginTop:4}} data-no-auto-translate="true">
+            {loading?<span style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><span style={{width:14,height:14,border:"2px solid rgba(255,255,255,.3)",borderTopColor:"#fff",borderRadius:"50%",animation:"spin .7s linear infinite",display:"inline-block"}}/>{t("login.authenticating")}</span>:tab==="login"?t("login.enter"):t("login.create")}
           </button>
         </div>
       </div>

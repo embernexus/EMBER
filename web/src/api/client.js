@@ -1,6 +1,6 @@
 import { API_BASE } from "../config/site";
 
-/** @typedef {{ id: string, symbol: string, name: string, mint: string, pictureUrl: string, deposit: string, claimSec: number, burnSec: number, splits: number, selectedBot: string, active: boolean, burned: number, pending: number, txCount: number, moduleType: string, moduleEnabled: boolean, moduleConfig: Record<string, any>, moduleState: Record<string, any>, moduleLastError: string }} Token */
+/** @typedef {{ id: string, symbol: string, name: string, mint: string, pictureUrl: string, deposit: string, claimSec: number, burnSec: number, splits: number, selectedBot: string, active: boolean, disconnected: boolean, burned: number, pending: number, txCount: number, moduleType: string, moduleEnabled: boolean, moduleConfig: Record<string, any>, moduleState: Record<string, any>, moduleLastError: string }} Token */
 /** @typedef {{ id: number|string, tokenId: string|null, token: string, moduleType: string, type: string, amount: number, msg: string, tx: string|null, age: number, createdAt: string }} FeedEvent */
 /** @typedef {{ key: string, d: string, v: number }} ChartPoint */
 /** @typedef {{ tokens: Token[], feed: FeedEvent[], logs: FeedEvent[], chartData: ChartPoint[] }} DashboardResponse */
@@ -69,7 +69,8 @@ async function requestJson(path, options = {}) {
 
   if (!res.ok) {
     const serverMsg = str(data.error, raw || "Request failed.").trim();
-    throw new ApiError(serverMsg || "Request failed.", res.status, data);
+    const fallback = `Request failed (${res.status}${res.statusText ? ` ${res.statusText}` : ""}).`;
+    throw new ApiError(serverMsg || fallback, res.status, data);
   }
 
   if (!isRecord(data)) return {};
@@ -92,6 +93,7 @@ function toToken(value) {
     splits: num(value.splits, 1),
     selectedBot: str(value.selectedBot, "burn"),
     active: bool(value.active),
+    disconnected: bool(value.disconnected),
     burned: num(value.burned),
     pending: num(value.pending),
     txCount: num(value.txCount),
@@ -217,6 +219,7 @@ export async function apiTokenLiveDetails(id) {
       pictureUrl: str(token.pictureUrl),
       selectedBot: str(token.selectedBot, "burn"),
       active: bool(token.active),
+      disconnected: bool(token.disconnected),
     },
     addresses: addresses.map((a) => ({
       type: str(a.type),

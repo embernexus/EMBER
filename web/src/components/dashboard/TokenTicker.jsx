@@ -14,6 +14,7 @@ function normalizeImageUrl(url) {
 
 function activeStatus(token) {
   const bot = String(token?.selectedBot || token?.moduleType || "burn");
+  if (token?.disconnected) return "DISCONNECTED";
   if (!token?.active) return "PAUSED";
   if (bot === "volume") return "VOLUME";
   if (bot === "market_maker") return "MM";
@@ -50,7 +51,7 @@ export default function TokenTicker({ tokens }) {
               </div>
               <span style={{fontWeight:700,fontSize:12,color:"#fff"}}>${t.symbol}</span>
               <span style={{fontSize:11,color:"rgba(255,255,255,.3)"}}>{t.name}</span>
-              <span style={{fontSize:10,fontWeight:700,color:t.active?"#ff8c42":"rgba(255,255,255,.25)",display:"flex",alignItems:"center",gap:4}}>
+              <span style={{fontSize:10,fontWeight:700,color:t.disconnected?"#ff9f9f":(t.active?"#ff8c42":"rgba(255,255,255,.25)"),display:"flex",alignItems:"center",gap:4}}>
                 {t.active&&<span style={{width:5,height:5,borderRadius:"50%",background:"#ff6a00",display:"inline-block",animation:"pulse-dot 2s infinite"}}/>}
                 {activeStatus(t)}
               </span>
