@@ -30,15 +30,133 @@ import { config } from "./config.js";
 import { initDb } from "./db.js";
 
 const app = express();
+app.disable("x-powered-by");
+
+const trustProxy = String(process.env.TRUST_PROXY || "true").toLowerCase() !== "false";
+if (trustProxy) app.set("trust proxy", 1);
+
+function normalizeOrigin(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    return parsed.origin.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function parseAllowedOrigins() {
+  const configured = String(process.env.CORS_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((v) => normalizeOrigin(v))
+    .filter(Boolean);
+
+  if (configured.length > 0) return new Set(configured);
+
+  const defaults = [];
+  const renderExternal = normalizeOrigin(process.env.RENDER_EXTERNAL_URL || "");
+  if (renderExternal) defaults.push(renderExternal);
+
+  if (process.env.NODE_ENV !== "production") {
+    defaults.push(
+      "http://localhost:5173",
+      "http://127.0.0.1:5173",
+      "http://localhost:3000",
+      "http://127.0.0.1:3000"
+    );
+  }
+
+  return new Set(defaults);
+}
+
+const allowedOrigins = parseAllowedOrigins();
+
+function requestIp(req) {
+  const fwd = String(req.headers["x-forwarded-for"] || "").split(",")[0]?.trim();
+  return fwd || req.ip || "unknown";
+}
+
+function createRateLimiter({ windowMs, max, keyFn, message }) {
+  const buckets = new Map();
+  const safeWindow = Math.max(1000, Number(windowMs) || 1000);
+  const safeMax = Math.max(1, Number(max) || 1);
+
+  return (req, res, next) => {
+    const now = Date.now();
+    const key = String((typeof keyFn === "function" ? keyFn(req) : requestIp(req)) || "unknown");
+    const hit = buckets.get(key);
+
+    if (!hit || now > hit.resetAt) {
+      buckets.set(key, { count: 1, resetAt: now + safeWindow });
+      if (buckets.size > 50_000) {
+        for (const [k, v] of buckets.entries()) {
+          if (now > Number(v?.resetAt || 0)) buckets.delete(k);
+          if (buckets.size <= 25_000) break;
+        }
+      }
+      return next();
+    }
+
+    hit.count += 1;
+    if (hit.count > safeMax) {
+      const retryAfter = Math.max(1, Math.ceil((hit.resetAt - now) / 1000));
+      res.setHeader("Retry-After", String(retryAfter));
+      return res.status(429).json({ error: message || "Too many requests. Please try again shortly." });
+    }
+    return next();
+  };
+}
+
+const authLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 25,
+  keyFn: (req) => {
+    const username = String(req.body?.username || "").trim().toLowerCase();
+    return `${requestIp(req)}:auth:${username || "-"}`;
+  },
+  message: "Too many auth attempts. Please wait before retrying.",
+});
+
+const writeLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 120,
+  keyFn: (req) => `${requestIp(req)}:write`,
+  message: "Too many write requests. Please slow down.",
+});
+
+const deployLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 30,
+  keyFn: (req) => `${requestIp(req)}:deploy`,
+  message: "Too many deploy requests. Please slow down.",
+});
 
 app.use(express.json({ limit: "50mb" }));
 app.use(cookieParser());
 app.use(
   cors({
-    origin: true,
+    origin(origin, cb) {
+      if (!origin) return cb(null, true);
+      const normalized = normalizeOrigin(origin);
+      if (!normalized) return cb(new Error("CORS origin is invalid."));
+      if (allowedOrigins.size === 0 || allowedOrigins.has(normalized)) return cb(null, true);
+      return cb(new Error("CORS origin denied."));
+    },
     credentials: true,
   })
 );
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  if (secureCookie) {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  }
+  next();
+});
 
 const secureCookie = process.env.COOKIE_SECURE === "true" || process.env.NODE_ENV === "production";
 const cookieSameSite = process.env.COOKIE_SAME_SITE || "lax";
@@ -65,6 +183,39 @@ function clearSessionCookie(res) {
     path: "/",
   });
 }
+
+function isTrustedOrigin(req) {
+  const origin = normalizeOrigin(req.headers.origin || "");
+  const referer = String(req.headers.referer || "").trim();
+  const refererOrigin = normalizeOrigin(referer);
+  if (!origin && !refererOrigin) return true; // non-browser clients
+
+  const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "https")
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "")
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+  const hostOrigin = host ? `${proto}://${host}` : "";
+
+  const matchesAllowed = (value) =>
+    Boolean(value) && (allowedOrigins.size === 0 || allowedOrigins.has(value) || value === hostOrigin);
+
+  return matchesAllowed(origin) || matchesAllowed(refererOrigin);
+}
+
+app.use("/api", (req, res, next) => {
+  if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return next();
+  if (isTrustedOrigin(req)) return next();
+  return res.status(403).json({ error: "Request origin not allowed." });
+});
+
+app.use("/api", (req, res, next) => {
+  if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return next();
+  return writeLimiter(req, res, next);
+});
 
 function parseDataUri(input, label = "File") {
   const raw = String(input || "").trim();
@@ -121,7 +272,7 @@ app.get("/api/auth/me", authOptional, (req, res) => {
   res.json({ user: req.user || null });
 });
 
-app.post("/api/auth/register", async (req, res, next) => {
+app.post("/api/auth/register", authLimiter, async (req, res, next) => {
   try {
     const { username, password } = req.body || {};
     const result = await registerUser(username, password);
@@ -132,7 +283,7 @@ app.post("/api/auth/register", async (req, res, next) => {
   }
 });
 
-app.post("/api/auth/login", async (req, res, next) => {
+app.post("/api/auth/login", authLimiter, async (req, res, next) => {
   try {
     const { username, password } = req.body || {};
     const result = await loginUser(username, password);
@@ -255,7 +406,7 @@ app.delete("/api/tokens/:id", authRequired, async (req, res, next) => {
   }
 });
 
-app.post("/api/deploy", authOptional, async (req, res, next) => {
+app.post("/api/deploy", deployLimiter, authOptional, async (req, res, next) => {
   try {
     const result = await deployToken(req.user?.id || null, req.body || {});
     res.json(result);
@@ -264,7 +415,7 @@ app.post("/api/deploy", authOptional, async (req, res, next) => {
   }
 });
 
-app.post("/api/deploy/pump-ipfs", authOptional, async (req, res, next) => {
+app.post("/api/deploy/pump-ipfs", deployLimiter, authOptional, async (req, res, next) => {
   try {
     const body = req.body || {};
     const image = parseDataUri(body.imageDataUri, "Token media");
@@ -312,7 +463,7 @@ app.post("/api/deploy/pump-ipfs", authOptional, async (req, res, next) => {
   }
 });
 
-app.post("/api/deploy/pump-trade-local", authOptional, async (req, res, next) => {
+app.post("/api/deploy/pump-trade-local", deployLimiter, authOptional, async (req, res, next) => {
   try {
     const body = req.body || {};
     const upstream = await fetch("https://pumpportal.fun/api/trade-local", {
@@ -358,7 +509,7 @@ app.post("/api/deploy/pump-trade-local", authOptional, async (req, res, next) =>
   }
 });
 
-app.post("/api/deploy/submit-signed", authOptional, async (req, res, next) => {
+app.post("/api/deploy/submit-signed", deployLimiter, authOptional, async (req, res, next) => {
   try {
     const result = await submitSignedDeployTx(req.body || {});
     return res.json(result);
@@ -367,7 +518,7 @@ app.post("/api/deploy/submit-signed", authOptional, async (req, res, next) => {
   }
 });
 
-app.post("/api/deploy/record", authOptional, async (req, res, next) => {
+app.post("/api/deploy/record", deployLimiter, authOptional, async (req, res, next) => {
   try {
     const result = await recordDeployFromChain(req.user?.id || null, req.body || {});
     res.json(result);
@@ -383,16 +534,24 @@ app.get(/^\/(?!api).*/, (_req, res) => {
 });
 
 app.use((error, _req, res, _next) => {
-  const message = error?.message || "Internal server error";
+  const message = String(error?.message || "Internal server error");
   const isClient =
     message.includes("required") ||
     message.includes("exists") ||
     message.includes("Unauthorized") ||
     message.includes("Invalid") ||
-    message.includes("Max");
+    message.includes("Max") ||
+    message.includes("denied") ||
+    message.includes("not allowed");
 
   const status = Number.isInteger(error?.status) ? Number(error.status) : isClient ? 400 : 500;
-  res.status(status).json({ error: message });
+  const safeMessage = status >= 500 && process.env.NODE_ENV === "production"
+    ? "Internal server error"
+    : message;
+  if (status >= 500) {
+    console.error("[api] request failed:", message);
+  }
+  res.status(status).json({ error: safeMessage });
 });
 
 async function start() {
