@@ -4,7 +4,8 @@ import { Keypair } from "@solana/web3.js";
 
 dotenv.config();
 
-function parseDevWalletPrivateKey(input) {
+function parsePrivateKey(input, label) {
+  const name = String(label || "PRIVATE_KEY");
   const raw = String(input || "").trim();
   if (!raw) return null;
 
@@ -16,15 +17,15 @@ function parseDevWalletPrivateKey(input) {
       parsed = JSON.parse(raw);
     } catch {
       throw new Error(
-        "DEV_WALLET_PRIVATE_KEY JSON is invalid. Expected a JSON array of 64 numbers."
+        `${name} JSON is invalid. Expected a JSON array of 64 numbers.`
       );
     }
     if (!Array.isArray(parsed)) {
-      throw new Error("DEV_WALLET_PRIVATE_KEY JSON must be an array.");
+      throw new Error(`${name} JSON must be an array.`);
     }
     const invalid = parsed.some((n) => !Number.isInteger(n) || n < 0 || n > 255);
     if (invalid) {
-      throw new Error("DEV_WALLET_PRIVATE_KEY JSON must contain only byte values (0-255).");
+      throw new Error(`${name} JSON must contain only byte values (0-255).`);
     }
     secretKey = Uint8Array.from(parsed);
   } else {
@@ -32,14 +33,14 @@ function parseDevWalletPrivateKey(input) {
       secretKey = bs58.decode(raw);
     } catch {
       throw new Error(
-        "DEV_WALLET_PRIVATE_KEY base58 is invalid. Provide valid base58 or JSON array format."
+        `${name} base58 is invalid. Provide valid base58 or JSON array format.`
       );
     }
   }
 
   if (secretKey.length !== 64) {
     throw new Error(
-      `DEV_WALLET_PRIVATE_KEY must decode to 64 bytes. Received ${secretKey.length} bytes.`
+      `${name} must decode to 64 bytes. Received ${secretKey.length} bytes.`
     );
   }
 
@@ -52,7 +53,13 @@ function parseDevWalletPrivateKey(input) {
 
 const devWalletPrivateKeyInput =
   process.env.DEV_WALLET_PRIVATE_KEY || process.env.DEV_WALLET_SECRET_KEY || "";
-const parsedDevWallet = parseDevWalletPrivateKey(devWalletPrivateKeyInput);
+const treasuryWalletPrivateKeyInput =
+  process.env.TREASURY_WALLET_PRIVATE_KEY || process.env.TREASURY_PRIVATE_KEY || "";
+const parsedDevWallet = parsePrivateKey(devWalletPrivateKeyInput, "DEV_WALLET_PRIVATE_KEY");
+const parsedTreasuryWallet = parsePrivateKey(
+  treasuryWalletPrivateKeyInput,
+  "TREASURY_WALLET_PRIVATE_KEY"
+);
 
 export const config = {
   port: Number(process.env.PORT || 3001),
@@ -77,6 +84,7 @@ export const config = {
     .map((v) => String(v || "").trim())
     .filter(Boolean),
   basePriorityFeeSol: Number(process.env.BASE_PRIORITY_FEE_SOL || 0.0005),
+  claimGasTopupSol: Number(process.env.CLAIM_GAS_TOPUP_SOL || 0.003),
   botSolReserve: Number(process.env.BOT_SOL_RESERVE || 0.01),
   volumeDefaultMinTradeSol: Number(process.env.VOLUME_DEFAULT_MIN_TRADE_SOL || 0.01),
   volumeDefaultMaxTradeSol: Number(process.env.VOLUME_DEFAULT_MAX_TRADE_SOL || 0.05),
@@ -95,6 +103,8 @@ export const config = {
   depositKeyEncryptionKey: String(process.env.DEPOSIT_KEY_ENCRYPTION_KEY || "").trim(),
   devWalletPrivateKey: parsedDevWallet?.secretKey || null,
   devWalletPublicKey: parsedDevWallet?.publicKey || "",
+  treasuryWalletPrivateKey: parsedTreasuryWallet?.secretKey || null,
+  treasuryWalletPublicKey: parsedTreasuryWallet?.publicKey || "",
 };
 
 if (!config.databaseUrl) {
@@ -107,4 +117,17 @@ if (!config.rpcUrl) {
 
 if (config.devWalletPublicKey) {
   console.log(`[config] dev wallet loaded (${config.devWalletPublicKey})`);
+}
+
+if (config.treasuryWalletPublicKey) {
+  console.log(`[config] treasury funding wallet loaded (${config.treasuryWalletPublicKey})`);
+  if (
+    config.treasuryWallet &&
+    config.treasuryWalletPublicKey &&
+    config.treasuryWallet !== config.treasuryWalletPublicKey
+  ) {
+    console.warn(
+      `[config] TREASURY_WALLET (${config.treasuryWallet}) does not match TREASURY_WALLET_PRIVATE_KEY pubkey (${config.treasuryWalletPublicKey}).`
+    );
+  }
 }

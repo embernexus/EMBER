@@ -21,9 +21,17 @@ import {
   createTransferInstruction,
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
+import pumpSdkPkg from "@pump-fun/pump-sdk/dist/index.js";
 import { config } from "./config.js";
 import { makeId, makeSessionToken, pool, withTx } from "./db.js";
 import { fmtInt, resolveMint } from "./utils.js";
+
+const {
+  OnlinePumpSdk,
+  PumpSdk,
+  feeSharingConfigPda,
+} = pumpSdkPkg || {};
+const pumpOfflineSdk = PumpSdk ? new PumpSdk() : null;
 
 function toToken(row) {
   const moduleConfig =
@@ -165,6 +173,36 @@ const MODULE_TYPES = {
   volume: "volume",
   personalBurn: "personal_burn",
 };
+
+function moduleTypeLabel(moduleType) {
+  if (moduleType === MODULE_TYPES.volume) return "Volume Bot";
+  if (moduleType === "market_maker") return "Market Maker Bot";
+  if (moduleType === MODULE_TYPES.personalBurn) return "Personal Burn Bot";
+  return "Burn Bot";
+}
+
+function isSoftClaimError(error) {
+  const msg = String(error?.message || "").toLowerCase();
+  if (!msg) return false;
+  return (
+    msg.includes("nothing to collect") ||
+    msg.includes("no creator fee") ||
+    msg.includes("no claimable") ||
+    msg.includes("no creator rewards")
+  );
+}
+
+function extractClaimLamportDeficit(error) {
+  const logs = Array.isArray(error?.logs) ? error.logs.join("\n") : "";
+  const raw = [String(error?.message || ""), logs].filter(Boolean).join("\n");
+  if (!raw) return 0;
+  const match = raw.match(/insufficient lamports\s+(\d+),\s+need\s+(\d+)/i);
+  if (!match) return 0;
+  const have = Number(match[1] || 0);
+  const need = Number(match[2] || 0);
+  if (!Number.isFinite(have) || !Number.isFinite(need)) return 0;
+  return Math.max(0, Math.floor(need - have));
+}
 
 const MODULE_LOCK_SEED = "ember:module:lock";
 
@@ -378,8 +416,11 @@ function moduleConfigIntervalSec(moduleType, configJson = {}) {
     return Math.max(3, sec);
   }
   if (moduleType === MODULE_TYPES.personalBurn) return 120;
-  const cycle = Number(configJson.burnIntervalSec ?? configJson.intervalSec ?? 120);
-  return Math.max(5, Math.floor(cycle));
+  const burnSec = Math.max(60, Math.floor(Number(configJson.burnIntervalSec ?? configJson.intervalSec ?? 300)));
+  const claimEnabled = configJson.claimEnabled !== false;
+  const claimSec = Math.max(60, Math.floor(Number(configJson.claimIntervalSec ?? 120)));
+  const loopSec = claimEnabled ? Math.min(burnSec, claimSec) : burnSec;
+  return Math.max(5, loopSec);
 }
 
 function defaultBurnModuleConfig(tokenRow) {
@@ -702,6 +743,79 @@ async function signAndSendVersioned(connection, signer, txBytes) {
   return sig;
 }
 
+async function signAndSendLegacyInstructions(connection, signer, instructions = []) {
+  const ixs = Array.isArray(instructions) ? instructions.filter(Boolean) : [];
+  if (!ixs.length) return null;
+  const latest = await connection.getLatestBlockhash("confirmed");
+  const tx = new Transaction({
+    feePayer: signer.publicKey,
+    blockhash: latest.blockhash,
+    lastValidBlockHeight: latest.lastValidBlockHeight,
+  });
+  for (const ix of ixs) tx.add(ix);
+  tx.sign(signer);
+  const sig = await connection.sendRawTransaction(tx.serialize(), {
+    skipPreflight: false,
+    maxRetries: 5,
+  });
+  await connection.confirmTransaction(
+    { signature: sig, blockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight },
+    "confirmed"
+  );
+  return sig;
+}
+
+function isSoftSharingClaimError(error) {
+  const msg = String(error?.message || "").toLowerCase();
+  if (!msg) return false;
+  return (
+    msg.includes("minimum distributable") ||
+    msg.includes("distributable") ||
+    msg.includes("sharing config") ||
+    msg.includes("no account") ||
+    msg.includes("account does not exist")
+  );
+}
+
+async function tryDistributeSharingCreatorFees({ connection, signer, mint }) {
+  if (!pumpOfflineSdk || !OnlinePumpSdk || !feeSharingConfigPda) {
+    return { attempted: false, reason: "sdk_unavailable", signature: null, claimedLamports: 0 };
+  }
+
+  const mintPk = new PublicKey(String(mint || "").trim());
+  const sharingConfigAddress = feeSharingConfigPda(mintPk);
+  const sharingInfo = await connection.getAccountInfo(sharingConfigAddress, "confirmed");
+  if (!sharingInfo) {
+    return { attempted: false, reason: "no_sharing_config", signature: null, claimedLamports: 0 };
+  }
+
+  const sharingConfig = pumpOfflineSdk.decodeSharingConfig(sharingInfo);
+  const signerPk = signer.publicKey;
+  const isShareholder = Array.isArray(sharingConfig?.shareholders)
+    && sharingConfig.shareholders.some((shareholder) => shareholder?.address?.equals?.(signerPk));
+  if (!isShareholder) {
+    return { attempted: false, reason: "not_shareholder", signature: null, claimedLamports: 0 };
+  }
+
+  const onlineSdk = new OnlinePumpSdk(connection);
+  const distribution = await onlineSdk.buildDistributeCreatorFeesInstructions(mintPk);
+  const instructions = Array.isArray(distribution?.instructions) ? distribution.instructions : [];
+  if (!instructions.length) {
+    return { attempted: true, reason: "no_instructions", signature: null, claimedLamports: 0 };
+  }
+
+  const sig = await signAndSendLegacyInstructions(connection, signer, instructions);
+  const summary = await getClaimExecutionSummary(connection, sig, signerPk.toBase58());
+  const claimedLamports = Math.max(0, Number(summary?.grossClaimLamports || 0));
+  return {
+    attempted: true,
+    reason: "distributed",
+    signature: sig,
+    claimedLamports,
+    isGraduated: Boolean(distribution?.isGraduated),
+  };
+}
+
 async function pumpPortalTrade({
   connection,
   signer,
@@ -726,16 +840,145 @@ async function pumpPortalTrade({
   return sig;
 }
 
+async function pumpPortalCollectCreatorFeeRequest({ connection, signer, requestBody }) {
+  const txBytes = await fetchPumpPortalLocalTx(requestBody);
+  return signAndSendVersioned(connection, signer, txBytes);
+}
+
+async function readTransactionWithRetry(connection, signature, maxAttempts = 5) {
+  for (let i = 0; i < maxAttempts; i += 1) {
+    const tx = await connection.getTransaction(signature, {
+      commitment: "confirmed",
+      maxSupportedTransactionVersion: 0,
+    });
+    if (tx?.meta && tx?.transaction?.message) return tx;
+    if (i < maxAttempts - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 350 * (i + 1)));
+    }
+  }
+  return null;
+}
+
+async function getClaimExecutionSummary(connection, signature, signerPubkey) {
+  const tx = await readTransactionWithRetry(connection, signature, 5);
+  if (!tx?.meta || !tx?.transaction?.message) {
+    return {
+      grossClaimLamports: 0,
+      feeLamports: 0,
+      noRewardsHint: false,
+      txUnavailable: true,
+    };
+  }
+
+  const feeLamports = Number(tx.meta.fee || 0);
+  const logs = Array.isArray(tx.meta.logMessages) ? tx.meta.logMessages : [];
+  const logText = logs.join("\n").toLowerCase();
+  const noRewardsHint =
+    logText.includes("no creator fee to collect") ||
+    logText.includes("no coin creator fee to collect");
+
+  let signerIndex = -1;
+  const accountKeys = tx.transaction.message.staticAccountKeys || [];
+  for (let i = 0; i < accountKeys.length; i += 1) {
+    if (accountKeys[i]?.toBase58?.() === signerPubkey) {
+      signerIndex = i;
+      break;
+    }
+  }
+
+  if (signerIndex < 0) {
+    return {
+      grossClaimLamports: 0,
+      feeLamports,
+      noRewardsHint,
+      txUnavailable: false,
+    };
+  }
+
+  const pre = Number(tx.meta.preBalances?.[signerIndex] || 0);
+  const post = Number(tx.meta.postBalances?.[signerIndex] || 0);
+  const netDelta = post - pre;
+  const grossClaimLamports = Math.max(0, netDelta + feeLamports);
+
+  return {
+    grossClaimLamports,
+    feeLamports,
+    noRewardsHint,
+    txUnavailable: false,
+  };
+}
+
 async function pumpPortalCollectCreatorFee({ connection, signer, mint, pool = "auto" }) {
-  const txBytes = await fetchPumpPortalLocalTx({
-    publicKey: signer.publicKey.toBase58(),
-    action: "collectCreatorFee",
-    mint,
-    priorityFee: Number(config.basePriorityFeeSol || 0.0005),
-    pool,
-  });
-  const sig = await signAndSendVersioned(connection, signer, txBytes);
-  return sig;
+  const requestedPool = String(pool || "auto").trim() || "auto";
+  const requestedMint = String(mint || "").trim();
+  const attempts = [];
+  const pushAttempt = ({ poolValue = "", includeMint = true } = {}) => {
+    const req = {
+      publicKey: signer.publicKey.toBase58(),
+      action: "collectCreatorFee",
+      priorityFee: Number(config.basePriorityFeeSol || 0.0005),
+    };
+    if (poolValue) req.pool = poolValue;
+    if (includeMint && requestedMint) req.mint = requestedMint;
+    attempts.push(req);
+  };
+
+  if (requestedPool === "meteora-dbc") {
+    // Meteora claims are mint-specific.
+    pushAttempt({ poolValue: "meteora-dbc", includeMint: true });
+  } else {
+    // For pump-designated rewards, wallet-level claim should run first (claims all eligible rewards).
+    pushAttempt({ poolValue: "pump", includeMint: false });
+    pushAttempt({ poolValue: "", includeMint: false });
+    pushAttempt({ poolValue: "auto", includeMint: false });
+
+    // Fallbacks for legacy or mint-scoped claim routes.
+    pushAttempt({ poolValue: requestedPool, includeMint: true });
+    pushAttempt({ poolValue: "pump", includeMint: true });
+    pushAttempt({ poolValue: "", includeMint: true });
+    pushAttempt({ poolValue: "auto", includeMint: true });
+  }
+
+  const deduped = [];
+  const seen = new Set();
+  for (const req of attempts) {
+    const key = JSON.stringify(req);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(req);
+  }
+
+  let lastBuildError = null;
+  let lastSendError = null;
+  let insufficientLamportsError = null;
+  for (const requestBody of deduped) {
+    try {
+      const txBytes = await fetchPumpPortalLocalTx(requestBody);
+      try {
+        const sig = await signAndSendVersioned(connection, signer, txBytes);
+        return sig;
+      } catch (sendError) {
+        const requestTag = JSON.stringify(requestBody);
+        if (sendError && typeof sendError.message === "string" && !sendError.message.includes(requestTag)) {
+          sendError.message = `${sendError.message} (collectCreatorFee request: ${requestTag})`;
+        }
+        if (sendError && typeof sendError === "object") {
+          sendError.claimRequestBody = requestBody;
+        }
+        lastSendError = sendError;
+        if (extractClaimLamportDeficit(sendError) > 0) {
+          insufficientLamportsError = sendError;
+        }
+      }
+    } catch (error) {
+      const requestTag = JSON.stringify(requestBody);
+      if (error && typeof error.message === "string" && !error.message.includes(requestTag)) {
+        error.message = `${error.message} (collectCreatorFee request: ${requestTag})`;
+      }
+      lastBuildError = error;
+    }
+  }
+  throw insufficientLamportsError || lastSendError || lastBuildError || new Error("Creator fee claim failed.");
 }
 
 const DEPOSIT_POOL_MAX = 20;
@@ -2532,11 +2775,14 @@ export async function updateToken(userId, tokenId, payload) {
     if (current.disconnected) {
       throw new Error("Token is disconnected. Re-attach this mint to resume automation.");
     }
+    const previousBot = normalizeModuleType(current.selected_bot, current.selected_bot || MODULE_TYPES.burn);
+    const previousActive = Boolean(current.active);
     const claimSec = payload.claimSec === undefined ? Number(current.claim_sec) : sanitizeInterval(payload.claimSec, Number(current.claim_sec));
     const burnSec = payload.burnSec === undefined ? Number(current.burn_sec) : sanitizeInterval(payload.burnSec, Number(current.burn_sec));
     const splits = payload.splits === undefined ? Number(current.splits) : sanitizeSplits(payload.splits, Number(current.splits));
     const active = payload.active === undefined ? current.active : Boolean(payload.active);
     const selectedBot = normalizeModuleType(payload.selectedBot || current.selected_bot, current.selected_bot || MODULE_TYPES.burn);
+    const shouldStartNow = payload.active !== undefined && Boolean(active) && !previousActive;
 
     const now = Date.now();
 
@@ -2627,14 +2873,16 @@ export async function updateToken(userId, tokenId, payload) {
       "SELECT id, config_json FROM bot_modules WHERE token_id = $1 AND module_type = $2 LIMIT 1",
       [tokenId, moduleType]
     );
+    let moduleId = "";
     if (!existingModuleRes.rowCount) {
+      moduleId = makeId("mod");
       await client.query(
         `
           INSERT INTO bot_modules (id, user_id, token_id, module_type, enabled, config_json, state_json, next_run_at)
           VALUES ($1, $2, $3, $4, $5, $6::jsonb, '{}'::jsonb, NOW())
         `,
         [
-          makeId("mod"),
+          moduleId,
           userId,
           tokenId,
           moduleType,
@@ -2643,11 +2891,10 @@ export async function updateToken(userId, tokenId, payload) {
         ]
       );
     } else {
+      moduleId = String(existingModuleRes.rows[0].id || "");
       const shouldResetVolumeState =
         moduleType === MODULE_TYPES.volume &&
-        payload.active !== undefined &&
-        active === true &&
-        current.active === false;
+        shouldStartNow;
       const merged = mergeModuleConfig(moduleType, existingModuleRes.rows[0].config_json, {
         ...baseConfig,
         ...nextConfig,
@@ -2673,6 +2920,58 @@ export async function updateToken(userId, tokenId, payload) {
       [tokenId, moduleType]
     );
 
+    if (shouldStartNow && moduleId) {
+      if (moduleType === MODULE_TYPES.burn) {
+        await client.query(
+          `
+            UPDATE bot_modules
+            SET next_run_at = NOW(),
+                state_json = COALESCE(state_json, '{}'::jsonb) || jsonb_build_object('nextClaimAt', 0, 'nextBurnAt', 0)
+            WHERE id = $1
+          `,
+          [moduleId]
+        );
+      } else {
+        await client.query(
+          `
+            UPDATE bot_modules
+            SET next_run_at = NOW(),
+                state_json = COALESCE(state_json, '{}'::jsonb) || jsonb_build_object('nextClaimAt', 0)
+            WHERE id = $1
+          `,
+          [moduleId]
+        );
+      }
+    }
+
+    if (previousBot !== moduleType) {
+      await insertEvent(
+        client,
+        userId,
+        tokenId,
+        String(current.symbol || ""),
+        "status",
+        `Bot mode changed: ${moduleTypeLabel(previousBot)} -> ${moduleTypeLabel(moduleType)}.`,
+        null,
+        { moduleType, idempotencyKey: `status:mode:${tokenId}:${Date.now()}` }
+      );
+    }
+
+    if (previousActive !== Boolean(active)) {
+      await insertEvent(
+        client,
+        userId,
+        tokenId,
+        String(current.symbol || ""),
+        "status",
+        Boolean(active)
+          ? `${moduleTypeLabel(moduleType)} started.`
+          : `${moduleTypeLabel(moduleType)} paused.`,
+        null,
+        { moduleType, idempotencyKey: `status:active:${tokenId}:${Date.now()}` }
+      );
+    }
+
     return toToken(updatedRes.rows[0]);
   });
 }
@@ -2695,7 +2994,7 @@ async function insertEvent(
     `
       INSERT INTO token_events (user_id, token_id, token_symbol, module_type, event_type, amount, message, tx, idempotency_key, metadata)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-      ON CONFLICT (idempotency_key) DO NOTHING
+      ON CONFLICT DO NOTHING
     `,
     [userId, tokenId, symbol, moduleType, type, amount, message, tx, idempotencyKey, metadata ? JSON.stringify(metadata) : null]
   );
@@ -2892,6 +3191,65 @@ function getTxFeeSafetyLamports() {
   return toLamports(TX_FEE_SAFETY_SOL);
 }
 
+async function ensureClaimGasFromTreasury({
+  client,
+  row,
+  connection,
+  depositSigner,
+  eventPrefix,
+  moduleType,
+  targetLamportsOverride = 0,
+}) {
+  if (!config.treasuryWalletPrivateKey) return { toppedUp: 0, signature: null, skipped: "no_treasury_signer" };
+  const configuredTarget = toLamports(Math.max(0.0005, Number(config.claimGasTopupSol || 0.003)));
+  const overrideTarget = Math.floor(Number(targetLamportsOverride || 0));
+  const capLamports = toLamports(0.05);
+  const targetLamports = Math.min(capLamports, Math.max(configuredTarget, overrideTarget));
+  if (targetLamports <= 0) return { toppedUp: 0, signature: null, skipped: "target_zero" };
+
+  const depositBalance = await connection.getBalance(depositSigner.publicKey, "confirmed");
+  if (depositBalance >= targetLamports) return { toppedUp: 0, signature: null, skipped: "already_funded" };
+
+  const neededLamports = targetLamports - depositBalance;
+  const treasurySigner = Keypair.fromSecretKey(config.treasuryWalletPrivateKey);
+  if (treasurySigner.publicKey.equals(depositSigner.publicKey)) {
+    return { toppedUp: 0, signature: null, skipped: "same_wallet" };
+  }
+
+  const treasuryBalance = await connection.getBalance(treasurySigner.publicKey, "confirmed");
+  const maxSpendable = Math.max(0, treasuryBalance - getTxFeeSafetyLamports());
+  if (maxSpendable <= 0) {
+    return { toppedUp: 0, signature: null, skipped: "treasury_empty" };
+  }
+
+  const topupLamports = Math.min(neededLamports, maxSpendable);
+  if (topupLamports <= 0) return { toppedUp: 0, signature: null, skipped: "no_topup_needed" };
+
+  const sig = await sendSolTransfer(
+    connection,
+    treasurySigner,
+    depositSigner.publicKey.toBase58(),
+    topupLamports
+  );
+  if (sig) {
+    await insertEvent(
+      client,
+      row.user_id,
+      row.token_id,
+      row.symbol,
+      "transfer",
+      `Treasury claim-gas top-up (${fromLamports(topupLamports).toFixed(6)} SOL)`,
+      sig,
+      {
+        moduleType,
+        amount: fromLamports(topupLamports),
+        idempotencyKey: `${eventPrefix}:claim:gas`,
+      }
+    );
+  }
+  return { toppedUp: topupLamports, signature: sig || null, skipped: null };
+}
+
 function pickTradeSol(configJson, walletSol, reserveSol = getTradeWalletReserveSol()) {
   const minSol = Math.max(0.001, Number(configJson.minTradeSol || 0.01));
   const maxSolInput = Math.max(minSol, Number(configJson.maxTradeSol || minSol));
@@ -3012,46 +3370,185 @@ async function runBurnExecutor(client, row) {
   let txCreated = 0;
 
   if (configJson.claimEnabled && (!state.nextClaimAt || Number(state.nextClaimAt) <= now)) {
+    const claimIntervalSec = Math.max(60, Number(configJson.claimIntervalSec || 120));
+    let claimFailedSoft = false;
+    let claimedLamportsAny = 0;
     try {
-      const claimBalanceBefore = await connection.getBalance(signer.publicKey, "confirmed");
-      const claimSig = await pumpPortalCollectCreatorFee({
+      const claimGasTopup = await ensureClaimGasFromTreasury({
+        client,
+        row,
         connection,
-        signer,
-        mint: row.mint,
-        pool: configJson.pool || "auto",
+        depositSigner: signer,
+        eventPrefix,
+        moduleType: MODULE_TYPES.burn,
       });
-      const claimBalanceAfter = await connection.getBalance(signer.publicKey, "confirmed");
-      const claimNetLamports = Math.max(0, claimBalanceAfter - claimBalanceBefore);
+      if (claimGasTopup.signature) txCreated += 1;
+
+      try {
+        const sharingClaim = await tryDistributeSharingCreatorFees({
+          connection,
+          signer,
+          mint: row.mint,
+        });
+        if (sharingClaim.signature) txCreated += 1;
+        const sharingLamports = Math.max(0, Number(sharingClaim.claimedLamports || 0));
+        if (sharingClaim.signature && sharingLamports > 0) {
+          claimedLamportsAny += sharingLamports;
+          await insertEvent(
+            client,
+            row.user_id,
+            row.token_id,
+            row.symbol,
+            "claim",
+            `Creator rewards claimed (${fromLamports(sharingLamports).toFixed(6)} SOL)`,
+            sharingClaim.signature,
+            {
+              moduleType: MODULE_TYPES.burn,
+              amount: fromLamports(sharingLamports),
+              idempotencyKey: `${eventPrefix}:claim:sharing`,
+            }
+          );
+        }
+      } catch (sharingError) {
+        if (!isSoftSharingClaimError(sharingError)) {
+          await insertEvent(
+            client,
+            row.user_id,
+            row.token_id,
+            row.symbol,
+            "error",
+            `Sharing claim path failed: ${sharingError.message}`,
+            null,
+            { moduleType: MODULE_TYPES.burn, idempotencyKey: `${eventPrefix}:claim:sharing:error` }
+          );
+        }
+      }
+
+      let claimSig = null;
+      try {
+        claimSig = await pumpPortalCollectCreatorFee({
+          connection,
+          signer,
+          mint: row.mint,
+          pool: configJson.pool || "auto",
+        });
+      } catch (firstError) {
+        const lamportDeficit = extractClaimLamportDeficit(firstError);
+        if (lamportDeficit > 0) {
+          const balanceNow = await connection.getBalance(signer.publicKey, "confirmed");
+          const retryTarget = balanceNow + lamportDeficit + getTxFeeSafetyLamports();
+          const retryTopup = await ensureClaimGasFromTreasury({
+            client,
+            row,
+            connection,
+            depositSigner: signer,
+            eventPrefix: `${eventPrefix}:retry`,
+            moduleType: MODULE_TYPES.burn,
+            targetLamportsOverride: retryTarget,
+          });
+          if (retryTopup.signature) txCreated += 1;
+          if (firstError?.claimRequestBody) {
+            claimSig = await pumpPortalCollectCreatorFeeRequest({
+              connection,
+              signer,
+              requestBody: firstError.claimRequestBody,
+            });
+          } else {
+            claimSig = await pumpPortalCollectCreatorFee({
+              connection,
+              signer,
+              mint: row.mint,
+              pool: configJson.pool || "auto",
+            });
+          }
+        } else {
+          throw firstError;
+        }
+      }
+      const claimSummary = await getClaimExecutionSummary(
+        connection,
+        claimSig,
+        signer.publicKey.toBase58()
+      );
+      const claimNetLamports = Math.max(0, Number(claimSummary.grossClaimLamports || 0));
       const claimNetSol = fromLamports(claimNetLamports);
       txCreated += 1;
-      await insertEvent(
-        client,
-        row.user_id,
-        row.token_id,
-        row.symbol,
-        "claim",
-        `Creator rewards claimed (${claimNetSol.toFixed(6)} SOL)`,
-        claimSig,
-        {
-          moduleType: MODULE_TYPES.burn,
-          amount: claimNetSol,
-          idempotencyKey: `${eventPrefix}:claim`,
+      if (claimNetLamports <= 0 || claimSummary.noRewardsHint) {
+        if (claimedLamportsAny <= 0) {
+          claimFailedSoft = true;
+          await insertEvent(
+            client,
+            row.user_id,
+            row.token_id,
+            row.symbol,
+            "status",
+            "Claim skipped: no creator rewards available yet.",
+            claimSig,
+            {
+              moduleType: MODULE_TYPES.burn,
+              idempotencyKey: `${eventPrefix}:claim:skip:zero`,
+              metadata: {
+                noRewardsHint: !!claimSummary.noRewardsHint,
+                txUnavailable: !!claimSummary.txUnavailable,
+              },
+            }
+          );
         }
-      );
+      } else {
+        claimedLamportsAny += claimNetLamports;
+        await insertEvent(
+          client,
+          row.user_id,
+          row.token_id,
+          row.symbol,
+          "claim",
+          `Creator rewards claimed (${claimNetSol.toFixed(6)} SOL)`,
+          claimSig,
+          {
+            moduleType: MODULE_TYPES.burn,
+            amount: claimNetSol,
+            idempotencyKey: `${eventPrefix}:claim`,
+          }
+        );
+      }
     } catch (error) {
-      await insertEvent(
-        client,
-        row.user_id,
-        row.token_id,
-        row.symbol,
-        "error",
-        `Claim attempt failed: ${error.message}`,
-        null,
-        { moduleType: MODULE_TYPES.burn, idempotencyKey: `${eventPrefix}:claim:error` }
-      );
+      claimFailedSoft = isSoftClaimError(error);
+      if (claimFailedSoft && claimedLamportsAny <= 0) {
+        await insertEvent(
+          client,
+          row.user_id,
+          row.token_id,
+          row.symbol,
+          "status",
+          "Claim skipped: no creator rewards available yet.",
+          null,
+          { moduleType: MODULE_TYPES.burn, idempotencyKey: `${eventPrefix}:claim:skip` }
+        );
+      } else {
+        await insertEvent(
+          client,
+          row.user_id,
+          row.token_id,
+          row.symbol,
+          "error",
+          `Claim attempt failed: ${error.message}`,
+          null,
+          { moduleType: MODULE_TYPES.burn, idempotencyKey: `${eventPrefix}:claim:error` }
+        );
+      }
     }
-    state.nextClaimAt = now + Math.max(60, Number(configJson.claimIntervalSec || 120)) * 1000;
+    if (claimedLamportsAny > 0) claimFailedSoft = false;
+    const nextClaimSec = claimFailedSoft ? Math.max(300, claimIntervalSec) : claimIntervalSec;
+    state.nextClaimAt = now + nextClaimSec * 1000;
   }
+
+  const burnIntervalSec = Math.max(60, Number(configJson.burnIntervalSec || row.burn_sec || 300));
+  const burnDue = !state.nextBurnAt || Number(state.nextBurnAt) <= now;
+  if (!burnDue) {
+    await upsertModuleState(client, row.module_id, state, null);
+    return { txCreated, burnedAmount: 0 };
+  }
+  state.nextBurnAt = now + burnIntervalSec * 1000;
 
   const balanceBefore = await connection.getBalance(signer.publicKey, "confirmed");
   const availableBefore = Math.max(0, balanceBefore - reserveLamports);
@@ -3178,45 +3675,176 @@ async function runVolumeExecutor(client, row) {
   const wallets = await ensureVolumeTradeWallets(client, row, configJson.tradeWalletCount || 1);
 
   if (configJson.claimEnabled && (!state.nextClaimAt || Number(state.nextClaimAt) <= now)) {
+    const claimIntervalSec = Math.max(60, Number(configJson.claimIntervalSec || 120));
+    let claimFailedSoft = false;
+    let claimedLamportsAny = 0;
     try {
-      const claimBalanceBefore = await connection.getBalance(depositSigner.publicKey, "confirmed");
-      const claimSig = await pumpPortalCollectCreatorFee({
+      const claimGasTopup = await ensureClaimGasFromTreasury({
+        client,
+        row,
         connection,
-        signer: depositSigner,
-        mint: row.mint,
-        pool: configJson.pool || "auto",
+        depositSigner,
+        eventPrefix,
+        moduleType: MODULE_TYPES.volume,
       });
-      const claimBalanceAfter = await connection.getBalance(depositSigner.publicKey, "confirmed");
-      const claimNetLamports = Math.max(0, claimBalanceAfter - claimBalanceBefore);
+      if (claimGasTopup.signature) txCreated += 1;
+
+      try {
+        const sharingClaim = await tryDistributeSharingCreatorFees({
+          connection,
+          signer: depositSigner,
+          mint: row.mint,
+        });
+        if (sharingClaim.signature) txCreated += 1;
+        const sharingLamports = Math.max(0, Number(sharingClaim.claimedLamports || 0));
+        if (sharingClaim.signature && sharingLamports > 0) {
+          claimedLamportsAny += sharingLamports;
+          await insertEvent(
+            client,
+            row.user_id,
+            row.token_id,
+            row.symbol,
+            "claim",
+            `Volume module claimed creator rewards (${fromLamports(sharingLamports).toFixed(6)} SOL)`,
+            sharingClaim.signature,
+            {
+              moduleType: MODULE_TYPES.volume,
+              amount: fromLamports(sharingLamports),
+              idempotencyKey: `${eventPrefix}:claim:sharing`,
+            }
+          );
+        }
+      } catch (sharingError) {
+        if (!isSoftSharingClaimError(sharingError)) {
+          await insertEvent(
+            client,
+            row.user_id,
+            row.token_id,
+            row.symbol,
+            "error",
+            `Volume sharing-claim path failed: ${sharingError.message}`,
+            null,
+            { moduleType: MODULE_TYPES.volume, idempotencyKey: `${eventPrefix}:claim:sharing:error` }
+          );
+        }
+      }
+
+      let claimSig = null;
+      try {
+        claimSig = await pumpPortalCollectCreatorFee({
+          connection,
+          signer: depositSigner,
+          mint: row.mint,
+          pool: configJson.pool || "auto",
+        });
+      } catch (firstError) {
+        const lamportDeficit = extractClaimLamportDeficit(firstError);
+        if (lamportDeficit > 0) {
+          const balanceNow = await connection.getBalance(depositSigner.publicKey, "confirmed");
+          const retryTarget = balanceNow + lamportDeficit + getTxFeeSafetyLamports();
+          const retryTopup = await ensureClaimGasFromTreasury({
+            client,
+            row,
+            connection,
+            depositSigner,
+            eventPrefix: `${eventPrefix}:retry`,
+            moduleType: MODULE_TYPES.volume,
+            targetLamportsOverride: retryTarget,
+          });
+          if (retryTopup.signature) txCreated += 1;
+          if (firstError?.claimRequestBody) {
+            claimSig = await pumpPortalCollectCreatorFeeRequest({
+              connection,
+              signer: depositSigner,
+              requestBody: firstError.claimRequestBody,
+            });
+          } else {
+            claimSig = await pumpPortalCollectCreatorFee({
+              connection,
+              signer: depositSigner,
+              mint: row.mint,
+              pool: configJson.pool || "auto",
+            });
+          }
+        } else {
+          throw firstError;
+        }
+      }
+      const claimSummary = await getClaimExecutionSummary(
+        connection,
+        claimSig,
+        depositSigner.publicKey.toBase58()
+      );
+      const claimNetLamports = Math.max(0, Number(claimSummary.grossClaimLamports || 0));
       const claimNetSol = fromLamports(claimNetLamports);
       txCreated += 1;
-      await insertEvent(
-        client,
-        row.user_id,
-        row.token_id,
-        row.symbol,
-        "claim",
-        `Volume module claimed creator rewards (${claimNetSol.toFixed(6)} SOL)`,
-        claimSig,
-        {
-          moduleType: MODULE_TYPES.volume,
-          amount: claimNetSol,
-          idempotencyKey: `${eventPrefix}:claim`,
+      if (claimNetLamports <= 0 || claimSummary.noRewardsHint) {
+        if (claimedLamportsAny <= 0) {
+          claimFailedSoft = true;
+          await insertEvent(
+            client,
+            row.user_id,
+            row.token_id,
+            row.symbol,
+            "status",
+            "Volume claim skipped: no creator rewards available yet.",
+            claimSig,
+            {
+              moduleType: MODULE_TYPES.volume,
+              idempotencyKey: `${eventPrefix}:claim:skip:zero`,
+              metadata: {
+                noRewardsHint: !!claimSummary.noRewardsHint,
+                txUnavailable: !!claimSummary.txUnavailable,
+              },
+            }
+          );
         }
-      );
+      } else {
+        claimedLamportsAny += claimNetLamports;
+        await insertEvent(
+          client,
+          row.user_id,
+          row.token_id,
+          row.symbol,
+          "claim",
+          `Volume module claimed creator rewards (${claimNetSol.toFixed(6)} SOL)`,
+          claimSig,
+          {
+            moduleType: MODULE_TYPES.volume,
+            amount: claimNetSol,
+            idempotencyKey: `${eventPrefix}:claim`,
+          }
+        );
+      }
     } catch (error) {
-      await insertEvent(
-        client,
-        row.user_id,
-        row.token_id,
-        row.symbol,
-        "error",
-        `Volume claim failed: ${error.message}`,
-        null,
-        { moduleType: MODULE_TYPES.volume, idempotencyKey: `${eventPrefix}:claim:error` }
-      );
+      claimFailedSoft = isSoftClaimError(error);
+      if (claimFailedSoft && claimedLamportsAny <= 0) {
+        await insertEvent(
+          client,
+          row.user_id,
+          row.token_id,
+          row.symbol,
+          "status",
+          "Volume claim skipped: no creator rewards available yet.",
+          null,
+          { moduleType: MODULE_TYPES.volume, idempotencyKey: `${eventPrefix}:claim:skip` }
+        );
+      } else {
+        await insertEvent(
+          client,
+          row.user_id,
+          row.token_id,
+          row.symbol,
+          "error",
+          `Volume claim failed: ${error.message}`,
+          null,
+          { moduleType: MODULE_TYPES.volume, idempotencyKey: `${eventPrefix}:claim:error` }
+        );
+      }
     }
-    state.nextClaimAt = now + Math.max(60, Number(configJson.claimIntervalSec || 120)) * 1000;
+    if (claimedLamportsAny > 0) claimFailedSoft = false;
+    const nextClaimSec = claimFailedSoft ? Math.max(300, claimIntervalSec) : claimIntervalSec;
+    state.nextClaimAt = now + nextClaimSec * 1000;
   }
 
   const depositBalance = await connection.getBalance(depositSigner.publicKey, "confirmed");

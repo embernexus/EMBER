@@ -404,6 +404,7 @@ export default function TokenCard({
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
   const [withdrawOptions, setWithdrawOptions] = useState(null);
   const [actionMsg, setActionMsg] = useState("");
+  const [optimisticActive, setOptimisticActive] = useState(null);
   const clamp01 = (v) => Math.max(0.001, Number(v) || 0.001);
   const deriveMaxTradeSol = (minTrade, aggression) => {
     const min = clamp01(minTrade);
@@ -416,6 +417,7 @@ export default function TokenCard({
 
   useEffect(() => {
     setLocal(normalizeTokenState(token));
+    setOptimisticActive(null);
   }, [token]);
 
   useEffect(() => {
@@ -519,15 +521,23 @@ export default function TokenCard({
     if (saving) return;
     if (token.disconnected) return;
     setErr("");
+    const currentActive =
+      optimisticActive === null ? Boolean(local.active) : Boolean(optimisticActive);
+    const nextActive = !currentActive;
+    setOptimisticActive(nextActive);
+    setLocal((prev) => ({ ...prev, active: nextActive }));
     setSaving(true);
     try {
       await onUpdate({
         ...token,
         selectedBot: token.selectedBot || token.moduleType || "burn",
         moduleConfig: token.moduleConfig || {},
-        active: !token.active,
+        active: nextActive,
       });
+      setOptimisticActive(null);
     } catch (error) {
+      setOptimisticActive(null);
+      setLocal((prev) => ({ ...prev, active: currentActive }));
       setErr(error?.message || "Unable to update token status.");
     } finally {
       setSaving(false);
@@ -549,7 +559,9 @@ export default function TokenCard({
   };
 
   const isDisconnected = Boolean(token.disconnected);
-  const isActive = Boolean(token.active) && !isDisconnected;
+  const activeBase =
+    optimisticActive === null ? Boolean(local.active) : Boolean(optimisticActive);
+  const isActive = activeBase && !isDisconnected;
   const bot = String(token.selectedBot || token.moduleType || "burn");
   const statusLabel = runningLabel(bot, isActive, isDisconnected);
   const imageUrl = normalizeImageUrl(token.pictureUrl);
@@ -780,7 +792,7 @@ export default function TokenCard({
                   ) : (
                     <>
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                        {[["Mode", botModeName(bot)], ["Claim Every", fmtSec(token.claimSec)], ["Cycle Every", fmtSec(cycleSeconds)], ["Status", token.disconnected ? "Disconnected" : token.active ? "Active" : "Paused"]].map(([key, value]) => (
+                        {[["Mode", botModeName(bot)], ["Claim Every", fmtSec(token.claimSec)], ["Cycle Every", fmtSec(cycleSeconds)], ["Status", isDisconnected ? "Disconnected" : isActive ? "Active" : "Paused"]].map(([key, value]) => (
                           <div key={key} style={{ background: "rgba(255,255,255,.03)", borderRadius: 8, padding: "10px 12px" }}>
                             <div style={{ fontSize: 10, color: "rgba(255,255,255,.3)", marginBottom: 4, fontWeight: 600, letterSpacing: 0.5 }}>{String(key).toUpperCase()}</div>
                             <div style={{ fontSize: 13, color: "#fff", fontWeight: 700 }}>{value}</div>

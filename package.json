@@ -4,10 +4,10 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently \"npm run dev:web\" \"npm run dev:api\" \"npm run dev:worker\"",
+    "dev": "node scripts/dev.mjs",
     "dev:web": "vite --config web/vite.config.js",
-    "dev:api": "node --watch server/api.js",
-    "dev:worker": "node --watch worker/worker.js",
+    "dev:api": "node server/api.js",
+    "dev:worker": "node worker/worker.js",
     "build": "vite build --config web/vite.config.js",
     "start": "node server/api.js",
     "start:worker": "node worker/worker.js",
@@ -17,6 +17,8 @@
     "db:reset": "node scripts/db-portability.mjs reset"
   },
   "dependencies": {
+    "@pump-fun/pump-sdk": "^1.30.0",
+    "@pump-fun/pump-swap-sdk": "^1.14.1",
     "@solana/spl-token": "^0.4.8",
     "@solana/web3.js": "^1.98.4",
     "bcryptjs": "^3.0.2",

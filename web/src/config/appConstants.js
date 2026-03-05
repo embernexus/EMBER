@@ -1,6 +1,7 @@
 export const EVT_META = {
   burn: { icon: "\u{1F525}", color: "#ff6a00", label: "BURN" },
   claim: { icon: "\u26A1", color: "#ffd700", label: "CLAIM" },
+  status: { icon: "\u25CF", color: "#ff9f5a", label: "STATUS" },
   split: { icon: "\u{1F500}", color: "#ff8c42", label: "SPLIT" },
   error: { icon: "\u26A0", color: "#ff4060", label: "ERROR" },
   buyback: { icon: "\u{1F504}", color: "#ff9500", label: "BUY" },

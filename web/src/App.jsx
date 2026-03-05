@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   apiAuthLogout,
   apiAuthMe,
@@ -40,6 +40,7 @@ const DEFAULT_PUBLIC_METRICS = {
   totalRewardsProcessedSol: 0,
   totalFeesTakenSol: 0,
 };
+const DASHBOARD_POLL_MS = 5000;
 
 export default function App() {
   const [page, setPage] = useState("home");
@@ -54,13 +55,25 @@ export default function App() {
   const [chartData, setChartData] = useState([]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [publicMetrics, setPublicMetrics] = useState(DEFAULT_PUBLIC_METRICS);
+  const [activeOverrides, setActiveOverrides] = useState({});
 
   const clearPrivateState = useCallback(() => {
     setTokens([]);
     setFeed([]);
     setAllLogs([]);
     setChartData([]);
+    setActiveOverrides({});
   }, []);
+
+  const tokensForUi = useMemo(
+    () =>
+      tokens.map((t) => {
+        const key = String(t?.id || "");
+        if (!key || activeOverrides[key] === undefined) return t;
+        return { ...t, active: Boolean(activeOverrides[key]) };
+      }),
+    [tokens, activeOverrides]
+  );
 
   const loadDashboard = useCallback(async () => {
     const data = await apiDashboard();
@@ -143,7 +156,7 @@ export default function App() {
     };
 
     pull();
-    const id = setInterval(pull, 15_000);
+    const id = setInterval(pull, DASHBOARD_POLL_MS);
     return () => {
       active = false;
       clearInterval(id);
@@ -172,6 +185,22 @@ export default function App() {
   }, [loadDashboard]);
 
   const handleTokenUpdate = useCallback(async (nextToken) => {
+    const tokenId = String(nextToken?.id || "");
+    if (tokenId) {
+      setActiveOverrides((prev) => ({ ...prev, [tokenId]: Boolean(nextToken.active) }));
+    }
+    setTokens((prev) =>
+      prev.map((t) =>
+        t.id === nextToken.id || (t.mint && nextToken.mint && String(t.mint) === String(nextToken.mint))
+          ? {
+              ...t,
+              ...nextToken,
+              active: Boolean(nextToken.active),
+              selectedBot: String(nextToken.selectedBot || nextToken.moduleType || t.selectedBot || "burn"),
+            }
+          : t
+      )
+    );
     const payload = {
       claimSec: Number(nextToken.claimSec),
       burnSec: Number(nextToken.burnSec),
@@ -203,10 +232,40 @@ export default function App() {
           ? Number(nextToken.moduleConfig.maxTradeSol)
           : undefined,
     };
-    const data = await apiUpdateToken(nextToken.id, payload);
-    setTokens((prev) => prev.map((t) => (t.id === data.token.id ? data.token : t)));
-    return data.token;
-  }, []);
+    try {
+      const data = await apiUpdateToken(nextToken.id, payload);
+      setTokens((prev) =>
+        prev.map((t) =>
+          t.id === data.token.id || (t.mint && data.token.mint && String(t.mint) === String(data.token.mint))
+            ? data.token
+            : t
+        )
+      );
+      setActiveOverrides((prev) => {
+        const next = { ...prev };
+        delete next[String(data.token.id || "")];
+        return next;
+      });
+      try {
+        await loadDashboard();
+      } catch {
+        // best effort refresh for feed/log/chart after token actions
+      }
+      return data.token;
+    } catch (error) {
+      setActiveOverrides((prev) => {
+        const next = { ...prev };
+        delete next[tokenId];
+        return next;
+      });
+      try {
+        await loadDashboard();
+      } catch {
+        // best effort recovery if API call fails
+      }
+      throw error;
+    }
+  }, [loadDashboard]);
 
   const handleTokenDelete = useCallback(async (tokenId) => {
     await apiDeleteToken(tokenId);
@@ -305,7 +364,7 @@ export default function App() {
         onBrandClick={handleBrandClick}
       />
 
-      <TokenTicker tokens={tokens} />
+      <TokenTicker tokens={tokensForUi} />
       <div style={{ height: 102 }} />
 
       {page === "home" && (
@@ -338,7 +397,7 @@ export default function App() {
       {page === "dashboard" && user && (
         <DashboardPage
           user={user}
-          tokens={tokens}
+          tokens={tokensForUi}
           allLogs={allLogs}
           chartData={chartData}
           feed={feed}

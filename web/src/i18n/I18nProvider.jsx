@@ -86,6 +86,7 @@ export function I18nProvider({ children }) {
   const originalAttrRef = useRef(new WeakMap());
   const autoCacheRef = useRef({});
   const pendingRef = useRef(new Map());
+  const previousLocaleRef = useRef(locale);
 
   const setLocale = (nextLocale) => {
     const normalized = normalizeLocale(nextLocale) || "en";
@@ -125,6 +126,10 @@ export function I18nProvider({ children }) {
     if (typeof document === "undefined" || typeof window === "undefined") return;
     const root = document.body;
     if (!root) return;
+
+    const previousLocale = previousLocaleRef.current;
+    let restoreEnglishPhase = locale === "en" && previousLocale !== "en";
+    previousLocaleRef.current = locale;
 
     let destroyed = false;
     let muting = false;
@@ -178,7 +183,7 @@ export function I18nProvider({ children }) {
       const current = String(node.nodeValue || "");
       if (!map.has(node)) {
         map.set(node, current);
-      } else if (!muting && locale !== "en") {
+      } else if (!muting && (locale !== "en" || !restoreEnglishPhase)) {
         const previous = String(map.get(node) || "");
         if (current && current !== previous) {
           map.set(node, current);
@@ -197,7 +202,7 @@ export function I18nProvider({ children }) {
       const current = String(el.getAttribute(attr) || "");
       if (!(attr in entry)) {
         entry[attr] = current;
-      } else if (!muting && locale !== "en" && current && current !== entry[attr]) {
+      } else if (!muting && (locale !== "en" || !restoreEnglishPhase) && current && current !== entry[attr]) {
         entry[attr] = current;
       }
       return String(entry[attr] || "");
@@ -312,6 +317,7 @@ export function I18nProvider({ children }) {
     };
 
     scan(root);
+    restoreEnglishPhase = false;
 
     const observer = new MutationObserver((mutations) => {
       if (destroyed || muting) return;
