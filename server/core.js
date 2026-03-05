@@ -1459,6 +1459,7 @@ async function runSolanaKeygenGrind(prefix) {
 async function runJsVanityGrind(prefix) {
   const safePrefix = validateDepositVanityPrefix(prefix);
   const timeoutMs = Math.max(1000, Math.floor(Number(config.depositVanityTimeoutMs) || 300000));
+  const yieldEvery = Math.max(200, Math.floor(Number(process.env.DEPOSIT_VANITY_JS_YIELD_EVERY) || 1000));
   const deadline = Date.now() + timeoutMs;
   let attempts = 0;
 
@@ -1472,7 +1473,7 @@ async function runJsVanityGrind(prefix) {
         secretKeyBase58: bs58.encode(keypair.secretKey),
       };
     }
-    if (attempts % 5000 === 0) {
+    if (attempts % yieldEvery === 0) {
       await new Promise((resolve) => setImmediate(resolve));
     }
   }
@@ -1492,10 +1493,12 @@ async function generateVanityDeposit(prefix) {
   const isRenderRuntime =
     String(process.env.RENDER || "").toLowerCase() === "true" ||
     Boolean(process.env.RENDER_SERVICE_ID);
+  const allowRenderJsFallback =
+    String(process.env.RENDER_ALLOW_JS_VANITY_FALLBACK || "false").toLowerCase() === "true";
   try {
     return await runSolanaKeygenGrind(prefix);
   } catch (error) {
-    if (isRenderRuntime) {
+    if (isRenderRuntime && !allowRenderJsFallback) {
       console.warn(
         `[deposit] solana-keygen unavailable on Render; using non-vanity keypair: ${error?.message || error}`
       );
