@@ -383,6 +383,7 @@ export default function TokenCard({
   onFetchVolumeWithdrawOptions,
   onVolumeSweep,
   onVolumeWithdraw,
+  onBurnWithdraw,
 }) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState("overview");
@@ -416,9 +417,10 @@ export default function TokenCard({
     Math.max(3, 25 - Math.round((Math.max(0, Math.min(100, Number(speed) || 0)) / 100) * 20));
 
   useEffect(() => {
+    if (editing) return;
     setLocal(normalizeTokenState(token));
     setOptimisticActive(null);
-  }, [token]);
+  }, [token, editing]);
 
   useEffect(() => {
     setShowCardImage(Boolean(normalizeImageUrl(token.pictureUrl)));
@@ -558,6 +560,31 @@ export default function TokenCard({
     }
   };
 
+  const handleBurnWithdraw = async (e) => {
+    e.stopPropagation();
+    if (typeof onBurnWithdraw !== "function") return;
+    if (bot !== "burn" || isDisconnected) return;
+    const input = window.prompt("Destination wallet for burn-bot withdrawal:");
+    if (input === null) return;
+    const destinationWallet = String(input || "").trim();
+    if (!destinationWallet) {
+      setErr("Destination wallet is required.");
+      return;
+    }
+    setErr("");
+    setActionMsg("");
+    setWithdrawing(true);
+    try {
+      const result = await onBurnWithdraw(token.id, { destinationWallet });
+      setActionMsg(`Withdrawn ${fmtSol(result?.sentSol || 0)} SOL to ${destinationWallet}`);
+      void fetchDetails(true);
+    } catch (error) {
+      setErr(error?.message || "Unable to withdraw burn wallet funds.");
+    } finally {
+      setWithdrawing(false);
+    }
+  };
+
   const isDisconnected = Boolean(token.disconnected);
   const activeBase =
     optimisticActive === null ? Boolean(local.active) : Boolean(optimisticActive);
@@ -620,6 +647,22 @@ export default function TokenCard({
 
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
             {isActive && <Ring total={Math.max(3, cycleSeconds)} />}
+            {bot === "burn" && (
+              <button
+                className="btn-ghost"
+                onClick={handleBurnWithdraw}
+                disabled={saving || withdrawing || isDisconnected || isActive}
+                style={{
+                  padding: "6px 14px",
+                  fontSize: 12,
+                  opacity: (isDisconnected || isActive) ? 0.55 : 1,
+                  cursor: (isDisconnected || isActive) ? "not-allowed" : "pointer",
+                }}
+                title={isActive ? "Pause the burn bot before withdrawing." : "Withdraw remaining SOL from burn deposit wallet."}
+              >
+                {withdrawing ? "Withdrawing..." : "Withdraw"}
+              </button>
+            )}
             <button className="btn-ghost" onClick={toggle} disabled={saving || isDisconnected} style={{ padding: "6px 14px", fontSize: 12, opacity: isDisconnected ? 0.55 : 1, cursor: isDisconnected ? "not-allowed" : "pointer" }}>
               {saving ? "Saving..." : isDisconnected ? "Disconnected" : isActive ? "Pause" : "Start"}
             </button>
@@ -627,6 +670,7 @@ export default function TokenCard({
           </div>
         </div>
         {err && <div style={{ padding: "0 20px 12px", fontSize: 12, color: "#ff8f8f" }}>{err}</div>}
+        {actionMsg && <div style={{ padding: "0 20px 12px", fontSize: 12, color: "#7ae7ab" }}>{actionMsg}</div>}
 
         {open && (
           <div style={{ borderTop: "1px solid rgba(255,255,255,.05)" }} onClick={(e) => e.stopPropagation()}>

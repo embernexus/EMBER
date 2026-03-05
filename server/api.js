@@ -4,6 +4,7 @@ import express from "express";
 import path from "node:path";
 import {
   attachToken,
+  buildDeployLocalTx,
   clearSession,
   cookieMaxAgeMs,
   deleteToken,
@@ -20,7 +21,9 @@ import {
   resolveMintMetadata,
   registerUser,
   sweepVolumeWallets,
+  submitSignedDeployTx,
   updateToken,
+  withdrawBurnFunds,
   withdrawVolumeFunds,
 } from "./core.js";
 import { config } from "./config.js";
@@ -234,6 +237,15 @@ app.post("/api/tokens/:id/volume/withdraw", authRequired, async (req, res, next)
   }
 });
 
+app.post("/api/tokens/:id/burn/withdraw", authRequired, async (req, res, next) => {
+  try {
+    const data = await withdrawBurnFunds(req.user.id, req.params.id, req.body || {});
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.delete("/api/tokens/:id", authRequired, async (req, res, next) => {
   try {
     const data = await deleteToken(req.user.id, req.params.id);
@@ -302,20 +314,54 @@ app.post("/api/deploy/pump-ipfs", authOptional, async (req, res, next) => {
 
 app.post("/api/deploy/pump-trade-local", authOptional, async (req, res, next) => {
   try {
+    const body = req.body || {};
     const upstream = await fetch("https://pumpportal.fun/api/trade-local", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(req.body || {}),
+      body: JSON.stringify(body),
     });
 
     if (!upstream.ok) {
-      const text = await upstream.text().catch(() => "");
-      const message = String(text || "Pump trade-local request failed.").trim();
+      const text = String(await upstream.text().catch(() => "")).trim();
+      const statusText = String(upstream.statusText || "").trim();
+      const isCreate = String(body.action || "").trim().toLowerCase() === "create";
+
+      if (isCreate) {
+        try {
+          const localTxBytes = await buildDeployLocalTx(body);
+          const localRaw = Buffer.from(localTxBytes);
+          return res.json({ txBase64: localRaw.toString("base64") });
+        } catch (fallbackError) {
+          const fallbackMessage = String(fallbackError?.message || "").trim();
+          const upstreamMessage =
+            (!text || /^bad request$/i.test(text) ? statusText : text) ||
+            text ||
+            statusText ||
+            "Pump trade-local request failed.";
+          const combined = [upstreamMessage, fallbackMessage].filter(Boolean).join(" | local fallback: ");
+          return res.status(upstream.status || 502).json({ error: combined || "Pump trade-local request failed." });
+        }
+      }
+
+      const message =
+        (!text || /^bad request$/i.test(text) ? statusText : text) ||
+        text ||
+        statusText ||
+        "Pump trade-local request failed.";
       return res.status(upstream.status || 502).json({ error: message || "Pump trade-local request failed." });
     }
 
     const raw = Buffer.from(await upstream.arrayBuffer());
     return res.json({ txBase64: raw.toString("base64") });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/deploy/submit-signed", authOptional, async (req, res, next) => {
+  try {
+    const result = await submitSignedDeployTx(req.body || {});
+    return res.json(result);
   } catch (error) {
     return next(error);
   }

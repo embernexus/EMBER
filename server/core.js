@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import bcrypt from "bcryptjs";
+import BN from "bn.js";
 import bs58 from "bs58";
 import {
   Connection,
@@ -32,6 +33,7 @@ const {
   OnlinePumpSdk,
   PumpSdk,
   feeSharingConfigPda,
+  getBuyTokenAmountFromSolAmount,
 } = pumpSdkPkg || {};
 const pumpOfflineSdk = PumpSdk ? new PumpSdk() : null;
 
@@ -57,7 +59,11 @@ function toToken(row) {
     selectedBot: String(row.selected_bot || "burn"),
     active: row.active,
     disconnected: Boolean(row.disconnected),
-    burned: Number(row.burned),
+    burned: Number(
+      Number.isFinite(Number(row.display_burned))
+        ? Number(row.display_burned)
+        : row.burned
+    ),
     pending: Number(row.pending),
     txCount: Number(row.tx_count),
     moduleType: String(row.module_type || row.selected_bot || "burn"),
@@ -743,6 +749,50 @@ async function signAndSendVersioned(connection, signer, txBytes) {
   });
   await connection.confirmTransaction(sig, "confirmed");
   return sig;
+}
+
+async function sendAllSolTransfer(connection, signer, toAddress) {
+  const toPubkey = new PublicKey(String(toAddress || "").trim());
+  const balance = await connection.getBalance(signer.publicKey, "confirmed");
+  if (balance <= 0) return { signature: null, sentLamports: 0, feeLamports: 0 };
+
+  const latest = await connection.getLatestBlockhash("confirmed");
+  const probeTx = new Transaction({
+    feePayer: signer.publicKey,
+    blockhash: latest.blockhash,
+    lastValidBlockHeight: latest.lastValidBlockHeight,
+  }).add(
+    SystemProgram.transfer({
+      fromPubkey: signer.publicKey,
+      toPubkey,
+      lamports: 1,
+    })
+  );
+  const feeRes = await connection.getFeeForMessage(probeTx.compileMessage(), "confirmed");
+  const feeLamports = Math.max(0, Number(feeRes?.value || 0));
+  const lamportsToSend = Math.max(0, balance - feeLamports);
+  if (lamportsToSend <= 0) {
+    return { signature: null, sentLamports: 0, feeLamports };
+  }
+
+  const tx = new Transaction({
+    feePayer: signer.publicKey,
+    blockhash: latest.blockhash,
+    lastValidBlockHeight: latest.lastValidBlockHeight,
+  }).add(
+    SystemProgram.transfer({
+      fromPubkey: signer.publicKey,
+      toPubkey,
+      lamports: lamportsToSend,
+    })
+  );
+  tx.sign(signer);
+  const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 5 });
+  await connection.confirmTransaction(
+    { signature: sig, blockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight },
+    "confirmed"
+  );
+  return { signature: sig, sentLamports: lamportsToSend, feeLamports };
 }
 
 async function signAndSendLegacyInstructions(connection, signer, instructions = []) {
@@ -1447,12 +1497,24 @@ export async function getDashboard(userId) {
       `
         SELECT
           t.*,
+          GREATEST(
+            COALESCE(t.burned::numeric, 0),
+            COALESCE(be.burned_from_events, 0)
+          ) AS display_burned,
           m.module_type,
           m.enabled AS module_enabled,
           m.config_json AS module_config,
           m.state_json AS module_state,
           m.last_error AS module_last_error
         FROM tokens t
+        LEFT JOIN (
+          SELECT
+            token_id,
+            COALESCE(SUM(amount), 0)::numeric AS burned_from_events
+          FROM token_events
+          WHERE user_id = $1 AND event_type = 'burn'
+          GROUP BY token_id
+        ) be ON be.token_id = t.id
         LEFT JOIN bot_modules m
           ON m.token_id = t.id
          AND m.module_type = t.selected_bot
@@ -1582,6 +1644,39 @@ async function getVolumeTokenModule(client, userId, tokenId, { forUpdate = false
     [tokenId, MODULE_TYPES.volume]
   );
   if (!moduleRes.rowCount) throw new Error("Volume module is not configured for this token.");
+  return { tokenRow, moduleRow: moduleRes.rows[0] };
+}
+
+async function getBurnTokenModule(client, userId, tokenId, { forUpdate = false } = {}) {
+  const lockClause = forUpdate ? "FOR UPDATE" : "";
+  const tokenRes = await client.query(
+    `
+      SELECT id, user_id, symbol, name, mint, picture_url, deposit, selected_bot, active
+      FROM tokens
+      WHERE user_id = $1 AND id = $2
+      LIMIT 1
+      ${lockClause}
+    `,
+    [userId, tokenId]
+  );
+  if (!tokenRes.rowCount) throw new Error("Token not found.");
+  const tokenRow = tokenRes.rows[0];
+  const selectedBot = normalizeModuleType(tokenRow.selected_bot, MODULE_TYPES.burn);
+  if (selectedBot !== MODULE_TYPES.burn) {
+    throw new Error("Burn withdraw is available only for Burn Bot tokens.");
+  }
+
+  const moduleRes = await client.query(
+    `
+      SELECT id AS module_id, user_id, token_id, module_type, enabled, config_json, state_json
+      FROM bot_modules
+      WHERE token_id = $1 AND module_type = $2
+      LIMIT 1
+      ${lockClause}
+    `,
+    [tokenId, MODULE_TYPES.burn]
+  );
+  if (!moduleRes.rowCount) throw new Error("Burn module is not configured for this token.");
   return { tokenRow, moduleRow: moduleRes.rows[0] };
 }
 
@@ -2209,6 +2304,116 @@ export async function getPublicMetrics() {
     totalRewardsProcessedSol: Number(eventAgg.rewards_processed_sol) || 0,
     totalFeesTakenSol: Number(eventAgg.fees_taken_sol) || 0,
   };
+}
+
+export async function buildDeployLocalTx(payload) {
+  if (!pumpOfflineSdk || !OnlinePumpSdk || !getBuyTokenAmountFromSolAmount) {
+    throw new Error("Pump SDK is unavailable for local deploy build.");
+  }
+
+  const body = payload && typeof payload === "object" ? payload : {};
+  const action = String(body.action || "").trim().toLowerCase();
+  if (action !== "create") {
+    throw new Error("Only create action is supported.");
+  }
+
+  const publicKeyRaw = String(body.publicKey || "").trim();
+  const mintRaw = String(body.mint || "").trim();
+  if (!publicKeyRaw) throw new Error("publicKey is required.");
+  if (!mintRaw) throw new Error("mint is required.");
+  let userPk;
+  let mintPk;
+  try {
+    userPk = new PublicKey(publicKeyRaw);
+    mintPk = new PublicKey(mintRaw);
+  } catch {
+    throw new Error("publicKey or mint is invalid.");
+  }
+
+  const tokenMetadata =
+    body.tokenMetadata && typeof body.tokenMetadata === "object" ? body.tokenMetadata : {};
+  const name = sanitizeDeployString(tokenMetadata.name, 40, "Token name");
+  const symbol = sanitizeDeployString(tokenMetadata.symbol, 12, "Token symbol").toUpperCase();
+  const uri = sanitizeDeployString(tokenMetadata.uri, 300, "Token metadata URI");
+
+  const denominatedInSol = String(body.denominatedInSol || "true").trim().toLowerCase() !== "false";
+  if (!denominatedInSol) {
+    throw new Error("Create requires denominatedInSol='true'.");
+  }
+
+  const amountSol = Number(body.amount);
+  if (!Number.isFinite(amountSol) || amountSol <= 0) {
+    throw new Error("Create amount must be greater than 0 SOL.");
+  }
+
+  const mayhemMode = String(body.isMayhemMode || "false").trim().toLowerCase() === "true";
+  const solLamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
+  if (solLamports <= 0) {
+    throw new Error("Create amount is too small.");
+  }
+
+  const connection = getConnection();
+  const onlineSdk = new OnlinePumpSdk(connection);
+  const global = await onlineSdk.fetchGlobal();
+  const solAmount = new BN(solLamports);
+  const tokenAmount = getBuyTokenAmountFromSolAmount({
+    global,
+    feeConfig: null,
+    mintSupply: null,
+    bondingCurve: null,
+    amount: solAmount,
+  });
+
+  const instructions = await pumpOfflineSdk.createV2AndBuyInstructions({
+    global,
+    mint: mintPk,
+    name,
+    symbol,
+    uri,
+    creator: userPk,
+    user: userPk,
+    amount: tokenAmount,
+    solAmount,
+    mayhemMode,
+  });
+
+  if (!Array.isArray(instructions) || !instructions.length) {
+    throw new Error("Local deploy builder returned no instructions.");
+  }
+
+  const latest = await connection.getLatestBlockhash("confirmed");
+  const message = new TransactionMessage({
+    payerKey: userPk,
+    recentBlockhash: latest.blockhash,
+    instructions,
+  }).compileToV0Message();
+  const tx = new VersionedTransaction(message);
+  return tx.serialize();
+}
+
+export async function submitSignedDeployTx(payload) {
+  const body = payload && typeof payload === "object" ? payload : {};
+  const txBase64 = String(body.txBase64 || "").trim();
+  if (!txBase64) {
+    throw new Error("Signed transaction payload is required.");
+  }
+
+  let raw;
+  try {
+    raw = Buffer.from(txBase64, "base64");
+  } catch {
+    throw new Error("Signed transaction payload is invalid.");
+  }
+  if (!raw?.length) {
+    throw new Error("Signed transaction payload is empty.");
+  }
+
+  const connection = getConnection();
+  const signature = await connection.sendRawTransaction(raw, {
+    skipPreflight: false,
+    maxRetries: 5,
+  });
+  return { signature };
 }
 
 export async function deployToken(userId, payload) {
@@ -2978,6 +3183,81 @@ export async function updateToken(userId, tokenId, payload) {
   });
 }
 
+export async function withdrawBurnFunds(userId, tokenId, payload = {}) {
+  const tokenIdText = String(tokenId || "").trim();
+  if (!tokenIdText) throw new Error("Token id is required.");
+  const destination = normalizePubkeyString(payload.destinationWallet || payload.destination || "");
+  if (!destination) {
+    throw new Error("Destination wallet is required.");
+  }
+
+  return withTx(async (client) => {
+    const { tokenRow, moduleRow } = await getBurnTokenModule(client, userId, tokenIdText, {
+      forUpdate: true,
+    });
+    if (tokenRow.active) {
+      throw new Error("Pause the burn bot before withdrawing.");
+    }
+
+    const lockKey = `${tokenIdText}:${MODULE_TYPES.burn}`;
+    const lock = await withTokenModuleLock(client, lockKey, async () => {
+      const connection = getConnection();
+      const depositSecret = await getTokenDepositSigningKey(userId, tokenIdText);
+      const depositSigner = keypairFromBase58(depositSecret);
+      const sweep = await sendAllSolTransfer(connection, depositSigner, destination);
+      if (!sweep.signature || sweep.sentLamports <= 0) {
+        throw new Error("No withdrawable SOL available in the burn deposit wallet.");
+      }
+      const balanceAfter = await connection.getBalance(depositSigner.publicKey, "confirmed");
+      const eventPrefix = `manual:withdraw:burn:${moduleRow.module_id}:${Date.now()}`;
+      await insertEvent(
+        client,
+        userId,
+        tokenIdText,
+        tokenRow.symbol,
+        "withdraw",
+        `Burn wallet withdrawn ${fromLamports(sweep.sentLamports).toFixed(6)} SOL to ${destination}`,
+        sweep.signature,
+        {
+          moduleType: MODULE_TYPES.burn,
+          amount: fromLamports(sweep.sentLamports),
+          idempotencyKey: `${eventPrefix}:${destination}`,
+        }
+      );
+
+      const configJson = mergeModuleConfig(MODULE_TYPES.burn, moduleRow.config_json, {
+        burnIntervalSec: Number(tokenRow.burn_sec || 300),
+        splitBuys: Number(tokenRow.splits || 1),
+      });
+      const reserveLamports = toLamports(configJson.reserveSol || config.botSolReserve || 0.005);
+      const state = { ...(moduleRow.state_json || {}) };
+      state.lastBalanceLamports = Math.max(0, balanceAfter - reserveLamports);
+      await upsertModuleState(client, moduleRow.module_id, state, null);
+
+      await client.query(
+        `
+          UPDATE tokens
+          SET tx_count = tx_count + 1
+          WHERE id = $1
+        `,
+        [tokenIdText]
+      );
+
+      return {
+        ok: true,
+        signature: sweep.signature,
+        sentSol: fromLamports(sweep.sentLamports),
+        remainingSol: fromLamports(balanceAfter),
+      };
+    });
+
+    if (!lock.locked) {
+      throw new Error("Token/module is currently locked by another executor.");
+    }
+    return lock.result;
+  });
+}
+
 async function insertEvent(
   client,
   userId,
@@ -3370,6 +3650,8 @@ async function runBurnExecutor(client, row) {
   const now = Date.now();
   const eventPrefix = `${row.id}:${now}`;
   let txCreated = 0;
+  let claimGasTopupLamports = 0;
+  let claimedLamportsFromClaims = 0;
 
   if (configJson.claimEnabled && (!state.nextClaimAt || Number(state.nextClaimAt) <= now)) {
     const claimIntervalSec = Math.max(60, Number(configJson.claimIntervalSec || 120));
@@ -3384,6 +3666,7 @@ async function runBurnExecutor(client, row) {
         eventPrefix,
         moduleType: MODULE_TYPES.burn,
       });
+      claimGasTopupLamports += Math.max(0, Number(claimGasTopup.toppedUp || 0));
       if (claimGasTopup.signature) txCreated += 1;
 
       try {
@@ -3396,6 +3679,7 @@ async function runBurnExecutor(client, row) {
         const sharingLamports = Math.max(0, Number(sharingClaim.claimedLamports || 0));
         if (sharingClaim.signature && sharingLamports > 0) {
           claimedLamportsAny += sharingLamports;
+          claimedLamportsFromClaims += sharingLamports;
           await insertEvent(
             client,
             row.user_id,
@@ -3448,6 +3732,7 @@ async function runBurnExecutor(client, row) {
             moduleType: MODULE_TYPES.burn,
             targetLamportsOverride: retryTarget,
           });
+          claimGasTopupLamports += Math.max(0, Number(retryTopup.toppedUp || 0));
           if (retryTopup.signature) txCreated += 1;
           if (firstError?.claimRequestBody) {
             claimSig = await pumpPortalCollectCreatorFeeRequest({
@@ -3498,6 +3783,7 @@ async function runBurnExecutor(client, row) {
         }
       } else {
         claimedLamportsAny += claimNetLamports;
+        claimedLamportsFromClaims += claimNetLamports;
         await insertEvent(
           client,
           row.user_id,
@@ -3555,7 +3841,28 @@ async function runBurnExecutor(client, row) {
   const balanceBefore = await connection.getBalance(signer.publicKey, "confirmed");
   const availableBefore = Math.max(0, balanceBefore - reserveLamports);
   const last = Math.max(0, Number(state.lastBalanceLamports || 0));
-  const delta = Math.max(0, availableBefore - last);
+  const rawDelta = Math.max(0, availableBefore - last);
+  const externalDepositLamports = Math.max(
+    0,
+    rawDelta - Math.max(0, claimGasTopupLamports) - Math.max(0, claimedLamportsFromClaims)
+  );
+  if (externalDepositLamports > toLamports(0.00005)) {
+    await insertEvent(
+      client,
+      row.user_id,
+      row.token_id,
+      row.symbol,
+      "deposit",
+      `Deposit received (${fromLamports(externalDepositLamports).toFixed(6)} SOL)`,
+      null,
+      {
+        moduleType: MODULE_TYPES.burn,
+        amount: fromLamports(externalDepositLamports),
+        idempotencyKey: `${eventPrefix}:deposit`,
+      }
+    );
+  }
+  const delta = Math.max(0, rawDelta - Math.max(0, claimGasTopupLamports));
   if (delta <= minProcessLamports) {
     state.lastBalanceLamports = availableBefore;
     await upsertModuleState(client, row.module_id, state, null);
@@ -3605,27 +3912,49 @@ async function runBurnExecutor(client, row) {
   }
 
   const beforeToken = await getOwnerTokenBalanceUi(connection, signer.publicKey, row.mint);
-  const buySig = await pumpPortalTrade({
-    connection,
-    signer,
-    mint: row.mint,
-    action: "buy",
-    amount: Number(fromLamports(netLamports).toFixed(9)),
-    denominatedInSol: true,
-    slippage: Math.max(1, Math.floor(Number(configJson.slippageBps || 1000) / 100)),
-    pool: configJson.pool || "auto",
-  });
-  txCreated += 1;
-  await insertEvent(
-    client,
-    row.user_id,
-    row.token_id,
-    row.symbol,
-    "buyback",
-    `Buyback executed (${fromLamports(netLamports).toFixed(6)} SOL)`,
-    buySig,
-    { moduleType: MODULE_TYPES.burn, amount: fromLamports(netLamports), idempotencyKey: `${eventPrefix}:buyback` }
+  const desiredSplitBuys = Math.max(
+    1,
+    Math.floor(Number(configJson.splitBuys || row.splits || 1))
   );
+  const minSplitLamports = toLamports(0.0001);
+  const maxAllowedSplits = Math.max(1, Math.floor(netLamports / Math.max(1, minSplitLamports)));
+  const splitBuys = Math.max(1, Math.min(desiredSplitBuys, maxAllowedSplits));
+  const baseChunk = Math.floor(netLamports / splitBuys);
+  const remainder = netLamports - baseChunk * splitBuys;
+
+  for (let i = 0; i < splitBuys; i += 1) {
+    const chunkLamports = baseChunk + (i < remainder ? 1 : 0);
+    if (chunkLamports <= 0) continue;
+    const buySig = await pumpPortalTrade({
+      connection,
+      signer,
+      mint: row.mint,
+      action: "buy",
+      amount: Number(fromLamports(chunkLamports).toFixed(9)),
+      denominatedInSol: true,
+      slippage: Math.max(1, Math.floor(Number(configJson.slippageBps || 1000) / 100)),
+      pool: configJson.pool || "auto",
+    });
+    txCreated += 1;
+    const splitLabel =
+      splitBuys > 1
+        ? `Buyback split ${i + 1}/${splitBuys} (${fromLamports(chunkLamports).toFixed(6)} SOL)`
+        : `Buyback executed (${fromLamports(chunkLamports).toFixed(6)} SOL)`;
+    await insertEvent(
+      client,
+      row.user_id,
+      row.token_id,
+      row.symbol,
+      "buyback",
+      splitLabel,
+      buySig,
+      {
+        moduleType: MODULE_TYPES.burn,
+        amount: fromLamports(chunkLamports),
+        idempotencyKey: `${eventPrefix}:buyback:${i + 1}`,
+      }
+    );
+  }
 
   const afterToken = await getOwnerTokenBalanceUi(connection, signer.publicKey, row.mint);
   const bought = Math.max(0, afterToken - beforeToken);
@@ -3652,7 +3981,7 @@ async function runBurnExecutor(client, row) {
           tx_count = tx_count + $2
       WHERE id = $3
     `,
-    [bought, txCreated, row.token_id]
+    [Math.max(0, Math.floor(bought)), txCreated, row.token_id]
   );
 
   const balanceAfter = await connection.getBalance(signer.publicKey, "confirmed");
@@ -3673,6 +4002,8 @@ async function runVolumeExecutor(client, row) {
   const now = Date.now();
   let txCreated = 0;
   const eventPrefix = `${row.id}:${now}`;
+  let claimGasTopupLamports = 0;
+  let claimedLamportsFromClaims = 0;
 
   const wallets = await ensureVolumeTradeWallets(client, row, configJson.tradeWalletCount || 1);
 
@@ -3689,6 +4020,7 @@ async function runVolumeExecutor(client, row) {
         eventPrefix,
         moduleType: MODULE_TYPES.volume,
       });
+      claimGasTopupLamports += Math.max(0, Number(claimGasTopup.toppedUp || 0));
       if (claimGasTopup.signature) txCreated += 1;
 
       try {
@@ -3701,6 +4033,7 @@ async function runVolumeExecutor(client, row) {
         const sharingLamports = Math.max(0, Number(sharingClaim.claimedLamports || 0));
         if (sharingClaim.signature && sharingLamports > 0) {
           claimedLamportsAny += sharingLamports;
+          claimedLamportsFromClaims += sharingLamports;
           await insertEvent(
             client,
             row.user_id,
@@ -3753,6 +4086,7 @@ async function runVolumeExecutor(client, row) {
             moduleType: MODULE_TYPES.volume,
             targetLamportsOverride: retryTarget,
           });
+          claimGasTopupLamports += Math.max(0, Number(retryTopup.toppedUp || 0));
           if (retryTopup.signature) txCreated += 1;
           if (firstError?.claimRequestBody) {
             claimSig = await pumpPortalCollectCreatorFeeRequest({
@@ -3803,6 +4137,7 @@ async function runVolumeExecutor(client, row) {
         }
       } else {
         claimedLamportsAny += claimNetLamports;
+        claimedLamportsFromClaims += claimNetLamports;
         await insertEvent(
           client,
           row.user_id,
@@ -3854,6 +4189,26 @@ async function runVolumeExecutor(client, row) {
   const lastDeposit = Math.max(0, Number(state.lastDepositBalanceLamports || 0));
   const rawDelta = Math.max(0, availableDeposit - lastDeposit);
   const ignore = Math.max(0, Number(state.ignoreInflowLamports || 0));
+  const externalDepositLamports = Math.max(
+    0,
+    rawDelta - ignore - Math.max(0, claimGasTopupLamports) - Math.max(0, claimedLamportsFromClaims)
+  );
+  if (externalDepositLamports > toLamports(0.00005)) {
+    await insertEvent(
+      client,
+      row.user_id,
+      row.token_id,
+      row.symbol,
+      "deposit",
+      `Deposit received (${fromLamports(externalDepositLamports).toFixed(6)} SOL)`,
+      null,
+      {
+        moduleType: MODULE_TYPES.volume,
+        amount: fromLamports(externalDepositLamports),
+        idempotencyKey: `${eventPrefix}:deposit`,
+      }
+    );
+  }
   const effectiveDelta = Math.max(0, rawDelta - ignore);
   state.ignoreInflowLamports = Math.max(0, ignore - rawDelta);
 
@@ -4023,7 +4378,7 @@ async function runPersonalBurnExecutor(client) {
 
   const connection = getConnection();
   const signer = Keypair.fromSecretKey(config.devWalletPrivateKey);
-  const before = await connection.getBalance(signer.publicKey, "confirmed");
+  const reserveLamports = toLamports(Math.max(0.001, Number(config.devWalletSolReserve || 0.01)));
   let txCreated = 0;
 
   for (const mint of config.personalCreatorMints) {
@@ -4041,11 +4396,11 @@ async function runPersonalBurnExecutor(client) {
   }
 
   const afterClaim = await connection.getBalance(signer.publicKey, "confirmed");
-  const delta = Math.max(0, afterClaim - before);
-  if (delta <= toLamports(0.0005)) return { ran: true, txCreated };
+  const spendable = Math.max(0, afterClaim - reserveLamports);
+  if (spendable <= toLamports(0.0005)) return { ran: true, txCreated };
 
-  const treasuryShare = Math.floor(delta * 0.5);
-  const burnShare = delta - treasuryShare;
+  const treasuryShare = Math.floor(spendable * 0.5);
+  const burnShare = spendable - treasuryShare;
   if (treasuryShare > 0) {
     await sendSolTransfer(connection, signer, config.treasuryWallet, treasuryShare);
     txCreated += 1;

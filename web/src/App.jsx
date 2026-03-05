@@ -5,6 +5,7 @@ import {
   apiCreateToken,
   apiDeleteToken,
   apiDashboard,
+  apiBurnWithdraw,
   apiGenerateDepositAddress,
   apiVolumeSweep,
   apiVolumeWithdraw,
@@ -285,6 +286,12 @@ export default function App() {
     return result;
   }, [loadDashboard]);
 
+  const handleBurnWithdraw = useCallback(async (tokenId, payload) => {
+    const result = await apiBurnWithdraw(tokenId, payload || {});
+    await loadDashboard();
+    return result;
+  }, [loadDashboard]);
+
   const onNavItemClick = useCallback((item) => {
     if (!item.enabled) return;
 
@@ -408,6 +415,7 @@ export default function App() {
           onFetchVolumeWithdrawOptions={apiVolumeWithdrawOptions}
           onVolumeSweep={handleVolumeSweep}
           onVolumeWithdraw={handleVolumeWithdraw}
+          onBurnWithdraw={handleBurnWithdraw}
         />
       )}
 

@@ -1,10 +1,16 @@
 export const EVT_META = {
   burn: { icon: "\u{1F525}", color: "#ff6a00", label: "BURN" },
   claim: { icon: "\u26A1", color: "#ffd700", label: "CLAIM" },
+  deposit: { icon: "\u{1F4E5}", color: "#6cd3ff", label: "DEPOSIT" },
+  withdraw: { icon: "\u{1F4E4}", color: "#ffb366", label: "WITHDRAW" },
+  transfer: { icon: "\u{1F4B8}", color: "#8ad9a0", label: "TRANSFER" },
+  fee: { icon: "\u{1F4B0}", color: "#ffb347", label: "FEE" },
   status: { icon: "\u25CF", color: "#ff9f5a", label: "STATUS" },
   split: { icon: "\u{1F500}", color: "#ff8c42", label: "SPLIT" },
   error: { icon: "\u26A0", color: "#ff4060", label: "ERROR" },
   buyback: { icon: "\u{1F504}", color: "#ff9500", label: "BUY" },
+  buy: { icon: "\u{1F4C8}", color: "#7bd88f", label: "BUY" },
+  sell: { icon: "\u{1F4C9}", color: "#ff8f8f", label: "SELL" },
 };
 
 export const KNOWN_MINTS = {

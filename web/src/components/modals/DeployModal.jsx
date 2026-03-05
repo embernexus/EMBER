@@ -195,6 +195,16 @@ function base64ToBytes(base64Text) {
   return out;
 }
 
+function bytesToBase64(bytes) {
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
 async function fetchWithTimeout(url, options = {}, timeoutMs = 35000, label = "Request") {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
@@ -211,15 +221,21 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 35000, label = "R
 }
 
 async function readErrorFromResponse(res, fallbackMessage) {
+  const statusText = String(res?.statusText || "").trim();
   const text = await res.text().catch(() => "");
-  if (!text) return fallbackMessage;
-  try {
-    const json = JSON.parse(text);
-    const msg = String(json?.error || json?.message || "").trim();
-    return msg || fallbackMessage;
-  } catch {
-    return text.trim() || fallbackMessage;
+  let message = "";
+  if (text) {
+    try {
+      const json = JSON.parse(text);
+      message = String(json?.error || json?.message || "").trim();
+    } catch {
+      message = text.trim();
+    }
   }
+  if ((!message || /^bad request$/i.test(message)) && statusText) {
+    message = statusText;
+  }
+  return message || fallbackMessage;
 }
 
 async function withTimeout(promise, timeoutMs, label) {
@@ -483,10 +499,7 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
         activeProvider = connected.provider;
         activeWalletAddress = connected.address;
       }
-      const [{ default: bs58 }, { Connection, Keypair, VersionedTransaction }] = await Promise.all([
-        import("bs58"),
-        import("@solana/web3.js"),
-      ]);
+      const { Connection, Keypair, VersionedTransaction } = await import("@solana/web3.js");
       if (!activeProvider) {
         throw new Error("Wallet provider not found.");
       }
@@ -574,17 +587,11 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
         slippage: DEPLOY_SLIPPAGE,
         priorityFee: DEPLOY_PRIORITY_FEE,
         pool: "pump",
+        isMayhemMode: form.mayhemMode ? "true" : "false",
       };
       const payloadCandidates = [
         { ...basePayload, mint: mintKeypair.publicKey.toBase58() },
-        { ...basePayload, mint: bs58.encode(mintKeypair.secretKey) },
       ];
-      if (form.mayhemMode) {
-        payloadCandidates.push(
-          { ...basePayload, mint: mintKeypair.publicKey.toBase58(), isMayhemMode: "true" },
-          { ...basePayload, mint: bs58.encode(mintKeypair.secretKey), isMayhemMode: "true" }
-        );
-      }
 
       let txBytes = null;
       const buildErrors = [];
@@ -641,14 +648,42 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
       setDeployStep("Waiting for wallet signature...");
       const signedTx = await activeProvider.signTransaction(tx);
 
-      const connection = new Connection(DEPLOY_RPC_URL, "confirmed");
       setDeployStep("Sending transaction...");
-      const signature = await withTimeout(connection.sendRawTransaction(signedTx.serialize(), {
-        maxRetries: 5,
-        skipPreflight: false,
-      }), 30000, "Transaction submit");
-      setDeployStep("Confirming on-chain...");
-      await withTimeout(connection.confirmTransaction(signature, "confirmed"), 45000, "Transaction confirmation");
+      const signedTxBytes = signedTx.serialize();
+      let signature = "";
+      let relayError = "";
+      try {
+        const relayRes = await fetchWithTimeout("/api/deploy/submit-signed", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ txBase64: bytesToBase64(signedTxBytes) }),
+        }, 45000, "Transaction relay");
+        if (!relayRes.ok) {
+          const message = await readErrorFromResponse(relayRes, "relay submit failed");
+          throw new Error(message);
+        }
+        const relayData = await relayRes.json().catch(() => ({}));
+        signature = String(relayData?.signature || "").trim();
+        if (!signature) {
+          throw new Error("Relay submit returned no signature.");
+        }
+      } catch (err) {
+        relayError = err?.message || "relay submit failed";
+      }
+
+      if (!signature) {
+        const connection = new Connection(DEPLOY_RPC_URL, "confirmed");
+        try {
+          signature = await withTimeout(connection.sendRawTransaction(signedTxBytes, {
+            maxRetries: 5,
+            skipPreflight: false,
+          }), 30000, "Transaction submit");
+        } catch (directErr) {
+          const directMessage = directErr?.message || "direct submit failed";
+          throw new Error(`Transaction submit failed: relay: ${relayError || "failed"} | direct: ${directMessage}`);
+        }
+      }
 
       const mint = mintKeypair.publicKey.toBase58();
       let recordData = {};

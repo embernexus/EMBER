@@ -17,6 +17,7 @@ export default function DashboardPage({
   onFetchVolumeWithdrawOptions,
   onVolumeSweep,
   onVolumeWithdraw,
+  onBurnWithdraw,
 }) {
   const { t } = useI18n();
   const visibleTokens = tokens.filter((t) => !t?.disconnected);
@@ -97,6 +98,7 @@ export default function DashboardPage({
               onFetchVolumeWithdrawOptions={onFetchVolumeWithdrawOptions}
               onVolumeSweep={onVolumeSweep}
               onVolumeWithdraw={onVolumeWithdraw}
+              onBurnWithdraw={onBurnWithdraw}
             />
           ))}
           {!visibleTokens.length && (

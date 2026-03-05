@@ -277,6 +277,19 @@ export async function apiVolumeWithdraw(id, payload) {
   };
 }
 
+export async function apiBurnWithdraw(id, payload) {
+  const data = await requestJson(`/api/tokens/${id}/burn/withdraw`, {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+  return {
+    ok: bool(data.ok, true),
+    signature: str(data.signature),
+    sentSol: num(data.sentSol),
+    remainingSol: num(data.remainingSol),
+  };
+}
+
 export async function apiDeleteToken(id) {
   const data = await requestJson(`/api/tokens/${id}`, { method: "DELETE" });
   return { ok: bool(data.ok, true) };
