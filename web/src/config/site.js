@@ -1,6 +1,10 @@
 export const envOr = (value, fallback) => {
   const v = String(value || "").trim();
-  return v || fallback;
+  const lowered = v.toLowerCase();
+  if (!v || lowered === "xxxxx" || lowered === "xxx" || lowered === "tbd") {
+    return fallback;
+  }
+  return v;
 };
 
 export const API_BASE = String(import.meta.env.VITE_API_BASE_URL || "").trim().replace(/\/+$/, "");

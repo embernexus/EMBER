@@ -18,9 +18,28 @@ try {
   // best effort
 }
 
+let resolvedDatabaseUrl = config.databaseUrl;
+try {
+  const forceIpv4 = String(process.env.DB_FORCE_IPV4 || "true").toLowerCase() !== "false";
+  if (forceIpv4 && resolvedDatabaseUrl) {
+    const parsed = new URL(resolvedDatabaseUrl);
+    const host = String(parsed.hostname || "").trim();
+    const isIpv4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
+    if (host && !isIpv4) {
+      const resolved = await dns.promises.lookup(host, { family: 4 });
+      if (resolved?.address) {
+        parsed.hostname = resolved.address;
+        resolvedDatabaseUrl = parsed.toString();
+        console.log(`[db] resolved ${host} -> ${resolved.address} (ipv4)`);
+      }
+    }
+  }
+} catch (error) {
+  console.warn(`[db] ipv4 resolution skipped: ${error?.message || error}`);
+}
 
 export const pool = new Pool({
-  connectionString: config.databaseUrl,
+  connectionString: resolvedDatabaseUrl,
   ssl: process.env.PGSSLMODE === "disable" ? false : { rejectUnauthorized: false },
 });
 
