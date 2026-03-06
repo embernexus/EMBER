@@ -867,8 +867,11 @@ export default function TokenCard({
                               <input type="number" min={60} className="input-f" style={{ padding: "9px 12px", fontSize: 13 }} value={local.claimSec} onChange={(e) => setLocal((prev) => ({ ...prev, claimSec: Math.max(60, Math.floor(toNum(e.target.value, prev.claimSec))) }))} />
                             </div>
                             <div>
-                              <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 7, fontWeight: 600 }}>TRADE WALLETS (1-5)</label>
+                              <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 7, fontWeight: 600 }}>TOTAL WALLETS (1-5)</label>
                               <input type="number" min={1} max={5} className="input-f" style={{ padding: "9px 12px", fontSize: 13 }} value={local.moduleConfig.tradeWalletCount} onChange={(e) => setLocal((prev) => ({ ...prev, moduleConfig: { ...prev.moduleConfig, tradeWalletCount: Math.max(1, Math.min(5, Math.floor(toNum(e.target.value, prev.moduleConfig.tradeWalletCount)))) } }))} />
+                              <div style={{ fontSize: 11, color: "rgba(255,255,255,.38)", marginTop: 6 }}>
+                                Includes deposit wallet as wallet #1.
+                              </div>
                             </div>
                           </div>
 

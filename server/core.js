@@ -4507,7 +4507,9 @@ async function ensureTradeWalletGasBuffer({
 }
 
 async function ensureVolumeTradeWallets(client, moduleRow, count) {
-  const desired = Math.max(1, Math.min(5, Math.floor(Number(count) || 1)));
+  // `tradeWalletCount` is total volume wallets including deposit wallet.
+  // So additional trade wallets in this table are (count - 1).
+  const desired = Math.max(0, Math.min(4, Math.floor(Number(count) || 1) - 1));
   const existingRes = await client.query(
     `
       SELECT id, label, wallet_pubkey, secret_key_base58, funded_from_deposit_lamports
@@ -4523,9 +4525,29 @@ async function ensureVolumeTradeWallets(client, moduleRow, count) {
   const need = desired - existing.length;
   const created = [];
   for (let i = 0; i < need; i += 1) {
-    const kp = await generateVanityDeposit(config.depositVanityPrefix || "EMBR");
     const id = makeId("vw");
-    const storedSecret = encryptDepositSecret(kp.secretKeyBase58);
+    let walletPubkey = "";
+    let storedSecret = "";
+    const poolRes = await client.query(
+      `
+        SELECT id, deposit_pubkey, secret_key_base58
+        FROM token_deposit_pool
+        WHERE status = 'available'
+        ORDER BY created_at ASC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+      `
+    );
+    if (poolRes.rowCount) {
+      const picked = poolRes.rows[0];
+      walletPubkey = String(picked.deposit_pubkey || "");
+      storedSecret = String(picked.secret_key_base58 || "");
+      await client.query("DELETE FROM token_deposit_pool WHERE id = $1", [picked.id]);
+    } else {
+      const kp = await generateVanityDeposit(config.depositVanityPrefix || "EMBR");
+      walletPubkey = kp.pubkey;
+      storedSecret = encryptDepositSecret(kp.secretKeyBase58);
+    }
     await client.query(
       `
         INSERT INTO volume_trade_wallets (
@@ -4539,14 +4561,14 @@ async function ensureVolumeTradeWallets(client, moduleRow, count) {
         moduleRow.user_id,
         moduleRow.token_id,
         `trade-${existing.length + i + 1}`,
-        kp.pubkey,
+        walletPubkey,
         storedSecret,
       ]
     );
     created.push({
       id,
       label: `trade-${existing.length + i + 1}`,
-      wallet_pubkey: kp.pubkey,
+      wallet_pubkey: walletPubkey,
       secret_key_base58: storedSecret,
       funded_from_deposit_lamports: 0,
     });
@@ -4556,10 +4578,8 @@ async function ensureVolumeTradeWallets(client, moduleRow, count) {
 }
 
 async function reconcileVolumeTradeWalletCount(client, moduleRow, configJson, tokenActive) {
-  const desired = Math.max(
-    1,
-    Math.min(5, Math.floor(Number(configJson?.tradeWalletCount) || 1))
-  );
+  // `tradeWalletCount` includes deposit wallet.
+  const desired = Math.max(0, Math.min(4, Math.floor(Number(configJson?.tradeWalletCount) || 1) - 1));
   const existingRes = await client.query(
     `
       SELECT id, label, wallet_pubkey, secret_key_base58, funded_from_deposit_lamports
@@ -5066,6 +5086,19 @@ async function runVolumeExecutor(client, row) {
   let claimedLamportsFromClaims = 0;
 
   const wallets = await ensureVolumeTradeWallets(client, row, configJson.tradeWalletCount || 1);
+  const executionWallets = [
+    {
+      label: "deposit",
+      wallet_pubkey: depositSigner.publicKey.toBase58(),
+      signer: depositSigner,
+      reserveLamports,
+    },
+    ...wallets.map((wallet) => ({
+      ...wallet,
+      signer: keypairFromBase58(decryptDepositSecret(wallet.secret_key_base58)),
+      reserveLamports: tradeReserveLamports,
+    })),
+  ];
 
   if (configJson.claimEnabled && (!state.nextClaimAt || Number(state.nextClaimAt) <= now)) {
     const claimIntervalSec = Math.max(60, Number(configJson.claimIntervalSec || 120));
@@ -5352,18 +5385,19 @@ async function runVolumeExecutor(client, row) {
     }
   }
 
-  const wallet = wallets[Math.floor(Math.random() * wallets.length)];
+  const wallet = executionWallets[Math.floor(Math.random() * executionWallets.length)];
   if (wallet) {
-    const tradeSigner = keypairFromBase58(decryptDepositSecret(wallet.secret_key_base58));
+    const tradeSigner = wallet.signer;
     const walletSolLamports = await connection.getBalance(tradeSigner.publicKey, "confirmed");
     const walletSol = fromLamports(walletSolLamports);
+    const walletReserveSol = fromLamports(Math.max(0, Number(wallet.reserveLamports || 0)));
     const tokenBal = await getOwnerTokenBalanceUi(connection, tradeSigner.publicKey, row.mint);
     let action = Math.random() < 0.5 ? "buy" : "sell";
     if (tokenBal <= 0.000001) action = "buy";
-    if (walletSol < Number(configJson.minTradeSol || 0.01) + fromLamports(tradeReserveLamports)) action = "sell";
+    if (walletSol < Number(configJson.minTradeSol || 0.01) + walletReserveSol) action = "sell";
 
     if (action === "buy") {
-      const tradeSol = pickTradeSol(configJson, walletSol, fromLamports(tradeReserveLamports));
+      const tradeSol = pickTradeSol(configJson, walletSol, walletReserveSol);
       if (tradeSol > 0.0005) {
         const sig = await pumpPortalTrade({
           connection,
