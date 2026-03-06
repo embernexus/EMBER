@@ -28,7 +28,12 @@ export const SOLANA_WEBSITE_URL = envOr(import.meta.env.VITE_SOLANA_URL, "https:
 export const CREATOR_X_URL = envOr(import.meta.env.VITE_CREATOR_X_URL, "https://x.com/satoshEH_");
 
 export const SOCIAL_LINKS = {
-  x: envOr(import.meta.env.VITE_COMMUNITY_X_URL || import.meta.env.VITE_X_URL, "https://x.com/satoshEH_"),
+  x: envOr(
+    import.meta.env.VITE_COMMUNITY_X_URL
+      || import.meta.env.VITE_CREATOR_X_URL
+      || import.meta.env.VITE_X_URL,
+    "https://x.com/ember_nexus"
+  ),
   telegram: envOr(import.meta.env.VITE_TELEGRAM_URL, "https://t.me/ember_nexus"),
   github: envOr(import.meta.env.VITE_GITHUB_URL, "https://github.com/embernexus"),
 };
