@@ -105,8 +105,14 @@ export function makeSessionToken() {
 export async function initDb() {
   const lockClient = await pool.connect();
   const initLockKey = "884420002777";
+  let acquired = false;
   try {
-    await lockClient.query("SELECT pg_advisory_lock($1::bigint)", [initLockKey]);
+    const lockRes = await lockClient.query("SELECT pg_try_advisory_lock($1::bigint) AS ok", [initLockKey]);
+    acquired = Boolean(lockRes.rows[0]?.ok);
+    if (!acquired) {
+      console.log("[db] init already running in another process; skipping duplicate init");
+      return;
+    }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -395,7 +401,9 @@ export async function initDb() {
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   `);
   } finally {
-    await lockClient.query("SELECT pg_advisory_unlock($1::bigint)", [initLockKey]).catch(() => {});
+    if (acquired) {
+      await lockClient.query("SELECT pg_advisory_unlock($1::bigint)", [initLockKey]).catch(() => {});
+    }
     lockClient.release();
   }
 }
