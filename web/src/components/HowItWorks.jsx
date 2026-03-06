@@ -126,11 +126,17 @@ export default function HowItWorks() {
           <div style={{background:"rgba(0,0,0,.25)",border:"1px solid rgba(255,255,255,.12)",borderRadius:10,padding:"12px 14px",textAlign:"center"}}>
             <div style={{fontSize:11,fontWeight:700,letterSpacing:.8,color:"rgba(255,255,255,.72)",textTransform:"uppercase",marginBottom:6,textAlign:"center"}}>EMBER Token Contract</div>
             <div style={{fontSize:12,color:"rgba(255,255,255,.5)",lineHeight:1.6,marginBottom:8}}>
-              Official token contract address for $EMBER. Treasury destination for 50% of EMBER creator rewards.
+              Official token contract address for $EMBER.
             </div>
-            <div style={{fontSize:11,color:"rgba(255,255,255,.74)",fontFamily:"'JetBrains Mono',monospace",background:"rgba(0,0,0,.35)",padding:"8px 10px",borderRadius:8,border:"1px solid rgba(255,255,255,.15)",whiteSpace:"normal",overflowWrap:"anywhere",wordBreak:"break-word",display:"block",width:"100%"}}>
-              {EMBER_TOKEN_CONTRACT}
-            </div>
+            <a
+              href={solscanAddr(EMBER_TOKEN_CONTRACT)}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="View EMBER token contract on Solscan"
+              style={{fontSize:11,color:"rgba(255,255,255,.74)",fontFamily:"'JetBrains Mono',monospace",background:"rgba(0,0,0,.35)",padding:"8px 10px",borderRadius:8,border:"1px solid rgba(255,255,255,.15)",whiteSpace:"normal",overflowWrap:"anywhere",wordBreak:"break-word",textDecoration:"none",display:"block",width:"100%"}}
+            >
+              {EMBER_TOKEN_CONTRACT} {"\u2197"}
+            </a>
           </div>
         </div>
       </div>
