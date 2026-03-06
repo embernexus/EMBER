@@ -185,6 +185,7 @@ export async function apiPublicMetrics() {
     totalBotTransactions: num(data.totalBotTransactions ?? data.transactions ?? data.burnBuybackTransactions),
     activeTokens: num(data.activeTokens),
     totalHolders: num(data.totalHolders),
+    emberMarketCap: num(data.emberMarketCap),
     emberIncinerated: num(data.emberIncinerated),
     totalRewardsProcessedSol: num(data.totalRewardsProcessedSol ?? data.totalRewardsProcessed),
     totalFeesTakenSol: num(data.totalFeesTakenSol ?? data.totalFeesTaken),

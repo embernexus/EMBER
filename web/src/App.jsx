@@ -39,6 +39,7 @@ const DEFAULT_PUBLIC_METRICS = {
   totalBotTransactions: 0,
   activeTokens: 0,
   totalHolders: 0,
+  emberMarketCap: 0,
   emberIncinerated: 0,
   totalRewardsProcessedSol: 0,
   totalFeesTakenSol: 0,
@@ -151,7 +152,11 @@ export default function App() {
           symbol: String(t?.symbol || emberTickerMeta.symbol || "EMBER").toUpperCase(),
           name: String(t?.name || emberTickerMeta.name || "EMBER"),
           pictureUrl: String(t?.pictureUrl || emberTickerMeta.pictureUrl || ""),
-          marketCap: Number(t?.marketCap) || Number(emberTickerMeta.marketCap) || 0,
+          marketCap:
+            Number(t?.marketCap) ||
+            Number(emberTickerMeta.marketCap) ||
+            Number(publicMetrics?.emberMarketCap) ||
+            0,
         });
       });
     }
@@ -166,7 +171,10 @@ export default function App() {
           name: "EMBER",
           pictureUrl: "",
           txCount: 0,
-          marketCap: Number(emberTickerMeta.marketCap) || 0,
+          marketCap:
+            Number(emberTickerMeta.marketCap) ||
+            Number(publicMetrics?.emberMarketCap) ||
+            0,
           pending: 0,
           claimSec: 0,
           burnSec: 0,
@@ -176,11 +184,20 @@ export default function App() {
           symbol: String(emberTickerMeta.symbol || "EMBER").toUpperCase(),
           name: String(emberTickerMeta.name || "EMBER"),
           pictureUrl: String(emberTickerMeta.pictureUrl || ""),
-          marketCap: Number(emberTickerMeta.marketCap) || 0,
+          marketCap:
+            Number(emberTickerMeta.marketCap) ||
+            Number(publicMetrics?.emberMarketCap) ||
+            0,
         }
       ),
     ];
-  }, [tokensForUi, configuredTickerMint, emberTickerMeta, publicMetrics?.emberIncinerated]);
+  }, [
+    tokensForUi,
+    configuredTickerMint,
+    emberTickerMeta,
+    publicMetrics?.emberIncinerated,
+    publicMetrics?.emberMarketCap,
+  ]);
 
   const loadDashboard = useCallback(async () => {
     const data = await apiDashboard();
