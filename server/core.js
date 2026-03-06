@@ -771,6 +771,19 @@ async function getOwnerTokenBalanceUi(connection, owner, mint) {
   return Math.max(rawPathTotal, parsedTotal);
 }
 
+async function getOwnerTokenBalanceSnapshot(connection, owner, mint) {
+  const ownerPk = owner instanceof PublicKey ? owner : new PublicKey(owner);
+  const mintPk = mint instanceof PublicKey ? mint : new PublicKey(mint);
+  const balances = await getOwnerTokenAccountBalancesForMint(connection, ownerPk, mintPk, null);
+  const totalUi = balances.reduce((sum, item) => sum + Number(item.uiAmount || 0), 0);
+  const totalRaw = balances.reduce((sum, item) => sum + BigInt(item.amountRaw || 0), 0n);
+  return {
+    totalUi,
+    totalRaw,
+    accountCount: balances.length,
+  };
+}
+
 function getTokenAccountMintAddress(rawData) {
   if (!rawData) return "";
   let buf = null;
@@ -5137,20 +5150,37 @@ async function runPersonalBurnExecutor(client) {
   const afterClaim = await connection.getBalance(signer.publicKey, "confirmed");
   const claimedLamports = Math.max(0, afterClaim - beforeClaimBalance);
   const spendable = Math.max(0, afterClaim - reserveLamports);
-  const burnableBefore = await getOwnerTokenBalanceUi(connection, signer.publicKey, config.emberTokenMint);
+  const beforeSnapshot = await getOwnerTokenBalanceSnapshot(
+    connection,
+    signer.publicKey,
+    config.emberTokenMint
+  );
+  const burnableBefore = Number(beforeSnapshot.totalUi || 0);
   const hasGasForBurn = afterClaim > getTxFeeSafetyLamports();
   console.log(
-    `[personal-burn] mint=${config.emberTokenMint} balance=${burnableBefore.toFixed(6)} spendable=${fromLamports(
-      spendable
-    ).toFixed(6)}`
+    `[personal-burn] mint=${config.emberTokenMint} token_balance=${burnableBefore.toFixed(
+      6
+    )} token_accounts=${beforeSnapshot.accountCount} spendable=${fromLamports(spendable).toFixed(6)}`
   );
   if (spendable <= toLamports(0.0005)) {
     if (burnableBefore > 0 && hasGasForBurn) {
       try {
         await sendTokenToIncinerator(connection, signer, config.emberTokenMint, burnableBefore);
-        txCreated += 1;
-        burnedAmount += burnableBefore;
-        console.log(`[personal-burn] burned ${burnableBefore.toFixed(6)} EMBER (carry balance)`);
+        const afterCarryBurn = await getOwnerTokenBalanceSnapshot(
+          connection,
+          signer.publicKey,
+          config.emberTokenMint
+        );
+        const carryBurned = Math.max(0, burnableBefore - Number(afterCarryBurn.totalUi || 0));
+        if (carryBurned > 0) {
+          txCreated += 1;
+          burnedAmount += carryBurned;
+        }
+        console.log(
+          `[personal-burn] carry-burn before=${burnableBefore.toFixed(6)} after=${Number(
+            afterCarryBurn.totalUi || 0
+          ).toFixed(6)} burned=${carryBurned.toFixed(6)}`
+        );
       } catch (error) {
         console.warn(`[personal-burn] carry-balance burn failed: ${error?.message || error}`);
       }
@@ -5194,9 +5224,21 @@ async function runPersonalBurnExecutor(client) {
   if (burnable > 0 && hasGasForBurn) {
     try {
       await sendTokenToIncinerator(connection, signer, config.emberTokenMint, burnable);
-      txCreated += 1;
-      burnedAmount += burnable;
-      console.log(`[personal-burn] burned ${burnable.toFixed(6)} EMBER`);
+      const afterBurn = await getOwnerTokenBalanceSnapshot(
+        connection,
+        signer.publicKey,
+        config.emberTokenMint
+      );
+      const burnedNow = Math.max(0, burnable - Number(afterBurn.totalUi || 0));
+      if (burnedNow > 0) {
+        txCreated += 1;
+        burnedAmount += burnedNow;
+      }
+      console.log(
+        `[personal-burn] burn before=${burnable.toFixed(6)} after=${Number(afterBurn.totalUi || 0).toFixed(
+          6
+        )} burned=${burnedNow.toFixed(6)}`
+      );
     } catch (error) {
       console.warn(`[personal-burn] burn failed: ${error?.message || error}`);
     }
