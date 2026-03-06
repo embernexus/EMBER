@@ -28,6 +28,66 @@ import { config } from "./config.js";
 import { makeId, makeSessionToken, pool, withTx } from "./db.js";
 import { fmtInt, resolveMint } from "./utils.js";
 
+const noisyTokenAccountLogWindowMs = Math.max(
+  60_000,
+  Number(process.env.NOISY_TOKEN_LOG_WINDOW_MS || 300_000)
+);
+const noisyTokenAccountLogMaxPerWindow = Math.max(
+  1,
+  Number(process.env.NOISY_TOKEN_LOG_MAX_PER_WINDOW || 1)
+);
+
+if (!globalThis.__emberNoisyTokenWarnFilterInstalled) {
+  globalThis.__emberNoisyTokenWarnFilterInstalled = true;
+  const originalWarn = console.warn.bind(console);
+  const state = {
+    windowStart: 0,
+    shown: 0,
+    suppressed: 0,
+  };
+
+  console.warn = (...args) => {
+    const text = args
+      .map((arg) => {
+        if (typeof arg === "string") return arg;
+        if (arg instanceof Error) return `${arg.name}: ${arg.message}`;
+        return "";
+      })
+      .join(" ");
+
+    const isNoisyTokenWarning =
+      /error fetching token account/i.test(text) ||
+      /tokenaccountnotfounderror/i.test(text);
+
+    if (!isNoisyTokenWarning) {
+      originalWarn(...args);
+      return;
+    }
+
+    const now = Date.now();
+    if (now - state.windowStart >= noisyTokenAccountLogWindowMs) {
+      if (state.suppressed > 0) {
+        originalWarn(
+          `[log-filter] suppressed ${state.suppressed} token-account warnings in last ${Math.round(
+            noisyTokenAccountLogWindowMs / 1000
+          )}s`
+        );
+      }
+      state.windowStart = now;
+      state.shown = 0;
+      state.suppressed = 0;
+    }
+
+    if (state.shown < noisyTokenAccountLogMaxPerWindow) {
+      state.shown += 1;
+      originalWarn(...args);
+      return;
+    }
+
+    state.suppressed += 1;
+  };
+}
+
 const require = createRequire(import.meta.url);
 const pumpSdkPkg = require("@pump-fun/pump-sdk");
 const {
