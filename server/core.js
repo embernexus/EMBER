@@ -527,9 +527,15 @@ function scheduleMarketCapRefresh(mint, entry) {
   entry.inflight = (async () => {
     try {
       const value = await fetchMarketCapUsd(mint);
-      entry.value = value > 0 ? value : 0;
-      entry.at = Date.now();
-      entry.nextRefreshAt = entry.at + MARKET_CAP_REFRESH_MS;
+      const now = Date.now();
+      if (value > 0) {
+        entry.value = value;
+        entry.at = now;
+        entry.nextRefreshAt = now + MARKET_CAP_REFRESH_MS;
+      } else {
+        // Keep last known good market cap on transient zero/miss responses.
+        entry.nextRefreshAt = now + MARKET_CAP_RETRY_MS;
+      }
     } catch {
       entry.nextRefreshAt = Date.now() + MARKET_CAP_RETRY_MS;
     } finally {
@@ -986,11 +992,25 @@ async function sendTokenToIncinerator(connection, signer, mintAddress, uiAmount)
 }
 
 async function fetchPumpPortalLocalTx(requestBody) {
-  const res = await fetch("https://pumpportal.fun/api/trade-local", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(requestBody),
-  });
+  const timeoutMs = Math.max(3000, Number(process.env.PUMPPORTAL_TIMEOUT_MS || 15000));
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch("https://pumpportal.fun/api/trade-local", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+      signal: ctrl.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`PumpPortal request timed out after ${timeoutMs}ms.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
     throw new Error(txt || "PumpPortal local transaction build failed.");
@@ -2998,7 +3018,7 @@ export async function getPublicMetrics() {
       FROM token_events
     `),
     getEmberHolderCount(),
-    emberMint ? fetchMarketCapUsd(emberMint).catch(() => 0) : Promise.resolve(0),
+    Promise.resolve(emberMint ? readCachedMarketCapUsd(emberMint) : 0),
     pool.query(`
       SELECT
         total_bot_transactions,
@@ -3699,7 +3719,9 @@ export async function attachToken(userId, payload) {
 }
 
 export async function updateToken(userId, tokenId, payload) {
-  return withTx(async (client) => {
+  let postCommitVolumeReconcile = null;
+
+  const token = await withTx(async (client) => {
     const currentRes = await client.query("SELECT * FROM tokens WHERE user_id = $1 AND id = $2 LIMIT 1", [
       userId,
       tokenId,
@@ -3820,7 +3842,6 @@ export async function updateToken(userId, tokenId, payload) {
     );
     let moduleId = "";
     let effectiveModuleConfig = { ...baseConfig, ...nextConfig };
-    let volumeWalletReconcile = null;
     if (!existingModuleRes.rowCount) {
       moduleId = makeId("mod");
       await client.query(
@@ -3859,35 +3880,11 @@ export async function updateToken(userId, tokenId, payload) {
       );
     }
 
-    if (moduleType === MODULE_TYPES.volume && moduleId) {
-      const updatedToken = updatedRes.rows[0] || current;
-      volumeWalletReconcile = await reconcileVolumeTradeWalletCount(
-        client,
-        {
-          module_id: moduleId,
-          user_id: userId,
-          token_id: tokenId,
-          symbol: String(updatedToken.symbol || current.symbol || ""),
-          mint: String(updatedToken.mint || current.mint || ""),
-        },
-        effectiveModuleConfig,
-        Boolean(active)
-      );
-      const walletTxCreated = Math.max(0, Number(volumeWalletReconcile?.txCreated || 0));
-      if (walletTxCreated > 0) {
-        await client.query(
-          `
-            UPDATE tokens
-            SET tx_count = tx_count + $1
-            WHERE id = $2
-          `,
-          [walletTxCreated, tokenId]
-        );
-        if (updatedRes.rows[0]) {
-          updatedRes.rows[0].tx_count =
-            Number(updatedRes.rows[0].tx_count || 0) + walletTxCreated;
-        }
-      }
+    if (moduleType === MODULE_TYPES.volume && moduleId && payload.tradeWalletCount !== undefined) {
+      postCommitVolumeReconcile = {
+        userId,
+        tokenId,
+      };
     }
 
     await client.query(
@@ -3936,26 +3933,6 @@ export async function updateToken(userId, tokenId, payload) {
       );
     }
 
-    if (moduleType === MODULE_TYPES.volume && volumeWalletReconcile) {
-      const added = Math.max(0, Number(volumeWalletReconcile.added || 0));
-      const removed = Math.max(0, Number(volumeWalletReconcile.removed || 0));
-      if (added > 0 || removed > 0) {
-        const parts = [];
-        if (added > 0) parts.push(`+${added}`);
-        if (removed > 0) parts.push(`-${removed}`);
-        await insertEvent(
-          client,
-          userId,
-          tokenId,
-          String(current.symbol || ""),
-          "status",
-          `Volume trade wallets updated (${parts.join(" / ")}).`,
-          null,
-          { moduleType, idempotencyKey: `status:wallets:${tokenId}:${Date.now()}` }
-        );
-      }
-    }
-
     if (previousActive !== Boolean(active)) {
       await insertEvent(
         client,
@@ -3973,6 +3950,77 @@ export async function updateToken(userId, tokenId, payload) {
 
     return toToken(updatedRes.rows[0]);
   });
+
+  if (postCommitVolumeReconcile) {
+    void (async () => {
+      try {
+        await withTx(async (client) => {
+          const moduleRes = await client.query(
+            `
+              SELECT m.id AS module_id, m.module_type, m.config_json, t.user_id, t.id AS token_id, t.symbol, t.mint, t.active
+              FROM bot_modules m
+              JOIN tokens t ON t.id = m.token_id
+              WHERE t.user_id = $1 AND t.id = $2 AND m.module_type = $3
+              LIMIT 1
+            `,
+            [postCommitVolumeReconcile.userId, postCommitVolumeReconcile.tokenId, MODULE_TYPES.volume]
+          );
+          if (!moduleRes.rowCount) return;
+          const row = moduleRes.rows[0];
+          const configJson = mergeModuleConfig(MODULE_TYPES.volume, row.config_json, {});
+          const reconciled = await reconcileVolumeTradeWalletCount(
+            client,
+            {
+              module_id: row.module_id,
+              user_id: row.user_id,
+              token_id: row.token_id,
+              symbol: row.symbol,
+              mint: row.mint,
+            },
+            configJson,
+            Boolean(row.active)
+          );
+
+          const walletTxCreated = Math.max(0, Number(reconciled?.txCreated || 0));
+          if (walletTxCreated > 0) {
+            await client.query(
+              `
+                UPDATE tokens
+                SET tx_count = tx_count + $1
+                WHERE id = $2
+              `,
+              [walletTxCreated, row.token_id]
+            );
+          }
+
+          const added = Math.max(0, Number(reconciled?.added || 0));
+          const removed = Math.max(0, Number(reconciled?.removed || 0));
+          if (added > 0 || removed > 0) {
+            const parts = [];
+            if (added > 0) parts.push(`+${added}`);
+            if (removed > 0) parts.push(`-${removed}`);
+            await insertEvent(
+              client,
+              row.user_id,
+              row.token_id,
+              String(row.symbol || ""),
+              "status",
+              `Volume trade wallets updated (${parts.join(" / ")}).`,
+              null,
+              {
+                moduleType: MODULE_TYPES.volume,
+                idempotencyKey: `status:wallets:${row.token_id}:${Date.now()}`,
+              }
+            );
+          }
+        });
+      } catch (error) {
+        console.warn(`[volume-wallets] reconcile failed for ${postCommitVolumeReconcile.tokenId}: ${error?.message || error}`);
+      }
+    })();
+  }
+
+  return token;
 }
 
 export async function withdrawBurnFunds(userId, tokenId, payload = {}) {
@@ -4592,7 +4640,11 @@ async function reconcileVolumeTradeWalletCount(client, moduleRow, configJson, to
   const existing = existingRes.rows || [];
 
   if (existing.length < desired) {
-    const wallets = await ensureVolumeTradeWallets(client, moduleRow, desired);
+    const wallets = await ensureVolumeTradeWallets(
+      client,
+      moduleRow,
+      Number(configJson?.tradeWalletCount || 1)
+    );
     return {
       wallets,
       added: Math.max(0, wallets.length - existing.length),
