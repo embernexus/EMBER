@@ -556,8 +556,16 @@ app.use((error, _req, res, _next) => {
 
 let dbReady = false;
 
+function isDbInitTimeout(error) {
+  const code = String(error?.code || "").trim();
+  const msg = String(error?.message || "").toLowerCase();
+  return code === "57014" || msg.includes("statement timeout");
+}
+
 async function initDbWithRetry() {
   const retryMs = Math.max(3000, Number(process.env.DB_INIT_RETRY_MS || 5000));
+  const maxRetries = Math.max(1, Number(process.env.DB_INIT_MAX_RETRIES || 5));
+  let attempts = 0;
   while (!dbReady) {
     try {
       await initDb();
@@ -574,6 +582,14 @@ async function initDbWithRetry() {
       }, refillMs);
       return;
     } catch (error) {
+      attempts += 1;
+      if (isDbInitTimeout(error) || attempts >= maxRetries) {
+        dbReady = true;
+        console.warn(
+          `[api] database init skipped after ${attempts} attempt(s): ${error?.message || error}`
+        );
+        return;
+      }
       console.warn(`[api] database init failed, retrying in ${retryMs}ms:`, error?.message || error);
       await new Promise((resolve) => setTimeout(resolve, retryMs));
     }

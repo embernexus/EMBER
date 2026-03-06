@@ -749,48 +749,73 @@ async function sendSolTransfer(connection, signer, toAddress, lamports) {
 async function getOwnerTokenBalanceUi(connection, owner, mint) {
   const ownerPk = owner instanceof PublicKey ? owner : new PublicKey(owner);
   const mintPk = mint instanceof PublicKey ? mint : new PublicKey(mint);
-  const accounts = await getOwnerTokenAccountsForMint(connection, ownerPk, mintPk);
-  if (!accounts.length) return 0;
-  let total = 0;
-  for (const item of accounts) {
-    const ui = Number(item.account?.data?.parsed?.info?.tokenAmount?.uiAmount || 0);
-    if (Number.isFinite(ui)) total += ui;
-  }
-  return total;
+  const mintInfo = await connection.getAccountInfo(mintPk, "confirmed");
+  const tokenProgramId = mintInfo?.owner?.equals?.(TOKEN_2022_PROGRAM_ID)
+    ? TOKEN_2022_PROGRAM_ID
+    : TOKEN_PROGRAM_ID;
+  const balances = await getOwnerTokenAccountBalancesForMint(connection, ownerPk, mintPk, tokenProgramId);
+  return balances.reduce((sum, item) => sum + item.uiAmount, 0);
 }
 
-async function getOwnerTokenAccountsForMint(connection, owner, mint) {
+function getTokenAccountMintAddress(rawData) {
+  if (!rawData) return "";
+  let buf = null;
+  if (Buffer.isBuffer(rawData)) {
+    buf = rawData;
+  } else if (rawData instanceof Uint8Array) {
+    buf = Buffer.from(rawData);
+  } else if (Array.isArray(rawData) && typeof rawData[0] === "string") {
+    try {
+      buf = Buffer.from(rawData[0], "base64");
+    } catch {
+      buf = null;
+    }
+  }
+  if (!buf || buf.length < 32) return "";
+  try {
+    return new PublicKey(buf.subarray(0, 32)).toBase58();
+  } catch {
+    return "";
+  }
+}
+
+async function getOwnerTokenAccountBalancesForMint(connection, owner, mint, tokenProgramId) {
   const ownerPk = owner instanceof PublicKey ? owner : new PublicKey(owner);
   const mintPk = mint instanceof PublicKey ? mint : new PublicKey(mint);
   const mintText = mintPk.toBase58();
+  const balances = [];
 
+  let accounts = [];
   try {
-    const byMint = await connection.getParsedTokenAccountsByOwner(ownerPk, { mint: mintPk }, "confirmed");
-    if (Array.isArray(byMint?.value) && byMint.value.length) {
-      return byMint.value;
-    }
+    const res = await connection.getTokenAccountsByOwner(ownerPk, { programId: tokenProgramId }, "confirmed");
+    accounts = Array.isArray(res?.value) ? res.value : [];
   } catch {
-    // fall through to explicit per-program scan
+    accounts = [];
   }
 
-  const out = [];
-  const seen = new Set();
-  for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+  for (const item of accounts) {
+    const tokenMint = getTokenAccountMintAddress(item?.account?.data);
+    if (tokenMint !== mintText) continue;
+    const pubkey = item?.pubkey;
+    if (!pubkey) continue;
     try {
-      const res = await connection.getParsedTokenAccountsByOwner(ownerPk, { programId }, "confirmed");
-      for (const item of res?.value || []) {
-        const tokenMint = String(item?.account?.data?.parsed?.info?.mint || "");
-        if (tokenMint !== mintText) continue;
-        const key = item?.pubkey?.toBase58?.() || "";
-        if (!key || seen.has(key)) continue;
-        seen.add(key);
-        out.push(item);
-      }
+      const bal = await connection.getTokenAccountBalance(pubkey, "confirmed");
+      const amountRaw = BigInt(String(bal?.value?.amount || "0"));
+      const decimals = Number(bal?.value?.decimals || 0);
+      const uiAmount = Number(bal?.value?.uiAmountString || bal?.value?.uiAmount || 0);
+      if (amountRaw <= 0n) continue;
+      balances.push({
+        pubkey,
+        amountRaw,
+        decimals,
+        uiAmount: Number.isFinite(uiAmount) ? uiAmount : 0,
+      });
     } catch {
       // best effort
     }
   }
-  return out;
+
+  return balances;
 }
 
 function trimNumber(value, digits = 6) {
@@ -855,26 +880,13 @@ async function sendTokenToIncinerator(connection, signer, mintAddress, uiAmount)
   const isToken2022 = tokenProgramId.equals(TOKEN_2022_PROGRAM_ID);
   if (!isLegacy && !isToken2022) return null;
 
-  const sourceAccounts = {
-    value: await getOwnerTokenAccountsForMint(connection, owner, mint),
-  };
-  if (!Array.isArray(sourceAccounts?.value) || sourceAccounts.value.length === 0) return null;
+  const sources = await getOwnerTokenAccountBalancesForMint(connection, owner, mint, tokenProgramId);
+  if (!sources.length) return null;
+  const decimals = Number(sources[0]?.decimals || 0);
+  const totalRawBalance = sources.reduce((sum, item) => sum + item.amountRaw, 0n);
+  if (totalRawBalance <= 0n) return null;
 
-  let decimals = 0;
-  const parsedSources = [];
-  let totalRawBalance = 0n;
-  for (const item of sourceAccounts.value) {
-    const parsed = item?.account?.data?.parsed?.info?.tokenAmount || {};
-    const raw = BigInt(String(parsed?.amount || "0"));
-    const itemDecimals = Number(parsed?.decimals || 0);
-    if (!decimals) decimals = itemDecimals;
-    if (raw <= 0n) continue;
-    parsedSources.push({ pubkey: item.pubkey, raw });
-    totalRawBalance += raw;
-  }
-  if (!parsedSources.length || totalRawBalance <= 0n) return null;
-
-  const unit = 10 ** decimals;
+  const unit = 10 ** Math.max(0, decimals);
   const requestedRaw = BigInt(Math.floor(amountUi * unit));
   const rawAmount = requestedRaw > totalRawBalance ? totalRawBalance : requestedRaw;
   if (rawAmount <= 0n) return null;
@@ -896,10 +908,10 @@ async function sendTokenToIncinerator(connection, signer, mintAddress, uiAmount)
   }
 
   let remaining = rawAmount;
-  parsedSources.sort((a, b) => (a.raw > b.raw ? -1 : a.raw < b.raw ? 1 : 0));
-  for (const source of parsedSources) {
+  sources.sort((a, b) => (a.amountRaw > b.amountRaw ? -1 : a.amountRaw < b.amountRaw ? 1 : 0));
+  for (const source of sources) {
     if (remaining <= 0n) break;
-    const take = source.raw > remaining ? remaining : source.raw;
+    const take = source.amountRaw > remaining ? remaining : source.amountRaw;
     if (take <= 0n) continue;
     instructions.push(
       createTransferInstruction(
