@@ -1,18 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="EMBER.nexus">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="EMBER.nexus - Solana execution layer for token teams">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#09020a" />
-      <stop offset="55%" stop-color="#13050d" />
-      <stop offset="100%" stop-color="#1b0608" />
+      <stop offset="0%" stop-color="#07030a" />
+      <stop offset="52%" stop-color="#12050d" />
+      <stop offset="100%" stop-color="#1d0708" />
     </linearGradient>
     <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#ff6a00" />
+      <stop offset="0%" stop-color="#ff6400" />
       <stop offset="100%" stop-color="#ff2d55" />
     </linearGradient>
-    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
-      <feGaussianBlur stdDeviation="10" result="blur" />
+    <radialGradient id="orb" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ff7f1f66" />
+      <stop offset="100%" stop-color="#ff7f1f00" />
+    </radialGradient>
+    <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="b" />
       <feMerge>
-        <feMergeNode in="blur" />
+        <feMergeNode in="b" />
         <feMergeNode in="SourceGraphic" />
       </feMerge>
     </filter>
@@ -22,36 +26,56 @@
   <rect x="0" y="0" width="1200" height="3" fill="url(#accent)" />
   <rect x="0" y="627" width="1200" height="3" fill="url(#accent)" />
 
-  <circle cx="930" cy="180" r="160" fill="#ff4d0022" />
-  <circle cx="1020" cy="420" r="210" fill="#ff6a0018" />
-  <circle cx="230" cy="500" r="170" fill="#ff2d5518" />
+  <circle cx="985" cy="170" r="190" fill="url(#orb)" />
+  <circle cx="1115" cy="430" r="245" fill="#ff640015" />
+  <circle cx="240" cy="540" r="170" fill="#ff2d5518" />
 
-  <g transform="translate(90 90)">
-    <rect x="0" y="0" width="66" height="66" rx="16" fill="#1c0c10" stroke="#ff6a0059" />
-    <path d="M33 13c6 10 12 16 12 25 0 8-5 14-12 14s-12-6-12-14c0-9 6-15 12-25z" fill="#ff7a1a" filter="url(#glow)" />
+  <g opacity="0.13" stroke="#ff8a4a" stroke-width="1">
+    <path d="M720 0V630" />
+    <path d="M760 0V630" />
+    <path d="M800 0V630" />
+    <path d="M840 0V630" />
+    <path d="M880 0V630" />
+    <path d="M920 0V630" />
+    <path d="M960 0V630" />
+    <path d="M1000 0V630" />
+    <path d="M1040 0V630" />
+    <path d="M1080 0V630" />
+    <path d="M1120 0V630" />
+    <path d="M1160 0V630" />
   </g>
 
-  <text x="180" y="170" fill="#ffffff" font-size="68" font-weight="800" font-family="Segoe UI, Arial, sans-serif">
-    EMBER.nexus
-  </text>
-  <text x="180" y="240" fill="#ffb380" font-size="30" font-weight="700" font-family="Segoe UI, Arial, sans-serif">
-    ADVANCED SOLANA EXECUTION BOTS
-  </text>
-  <text x="180" y="305" fill="#f4d9c6" font-size="28" font-family="Segoe UI, Arial, sans-serif">
-    Continuous, high-impact on-chain automation.
-  </text>
-  <text x="180" y="355" fill="#d8b9a6" font-size="24" font-family="Segoe UI, Arial, sans-serif">
-    Branded EMBR/EMBER wallet attribution. Transparent execution.
-  </text>
+  <g transform="translate(72 70)">
+    <rect x="0" y="0" width="74" height="74" rx="18" fill="#1b0a10" stroke="#ff6a0070" />
+    <path d="M37 16c7 11 14 17 14 27 0 9-6 16-14 16s-14-7-14-16c0-10 7-16 14-27z" fill="#ff7f1f" filter="url(#softGlow)" />
+  </g>
 
-  <g transform="translate(180 420)">
-    <rect x="0" y="0" width="340" height="58" rx="14" fill="#17080d" stroke="#ff6a0060" />
-    <text x="20" y="38" fill="#ffd9bf" font-size="24" font-family="Consolas, Menlo, monospace">
-      EMBR...
-    </text>
-    <rect x="370" y="0" width="340" height="58" rx="14" fill="#17080d" stroke="#ff6a0060" />
-    <text x="390" y="38" fill="#ffd9bf" font-size="24" font-family="Consolas, Menlo, monospace">
-      EMBER...
-    </text>
+  <text x="170" y="140" fill="#ffffff" font-size="66" font-weight="800" font-family="Segoe UI, Arial, sans-serif">EMBER.nexus</text>
+  <text x="170" y="190" fill="#ffba88" font-size="28" font-weight="700" font-family="Segoe UI, Arial, sans-serif">SOLANA EXECUTION LAYER FOR TOKEN TEAMS</text>
+
+  <text x="170" y="255" fill="#f4dcca" font-size="32" font-weight="700" font-family="Segoe UI, Arial, sans-serif">Attach token. Automate execution. Verify on-chain.</text>
+  <text x="170" y="308" fill="#dec2b0" font-size="24" font-family="Segoe UI, Arial, sans-serif">Burn bots, volume bots, and strategy modules with live dashboard telemetry.</text>
+  <text x="170" y="346" fill="#dec2b0" font-size="24" font-family="Segoe UI, Arial, sans-serif">Creator rewards plus deposit routing with EMBR/EMBER wallet attribution.</text>
+
+  <g transform="translate(170 400)">
+    <rect x="0" y="0" width="192" height="52" rx="13" fill="#16080d" stroke="#ff6a0075" />
+    <text x="26" y="33" fill="#ffd8bf" font-size="22" font-weight="700" font-family="Segoe UI, Arial, sans-serif">BURN BOT</text>
+
+    <rect x="214" y="0" width="216" height="52" rx="13" fill="#16080d" stroke="#ff6a0075" />
+    <text x="240" y="33" fill="#ffd8bf" font-size="22" font-weight="700" font-family="Segoe UI, Arial, sans-serif">VOLUME BOT</text>
+
+    <rect x="452" y="0" width="270" height="52" rx="13" fill="#16080d" stroke="#ff6a0075" />
+    <text x="478" y="33" fill="#ffd8bf" font-size="22" font-weight="700" font-family="Segoe UI, Arial, sans-serif">MARKET MAKER</text>
+  </g>
+
+  <g transform="translate(170 480)">
+    <rect x="0" y="0" width="250" height="62" rx="14" fill="#1a0a10" stroke="#ff5f007f" />
+    <text x="22" y="40" fill="#fff1e4" font-size="25" font-family="Consolas, Menlo, monospace">EMBR...</text>
+
+    <rect x="276" y="0" width="250" height="62" rx="14" fill="#1a0a10" stroke="#ff5f007f" />
+    <text x="298" y="40" fill="#fff1e4" font-size="25" font-family="Consolas, Menlo, monospace">EMBER...</text>
+
+    <rect x="552" y="0" width="285" height="62" rx="14" fill="#1a0a10" stroke="#ff5f007f" />
+    <text x="574" y="40" fill="#fff1e4" font-size="25" font-family="Consolas, Menlo, monospace">LIVE LOGS</text>
   </g>
 </svg>
