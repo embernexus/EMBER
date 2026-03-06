@@ -117,10 +117,6 @@ export default function HomePage({ heroWord, publicMetrics, onShowLogin }) {
           ))}
         </div>
 
-        <div style={{ maxWidth: 720, marginBottom: 38, fontSize: 12, color: "rgba(255,255,255,.42)", lineHeight: 1.7 }}>
-          Market Maker now runs attached-token two-sided execution with inventory targeting. DCA and Rekindle add recurring accumulation and pullback-triggered buys, and primary accounts can create one manager login for shared operations without granting withdraw, sweep, or delete permissions.
-        </div>
-
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", justifyContent: "center" }}>
           <button className="btn-fire" onClick={onShowLogin} style={{ padding: "15px 38px", fontSize: 15 }}>
             {t("home.getStarted")}

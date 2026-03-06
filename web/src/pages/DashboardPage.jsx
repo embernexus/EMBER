@@ -5,6 +5,45 @@ import TokenCard from "../components/dashboard/TokenCard";
 import { useI18n } from "../i18n/I18nProvider";
 import { fmt, fmtFull } from "../lib/format";
 
+function ActionModal({ title, onClose, children }) {
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 1400,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+      onClick={onClose}
+    >
+      <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.74)", backdropFilter: "blur(8px)" }} />
+      <div
+        className="glass"
+        style={{
+          position: "relative",
+          zIndex: 1,
+          width: "min(620px,92vw)",
+          maxHeight: "86vh",
+          overflowY: "auto",
+          padding: "22px 24px",
+          border: "1px solid rgba(255,106,0,.24)",
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 16 }}>
+          <div style={{ fontSize: 18, fontWeight: 800, color: "#fff" }}>{title}</div>
+          <button className="btn-ghost" onClick={onClose} style={{ padding: "7px 12px", fontSize: 12 }}>
+            Close
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardPage({
   user,
   tokens,
@@ -81,6 +120,8 @@ export default function DashboardPage({
   const [telegramLoading, setTelegramLoading] = useState(false);
   const [telegramError, setTelegramError] = useState("");
   const [telegramMessage, setTelegramMessage] = useState("");
+  const [showManagerModal, setShowManagerModal] = useState(false);
+  const [showTelegramModal, setShowTelegramModal] = useState(false);
 
   useEffect(() => {
     if (!canManageAccess || typeof onLoadManagerAccess !== "function") return;
@@ -283,14 +324,22 @@ export default function DashboardPage({
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 350px", gap: 20, alignItems: "start" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
             <div>
               <div style={{ fontSize: 17, fontWeight: 800, color: "#fff" }}>{t("dashboard.yourTokens")}</div>
               <div style={{ fontSize: 12, color: "rgba(255,255,255,.28)" }}>{t("dashboard.tokensHint")}</div>
             </div>
-            <button className="btn-fire" onClick={onShowAttach} style={{ padding: "9px 18px", fontSize: 13 }}>
-              + {t("dashboard.attachToken")}
-            </button>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <button className="btn-ghost" onClick={() => setShowTelegramModal(true)} style={{ padding: "9px 14px", fontSize: 12 }}>
+                Telegram Alerts
+              </button>
+              <button className="btn-ghost" onClick={() => setShowManagerModal(true)} style={{ padding: "9px 14px", fontSize: 12 }}>
+                {canManageAccess ? "Manager Access" : "Access Level"}
+              </button>
+              <button className="btn-fire" onClick={onShowAttach} style={{ padding: "9px 18px", fontSize: 13 }}>
+                + {t("dashboard.attachToken")}
+              </button>
+            </div>
           </div>
 
           {visibleTokens.map((t) => (
@@ -451,178 +500,176 @@ export default function DashboardPage({
               </div>
             ))}
           </div>
-
-          <div className="glass" style={{ padding: "20px 22px" }}>
-            <div style={{ fontSize: 14, fontWeight: 800, color: "#fff", marginBottom: 10 }}>
-              {canManageAccess ? "Manager Access" : "Access Level"}
-            </div>
-            {canManageAccess ? (
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                <div style={{ fontSize: 12, color: "rgba(255,255,255,.45)" }}>
-                  Secondary manager login can run bots and edit configs, but cannot withdraw, sweep, or delete.
-                </div>
-                <div>
-                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 6, fontWeight: 700 }}>MANAGER USERNAME</label>
-                  <input className="input-f" value={managerForm.username} onChange={(e) => setManagerForm((prev) => ({ ...prev, username: e.target.value }))} />
-                </div>
-                <div>
-                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 6, fontWeight: 700 }}>MANAGER PASSWORD</label>
-                  <input className="input-f" type="password" value={managerForm.password} onChange={(e) => setManagerForm((prev) => ({ ...prev, password: e.target.value }))} placeholder={managerAccess.enabled ? "Set a new password" : "Create a password"} />
-                </div>
-                {managerAccess.enabled && (
-                  <div style={{ fontSize: 11, color: "rgba(255,255,255,.42)" }}>
-                    Active manager: <span style={{ color: "#fff", fontWeight: 700 }}>{managerAccess.username}</span>
-                  </div>
-                )}
-                {managerError && <div style={{ fontSize: 12, color: "#ff8f8f" }}>{managerError}</div>}
-                {managerMessage && <div style={{ fontSize: 12, color: "#7ae7ab" }}>{managerMessage}</div>}
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button className="btn-fire" onClick={saveManager} disabled={managerLoading} style={{ padding: "9px 16px", fontSize: 12 }}>
-                    {managerLoading ? "Saving..." : managerAccess.enabled ? "Update Manager" : "Create Manager"}
-                  </button>
-                  {managerAccess.enabled && (
-                    <button className="btn-ghost" onClick={removeManager} disabled={managerLoading} style={{ padding: "9px 16px", fontSize: 12 }}>
-                      Remove Manager
-                    </button>
-                  )}
-                </div>
-              </div>
-            ) : (
-              <div style={{ fontSize: 12, color: "rgba(255,178,107,.86)", lineHeight: 1.6 }}>
-                Signed in as manager. Withdraw, sweep, delete, and access management are disabled on this login.
-              </div>
-            )}
-          </div>
-
-          <div className="glass" style={{ padding: "20px 22px" }}>
-            <div style={{ fontSize: 14, fontWeight: 800, color: "#fff", marginBottom: 10 }}>
-              Telegram Alerts
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <div style={{ fontSize: 12, color: "rgba(255,255,255,.45)", lineHeight: 1.55 }}>
-                Connect the existing EMBER Telegram bot to receive direct alerts without channel spam. Errors can stay instant while routine trade activity can roll into digests.
-              </div>
-              <div style={{ fontSize: 11, color: telegramState.connected ? "#7ae7ab" : "rgba(255,178,107,.86)" }}>
-                {telegramState.connected
-                  ? `Connected${telegramState.telegramUsername ? ` as @${telegramState.telegramUsername}` : ""}${telegramState.chatIdMasked ? ` (${telegramState.chatIdMasked})` : ""}`
-                  : "Not connected yet. Open the bot link below, press Start, then refresh this card."}
-              </div>
-              {telegramState.connectUrl && (
-                <a
-                  href={telegramState.connectUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="btn-ghost"
-                  style={{ padding: "9px 16px", fontSize: 12, textAlign: "center", textDecoration: "none" }}
-                >
-                  Open Telegram Bot
-                </a>
-              )}
-
-              <label style={{ display: "inline-flex", alignItems: "center", gap: 10, fontSize: 12, color: "rgba(255,255,255,.72)" }}>
-                <span className="ember-toggle">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(telegramState.prefs.enabled)}
-                    onChange={(e) =>
-                      setTelegramState((prev) => ({
-                        ...prev,
-                        prefs: { ...prev.prefs, enabled: e.target.checked },
-                      }))
-                    }
-                  />
-                  <span className="ember-toggle-track" />
-                </span>
-                Enable Telegram alerts
-              </label>
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                <div>
-                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 6, fontWeight: 700 }}>DELIVERY MODE</label>
-                  <select
-                    className="input-f"
-                    value={telegramState.prefs.deliveryMode}
-                    onChange={(e) =>
-                      setTelegramState((prev) => ({
-                        ...prev,
-                        prefs: { ...prev.prefs, deliveryMode: e.target.value },
-                      }))
-                    }
-                  >
-                    <option value="smart">Smart</option>
-                    <option value="instant">Instant</option>
-                    <option value="digest">Digest</option>
-                  </select>
-                </div>
-                <div>
-                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 6, fontWeight: 700 }}>DIGEST MINUTES</label>
-                  <input
-                    type="number"
-                    min={5}
-                    max={120}
-                    className="input-f"
-                    value={telegramState.prefs.digestIntervalMin}
-                    onChange={(e) =>
-                      setTelegramState((prev) => ({
-                        ...prev,
-                        prefs: {
-                          ...prev.prefs,
-                          digestIntervalMin: Math.max(5, Math.min(120, Math.floor(Number(e.target.value) || 15))),
-                        },
-                      }))
-                    }
-                  />
-                </div>
-              </div>
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                {[
-                  ["alertDeposit", "Deposits"],
-                  ["alertClaim", "Claims"],
-                  ["alertBurn", "Burns"],
-                  ["alertTrade", "Trades"],
-                  ["alertError", "Errors"],
-                  ["alertStatus", "Status"],
-                ].map(([key, label]) => (
-                  <label key={key} style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, color: "rgba(255,255,255,.72)" }}>
-                    <input
-                      type="checkbox"
-                      checked={Boolean(telegramState.prefs[key])}
-                      onChange={(e) =>
-                        setTelegramState((prev) => ({
-                          ...prev,
-                          prefs: { ...prev.prefs, [key]: e.target.checked },
-                        }))
-                      }
-                    />
-                    {label}
-                  </label>
-                ))}
-              </div>
-
-              {telegramError && <div style={{ fontSize: 12, color: "#ff8f8f" }}>{telegramError}</div>}
-              {telegramMessage && <div style={{ fontSize: 12, color: "#7ae7ab" }}>{telegramMessage}</div>}
-
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button className="btn-fire" onClick={saveTelegram} disabled={telegramLoading} style={{ padding: "9px 16px", fontSize: 12 }}>
-                  {telegramLoading ? "Saving..." : "Save Alerts"}
-                </button>
-                <button className="btn-ghost" onClick={refreshTelegram} disabled={telegramLoading} style={{ padding: "9px 16px", fontSize: 12 }}>
-                  Refresh
-                </button>
-                <button className="btn-ghost" onClick={sendTelegramTest} disabled={telegramLoading || !telegramState.connected} style={{ padding: "9px 16px", fontSize: 12 }}>
-                  Send Test
-                </button>
-                {telegramState.connected && (
-                  <button className="btn-ghost" onClick={disconnectTelegram} disabled={telegramLoading} style={{ padding: "9px 16px", fontSize: 12 }}>
-                    Disconnect
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
         </div>
       </div>
+
+      {showManagerModal && (
+        <ActionModal title={canManageAccess ? "Manager Access" : "Access Level"} onClose={() => setShowManagerModal(false)}>
+          {canManageAccess ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ fontSize: 12, color: "rgba(255,255,255,.45)", lineHeight: 1.6 }}>
+                Secondary manager login can run bots and edit configs, but cannot withdraw, sweep, restore wallet keys, or delete.
+              </div>
+              <div>
+                <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 6, fontWeight: 700 }}>MANAGER USERNAME</label>
+                <input className="input-f" value={managerForm.username} onChange={(e) => setManagerForm((prev) => ({ ...prev, username: e.target.value }))} />
+              </div>
+              <div>
+                <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 6, fontWeight: 700 }}>MANAGER PASSWORD</label>
+                <input className="input-f" type="password" value={managerForm.password} onChange={(e) => setManagerForm((prev) => ({ ...prev, password: e.target.value }))} placeholder={managerAccess.enabled ? "Set a new password" : "Create a password"} />
+              </div>
+              {managerAccess.enabled && (
+                <div style={{ fontSize: 11, color: "rgba(255,255,255,.42)" }}>
+                  Active manager: <span style={{ color: "#fff", fontWeight: 700 }}>{managerAccess.username}</span>
+                </div>
+              )}
+              {managerError && <div style={{ fontSize: 12, color: "#ff8f8f" }}>{managerError}</div>}
+              {managerMessage && <div style={{ fontSize: 12, color: "#7ae7ab" }}>{managerMessage}</div>}
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button className="btn-fire" onClick={saveManager} disabled={managerLoading} style={{ padding: "9px 16px", fontSize: 12 }}>
+                  {managerLoading ? "Saving..." : managerAccess.enabled ? "Update Manager" : "Create Manager"}
+                </button>
+                {managerAccess.enabled && (
+                  <button className="btn-ghost" onClick={removeManager} disabled={managerLoading} style={{ padding: "9px 16px", fontSize: 12 }}>
+                    Remove Manager
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: "rgba(255,178,107,.86)", lineHeight: 1.6 }}>
+              Signed in as manager. Withdraw, sweep, delete, restore, and access management are disabled on this login.
+            </div>
+          )}
+        </ActionModal>
+      )}
+
+      {showTelegramModal && (
+        <ActionModal title="Telegram Alerts" onClose={() => setShowTelegramModal(false)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ fontSize: 12, color: "rgba(255,255,255,.45)", lineHeight: 1.55 }}>
+              Connect the existing EMBER Telegram bot to receive direct alerts without channel spam. Errors can stay instant while routine trade activity can roll into digests.
+            </div>
+            <div style={{ fontSize: 11, color: telegramState.connected ? "#7ae7ab" : "rgba(255,178,107,.86)" }}>
+              {telegramState.connected
+                ? `Connected${telegramState.telegramUsername ? ` as @${telegramState.telegramUsername}` : ""}${telegramState.chatIdMasked ? ` (${telegramState.chatIdMasked})` : ""}`
+                : "Not connected yet. Open the bot link below, press Start, then refresh this panel."}
+            </div>
+            {telegramState.connectUrl && (
+              <a
+                href={telegramState.connectUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn-ghost"
+                style={{ padding: "9px 16px", fontSize: 12, textAlign: "center", textDecoration: "none" }}
+              >
+                Open Telegram Bot
+              </a>
+            )}
+
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 10, fontSize: 12, color: "rgba(255,255,255,.72)" }}>
+              <span className="ember-toggle">
+                <input
+                  type="checkbox"
+                  checked={Boolean(telegramState.prefs.enabled)}
+                  onChange={(e) =>
+                    setTelegramState((prev) => ({
+                      ...prev,
+                      prefs: { ...prev.prefs, enabled: e.target.checked },
+                    }))
+                  }
+                />
+                <span className="ember-toggle-track" />
+              </span>
+              Enable Telegram alerts
+            </label>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <div>
+                <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 6, fontWeight: 700 }}>DELIVERY MODE</label>
+                <select
+                  className="input-f"
+                  value={telegramState.prefs.deliveryMode}
+                  onChange={(e) =>
+                    setTelegramState((prev) => ({
+                      ...prev,
+                      prefs: { ...prev.prefs, deliveryMode: e.target.value },
+                    }))
+                  }
+                >
+                  <option value="smart">Smart</option>
+                  <option value="instant">Instant</option>
+                  <option value="digest">Digest</option>
+                </select>
+              </div>
+              <div>
+                <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 6, fontWeight: 700 }}>DIGEST MINUTES</label>
+                <input
+                  type="number"
+                  min={5}
+                  max={120}
+                  className="input-f"
+                  value={telegramState.prefs.digestIntervalMin}
+                  onChange={(e) =>
+                    setTelegramState((prev) => ({
+                      ...prev,
+                      prefs: {
+                        ...prev.prefs,
+                        digestIntervalMin: Math.max(5, Math.min(120, Math.floor(Number(e.target.value) || 15))),
+                      },
+                    }))
+                  }
+                />
+              </div>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              {[
+                ["alertDeposit", "Deposits"],
+                ["alertClaim", "Claims"],
+                ["alertBurn", "Burns"],
+                ["alertTrade", "Trades"],
+                ["alertError", "Errors"],
+                ["alertStatus", "Status"],
+              ].map(([key, label]) => (
+                <label key={key} style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, color: "rgba(255,255,255,.72)" }}>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(telegramState.prefs[key])}
+                    onChange={(e) =>
+                      setTelegramState((prev) => ({
+                        ...prev,
+                        prefs: { ...prev.prefs, [key]: e.target.checked },
+                      }))
+                    }
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+
+            {telegramError && <div style={{ fontSize: 12, color: "#ff8f8f" }}>{telegramError}</div>}
+            {telegramMessage && <div style={{ fontSize: 12, color: "#7ae7ab" }}>{telegramMessage}</div>}
+
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button className="btn-fire" onClick={saveTelegram} disabled={telegramLoading} style={{ padding: "9px 16px", fontSize: 12 }}>
+                {telegramLoading ? "Saving..." : "Save Alerts"}
+              </button>
+              <button className="btn-ghost" onClick={refreshTelegram} disabled={telegramLoading} style={{ padding: "9px 16px", fontSize: 12 }}>
+                Refresh
+              </button>
+              <button className="btn-ghost" onClick={sendTelegramTest} disabled={telegramLoading || !telegramState.connected} style={{ padding: "9px 16px", fontSize: 12 }}>
+                Send Test
+              </button>
+              {telegramState.connected && (
+                <button className="btn-ghost" onClick={disconnectTelegram} disabled={telegramLoading} style={{ padding: "9px 16px", fontSize: 12 }}>
+                  Disconnect
+                </button>
+              )}
+            </div>
+          </div>
+        </ActionModal>
+      )}
     </div>
   );
 }
