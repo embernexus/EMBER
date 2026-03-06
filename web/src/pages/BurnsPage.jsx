@@ -18,6 +18,10 @@ function isBurnActionRow(row) {
   );
 }
 
+function cleanBurnMessage(text) {
+  return String(text || "").replace(/\s*\(backfilled\)\s*/gi, " ").replace(/\s{2,}/g, " ").trim();
+}
+
 function formatMetricCardValue(rawValue) {
   const n = Number(rawValue);
   if (!Number.isFinite(n)) return fmtFull(rawValue);
@@ -288,7 +292,7 @@ export default function BurnsPage({ tokens, allLogs, publicMetrics, chartData, b
                       </span>
                     </td>
                     <td style={{ padding: "11px 8px", borderBottom: "1px solid rgba(255,255,255,.05)", fontSize: 13, color: "rgba(255,255,255,.72)" }}>
-                      {row.msg}
+                      {cleanBurnMessage(row.msg)}
                     </td>
                     <td style={{ padding: "11px 8px", borderBottom: "1px solid rgba(255,255,255,.05)", fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>
                       {row.tx ? (

@@ -120,7 +120,7 @@ async function backfill() {
         "personal_burn",
         "burn",
         burned,
-        `Protocol incinerated ${fmtAmount(burned)} EMBER (backfilled)`,
+        `Protocol incinerated ${fmtAmount(burned)} EMBER`,
         signature,
         `backfill:personal:burn:${signature}`,
         JSON.stringify({
