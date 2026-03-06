@@ -108,10 +108,23 @@ export const config = {
   telegramTopicId: String(process.env.TELEGRAM_TOPIC_ID || "").trim(),
   solanaKeygenBin: process.env.SOLANA_KEYGEN_BIN || "solana-keygen",
   depositVanityPrefix: String(process.env.DEPOSIT_VANITY_PREFIX || "EMBR").trim().toUpperCase(),
+  depositVanityPrimaryPrefix: String(
+    process.env.DEPOSIT_VANITY_PRIMARY_PREFIX || process.env.DEPOSIT_VANITY_PREFIX || "EMBR"
+  )
+    .trim()
+    .toUpperCase(),
+  depositVanityFallbackPrefix: String(
+    process.env.DEPOSIT_VANITY_FALLBACK_PREFIX ||
+      (process.env.DEPOSIT_VANITY_PRIMARY_PREFIX ? process.env.DEPOSIT_VANITY_PREFIX || "EMBR" : "")
+  )
+    .trim()
+    .toUpperCase(),
   depositVanityThreads: Number(process.env.DEPOSIT_VANITY_THREADS || 4),
   depositVanityTimeoutMs: Number(process.env.DEPOSIT_VANITY_TIMEOUT_MS || 300000),
   depositVanityAllowJsFallback: String(process.env.DEPOSIT_VANITY_ALLOW_JS_FALLBACK || "true").toLowerCase() !== "false",
   depositPoolTarget: Number(process.env.DEPOSIT_POOL_TARGET || 20),
+  depositPoolTargetEmber: Number(process.env.DEPOSIT_POOL_TARGET_EMBER || 0),
+  depositPoolTargetEmbr: Number(process.env.DEPOSIT_POOL_TARGET_EMBR || process.env.DEPOSIT_POOL_TARGET || 20),
   depositPoolRefillIntervalMs: Number(process.env.DEPOSIT_POOL_REFILL_INTERVAL_MS || 15000),
   depositPoolEtaPerAddressSec: Number(process.env.DEPOSIT_POOL_ETA_PER_ADDRESS_SEC || 45),
   deployVanityBufferSol: Number(process.env.DEPLOY_VANITY_BUFFER_SOL || 0.03),

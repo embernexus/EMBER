@@ -306,6 +306,7 @@ export async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS token_deposit_pool (
       id BIGSERIAL PRIMARY KEY,
+      prefix TEXT,
       deposit_pubkey TEXT NOT NULL UNIQUE,
       secret_key_base58 TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'available',
@@ -317,11 +318,31 @@ export async function initDb() {
   `);
 
   await pool.query(`
+    ALTER TABLE token_deposit_pool
+    ADD COLUMN IF NOT EXISTS prefix TEXT;
+  `);
+
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_token_deposit_pool_status ON token_deposit_pool(status);
   `);
 
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_token_deposit_pool_reserved_user_id ON token_deposit_pool(reserved_user_id);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_token_deposit_pool_prefix_status
+    ON token_deposit_pool(prefix, status, created_at);
+  `);
+
+  await pool.query(`
+    UPDATE token_deposit_pool
+    SET prefix = CASE
+      WHEN deposit_pubkey LIKE 'EMBER%' THEN 'EMBER'
+      WHEN deposit_pubkey LIKE 'EMBR%' THEN 'EMBR'
+      ELSE COALESCE(NULLIF(TRIM(prefix), ''), 'EMBR')
+    END
+    WHERE prefix IS NULL OR TRIM(prefix) = '';
   `);
 
   await pool.query(`

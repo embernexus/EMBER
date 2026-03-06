@@ -2095,6 +2095,59 @@ function validateDepositVanityPrefix(input) {
   return prefix;
 }
 
+function getPreferredDepositVanityPrefixes() {
+  const raw = [
+    config.depositVanityPrimaryPrefix,
+    config.depositVanityFallbackPrefix,
+    config.depositVanityPrefix,
+    "EMBR",
+  ];
+  const out = [];
+  for (const item of raw) {
+    const prefix = String(item || "").trim().toUpperCase();
+    if (!prefix) continue;
+    try {
+      const valid = validateDepositVanityPrefix(prefix);
+      if (!out.includes(valid)) out.push(valid);
+    } catch {
+      // ignore invalid env values and continue with valid fallbacks
+    }
+  }
+  return out.length ? out : ["EMBR"];
+}
+
+function getDepositPoolTargets(targetInput = config.depositPoolTarget) {
+  const prefixes = getPreferredDepositVanityPrefixes();
+  const primary = prefixes[0] || "EMBER";
+  const fallback = prefixes[1] || "";
+  const legacyTarget = clampDepositPoolTarget(targetInput);
+  const primaryTarget = clampDepositPoolTarget(config.depositPoolTargetEmber || legacyTarget);
+  const fallbackTarget = fallback
+    ? clampDepositPoolTarget(
+        config.depositPoolTargetEmbr !== undefined && config.depositPoolTargetEmbr !== null
+          ? config.depositPoolTargetEmbr
+          : 0
+      )
+    : 0;
+  const entries = [{ prefix: primary, target: primaryTarget }];
+  if (fallback && fallback !== primary && fallbackTarget > 0) {
+    entries.push({ prefix: fallback, target: fallbackTarget });
+  }
+  return entries.filter((entry) => entry.target > 0);
+}
+
+function preferredPrefixSortCase(column = "prefix") {
+  const prefixes = getPreferredDepositVanityPrefixes();
+  const primary = prefixes[0] || "EMBER";
+  const fallback = prefixes[1] || "";
+  const clauses = [`CASE WHEN ${column} = '${primary}' THEN 0`];
+  if (fallback && fallback !== primary) {
+    clauses.push(`WHEN ${column} = '${fallback}' THEN 1`);
+  }
+  clauses.push("ELSE 99 END");
+  return clauses.join(" ");
+}
+
 let cachedDepositEncryptionKey = undefined;
 
 function getDepositEncryptionKey() {
@@ -2301,6 +2354,27 @@ async function generateVanityDeposit(prefix) {
   }
 }
 
+async function generatePreferredVanityDeposit() {
+  const prefixes = getPreferredDepositVanityPrefixes();
+  let lastError = null;
+  for (const prefix of prefixes) {
+    try {
+      const generated = await generateVanityDeposit(prefix);
+      if (String(generated?.pubkey || "").startsWith(prefix)) {
+        return { ...generated, prefix };
+      }
+      if (!lastError) {
+        lastError = new Error(`Generated keypair did not match requested ${prefix} prefix.`);
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastError) throw lastError;
+  const generated = generateNonVanityDeposit();
+  return { ...generated, prefix: "" };
+}
+
 function clampDepositPoolTarget(raw) {
   const n = Number(raw);
   if (!Number.isFinite(n)) return DEPOSIT_POOL_MAX;
@@ -2339,28 +2413,42 @@ async function withDepositPoolLock(fn) {
 }
 
 export async function ensureDepositPool(targetInput = config.depositPoolTarget) {
-  const target = clampDepositPoolTarget(targetInput);
-  if (target <= 0) return { target, created: 0, total: 0 };
-  if (depositPoolRefilling) return { target, created: 0, total: null, skipped: true };
+  const targets = getDepositPoolTargets(targetInput);
+  if (!targets.length) return { target: 0, created: 0, total: 0, byPrefix: [] };
+  const totalTarget = targets.reduce((sum, item) => sum + item.target, 0);
+  if (depositPoolRefilling) return { target: totalTarget, created: 0, total: null, skipped: true };
   depositPoolRefilling = true;
   try {
     const lockResult = await withDepositPoolLock(async (client) => {
       let created = 0;
       while (true) {
-        const countRes = await client.query("SELECT COUNT(*)::int AS c FROM token_deposit_pool");
-        const total = Number(countRes.rows[0]?.c || 0);
-        if (total >= target) {
-          return { target, created, total };
+        let missingEntry = null;
+        const byPrefix = [];
+        for (const entry of targets) {
+          const countRes = await client.query(
+            "SELECT COUNT(*)::int AS c FROM token_deposit_pool WHERE prefix = $1",
+            [entry.prefix]
+          );
+          const totalForPrefix = Number(countRes.rows[0]?.c || 0);
+          byPrefix.push({ prefix: entry.prefix, target: entry.target, total: totalForPrefix });
+          if (!missingEntry && totalForPrefix < entry.target) {
+            missingEntry = entry;
+          }
         }
-        const generated = await generateVanityDeposit(config.depositVanityPrefix || "EMBR");
+        if (!missingEntry) {
+          const total = byPrefix.reduce((sum, item) => sum + item.total, 0);
+          const target = byPrefix.reduce((sum, item) => sum + item.target, 0);
+          return { target, created, total, byPrefix };
+        }
+        const generated = await generateVanityDeposit(missingEntry.prefix);
         const storedSecret = encryptDepositSecret(generated.secretKeyBase58);
         try {
           await client.query(
             `
-              INSERT INTO token_deposit_pool (deposit_pubkey, secret_key_base58, status)
-              VALUES ($1, $2, 'available')
+              INSERT INTO token_deposit_pool (prefix, deposit_pubkey, secret_key_base58, status)
+              VALUES ($1, $2, $3, 'available')
             `,
-            [generated.pubkey, storedSecret]
+            [missingEntry.prefix, generated.pubkey, storedSecret]
           );
           created += 1;
         } catch {
@@ -2370,8 +2458,22 @@ export async function ensureDepositPool(targetInput = config.depositPoolTarget) 
     });
 
     if (!lockResult.locked) {
-      const countRes = await pool.query("SELECT COUNT(*)::int AS c FROM token_deposit_pool");
-      return { target, created: 0, total: Number(countRes.rows[0]?.c || 0), skipped: true };
+      const totalRes = await pool.query("SELECT COUNT(*)::int AS c FROM token_deposit_pool");
+      const byPrefix = [];
+      for (const entry of targets) {
+        const countRes = await pool.query(
+          "SELECT COUNT(*)::int AS c FROM token_deposit_pool WHERE prefix = $1",
+          [entry.prefix]
+        );
+        byPrefix.push({ prefix: entry.prefix, target: entry.target, total: Number(countRes.rows[0]?.c || 0) });
+      }
+      return {
+        target: totalTarget,
+        created: 0,
+        total: Number(totalRes.rows[0]?.c || 0),
+        byPrefix,
+        skipped: true,
+      };
     }
     return lockResult.result;
   } finally {
@@ -2381,13 +2483,14 @@ export async function ensureDepositPool(targetInput = config.depositPoolTarget) 
 
 export async function reserveDepositAddresses(userId, countInput = 1) {
   const count = Math.max(1, Math.min(DEPOSIT_POOL_MAX, Math.floor(Number(countInput) || 1)));
+  const prefixCase = preferredPrefixSortCase("prefix");
   const availableRowsRes = await withTx(async (client) => {
     const rowsRes = await client.query(
       `
         SELECT id, deposit_pubkey
         FROM token_deposit_pool
         WHERE status = 'available'
-        ORDER BY created_at ASC
+        ORDER BY ${prefixCase}, created_at ASC
         LIMIT $1
         FOR UPDATE SKIP LOCKED
       `,
@@ -2490,14 +2593,15 @@ export async function reserveVanityDeployWallet(userId, payload) {
 
   const requiredLamports = estimateDeployVanityRequiredLamports(initialBuySol);
   const expiresAt = deployVanityReservationExpiryDate();
+  const prefixCase = preferredPrefixSortCase("prefix");
 
   const reservedRes = await withTx(async (client) => {
     const poolRes = await client.query(
       `
-        SELECT id, deposit_pubkey, secret_key_base58
+        SELECT id, prefix, deposit_pubkey, secret_key_base58
         FROM token_deposit_pool
         WHERE status = 'available'
-        ORDER BY created_at ASC
+        ORDER BY ${prefixCase}, created_at ASC
         LIMIT 1
         FOR UPDATE SKIP LOCKED
       `
@@ -5176,7 +5280,7 @@ export async function attachToken(userId, payload) {
     } else {
       const generatedDeposit = pendingDepositId
         ? await consumeReservedDepositAddress(client, scope.ownerUserId, pendingDepositId)
-        : await generateVanityDeposit(config.depositVanityPrefix || "EMBR");
+        : await generatePreferredVanityDeposit();
       const deposit = String(generatedDeposit?.pubkey || "").trim();
       if (!deposit) {
         throw new Error("Failed to generate deposit address.");
@@ -6296,16 +6400,17 @@ async function ensureVolumeTradeWallets(client, moduleRow, count) {
 
   const need = desired - existing.length;
   const created = [];
+  const prefixCase = preferredPrefixSortCase("prefix");
   for (let i = 0; i < need; i += 1) {
     const id = makeId("vw");
     let walletPubkey = "";
     let storedSecret = "";
     const poolRes = await client.query(
       `
-        SELECT id, deposit_pubkey, secret_key_base58
+        SELECT id, prefix, deposit_pubkey, secret_key_base58
         FROM token_deposit_pool
         WHERE status = 'available'
-        ORDER BY created_at ASC
+        ORDER BY ${prefixCase}, created_at ASC
         LIMIT 1
         FOR UPDATE SKIP LOCKED
       `
@@ -6316,7 +6421,7 @@ async function ensureVolumeTradeWallets(client, moduleRow, count) {
       storedSecret = String(picked.secret_key_base58 || "");
       await client.query("DELETE FROM token_deposit_pool WHERE id = $1", [picked.id]);
     } else {
-      const kp = await generateVanityDeposit(config.depositVanityPrefix || "EMBR");
+      const kp = await generatePreferredVanityDeposit();
       walletPubkey = kp.pubkey;
       storedSecret = encryptDepositSecret(kp.secretKeyBase58);
     }
