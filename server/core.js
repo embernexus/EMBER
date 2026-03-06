@@ -483,6 +483,25 @@ export async function resolveMintMetadata(mintInput) {
     };
   }
 
+  // Fallback: if metadata providers fail but mint exists on-chain, allow attach with deterministic defaults.
+  try {
+    const connection = getConnection();
+    const mintPk = new PublicKey(mint);
+    const accountInfo = await connection.getAccountInfo(mintPk, "confirmed");
+    if (accountInfo) {
+      const fallbackSymbol = mint.slice(0, 6).toUpperCase();
+      return {
+        mint,
+        symbol: fallbackSymbol,
+        name: `Token (${mint.slice(0, 8)}...)`,
+        pictureUrl: "",
+        marketCap,
+      };
+    }
+  } catch {
+    // best effort fallback only
+  }
+
   throw new Error("Unable to resolve token metadata for this mint.");
 }
 

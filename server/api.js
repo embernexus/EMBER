@@ -34,6 +34,10 @@ const app = express();
 app.disable("x-powered-by");
 let dbReady = false;
 let dbInitRunning = false;
+let dbEverReady = false;
+let lastDbRetryTriggerAt = 0;
+let lastDbAuthErrorLogAt = 0;
+let dbAuthErrorSuppressed = 0;
 
 const trustProxy = String(process.env.TRUST_PROXY || "true").toLowerCase() !== "false";
 if (trustProxy) app.set("trust proxy", 1);
@@ -280,7 +284,7 @@ app.get("/api/health", (_req, res) => {
 
 app.use("/api", (req, res, next) => {
   if (req.path === "/health") return next();
-  if (dbReady) return next();
+  if (dbReady || dbEverReady) return next();
   return res.status(503).json({ error: "Service warming up. Database reconnecting." });
 });
 
@@ -571,8 +575,13 @@ app.use((error, _req, res, _next) => {
   const message = String(error?.message || "Internal server error");
   const dbAuthFailure = isDbAuthFailureMessage(message);
   if (dbAuthFailure) {
-    dbReady = false;
-    void initDbWithRetry();
+    const now = Date.now();
+    const cooldownMs = Math.max(10_000, Number(process.env.DB_RETRY_TRIGGER_COOLDOWN_MS || 30_000));
+    // Keep API online after initial boot. The pg pool can recover on its own from transient auth/network flaps.
+    if (!dbEverReady && !dbReady && !dbInitRunning && now - lastDbRetryTriggerAt >= cooldownMs) {
+      lastDbRetryTriggerAt = now;
+      void initDbWithRetry();
+    }
   }
   const isClient =
     message.includes("required") ||
@@ -594,7 +603,22 @@ app.use((error, _req, res, _next) => {
     ? "Internal server error"
     : message;
   if (status >= 500) {
-    console.error("[api] request failed:", message);
+    if (dbAuthFailure) {
+      const now = Date.now();
+      const logWindowMs = Math.max(5_000, Number(process.env.DB_AUTH_LOG_WINDOW_MS || 30_000));
+      if (now - lastDbAuthErrorLogAt >= logWindowMs) {
+        if (dbAuthErrorSuppressed > 0) {
+          console.warn(`[api] suppressed ${dbAuthErrorSuppressed} db auth error log(s) in last ${Math.round(logWindowMs / 1000)}s`);
+          dbAuthErrorSuppressed = 0;
+        }
+        lastDbAuthErrorLogAt = now;
+        console.error("[api] request failed:", message);
+      } else {
+        dbAuthErrorSuppressed += 1;
+      }
+    } else {
+      console.error("[api] request failed:", message);
+    }
   }
   res.status(status).json({ error: safeMessage });
 });
@@ -611,6 +635,7 @@ async function initDbWithRetry() {
       try {
         await initDb();
         dbReady = true;
+        dbEverReady = true;
         console.log("[api] database initialized");
         void ensureDepositPool().catch((error) => {
           console.warn("[api] deposit pool warmup failed:", error?.message || error);
@@ -627,6 +652,7 @@ async function initDbWithRetry() {
         const msg = String(error?.message || error);
         if (isDbInitTimeout(error)) {
           dbReady = true;
+          dbEverReady = true;
           console.warn(`[api] database init skipped on timeout after ${attempts} attempt(s): ${msg}`);
           return;
         }
