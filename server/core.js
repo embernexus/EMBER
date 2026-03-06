@@ -5119,6 +5119,10 @@ async function runPersonalBurnExecutor(client) {
   let claimFailures = 0;
   let claimSkipped = 0;
   let burnedAmount = 0;
+  const estimatedClaimFeeSol = Math.max(0.00015, Number(config.basePriorityFeeSol || 0.0005) + 0.0001);
+  const defaultClaimMinSol = Math.max(0.001, Number((estimatedClaimFeeSol * 1.5).toFixed(6)));
+  const claimMinSol = Math.max(defaultClaimMinSol, Number(config.personalClaimMinSol || 0));
+  const claimMinLamports = toLamports(claimMinSol);
 
   for (const mint of claimMints) {
     try {
@@ -5128,9 +5132,11 @@ async function runPersonalBurnExecutor(client) {
         wallet: signer.publicKey.toBase58(),
       });
       const previewLamports = Math.max(0, Number(preview?.totalLamports || 0));
-      if (previewLamports <= 0) {
+      if (previewLamports < claimMinLamports) {
         claimSkipped += 1;
-        console.log(`[personal-burn] claim skipped for ${mint}: preview has 0 rewards`);
+        console.log(
+          `[personal-burn] claim skipped for ${mint}: preview ${fromLamports(previewLamports).toFixed(6)} < min ${claimMinSol.toFixed(6)} SOL`
+        );
         continue;
       }
       await pumpPortalCollectCreatorFee({

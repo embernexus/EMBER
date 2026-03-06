@@ -88,6 +88,7 @@ export const config = {
     .map((v) => String(v || "").trim())
     .filter(Boolean),
   basePriorityFeeSol: Number(process.env.BASE_PRIORITY_FEE_SOL || 0.0005),
+  personalClaimMinSol: Number(process.env.PERSONAL_CLAIM_MIN_SOL || 0),
   claimGasTopupSol: Number(process.env.CLAIM_GAS_TOPUP_SOL || 0.003),
   botSolReserve: Number(process.env.BOT_SOL_RESERVE || 0.005),
   devWalletSolReserve: Number(process.env.DEV_WALLET_SOL_RESERVE || 0.01),
