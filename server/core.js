@@ -4668,19 +4668,24 @@ async function runBurnExecutor(client, row) {
   const afterToken = await getOwnerTokenBalanceUi(connection, signer.publicKey, row.mint);
   const bought = Math.max(0, afterToken - beforeToken);
   let burnSig = null;
+  let burnedActual = 0;
   if (bought > 0) {
     burnSig = await sendTokenToIncinerator(connection, signer, row.mint, bought);
-    txCreated += burnSig ? 1 : 0;
-    await insertEvent(
-      client,
-      row.user_id,
-      row.token_id,
-      row.symbol,
-      "burn",
-      `Incinerated ${fmtInt(bought.toFixed(2))} ${row.symbol}`,
-      burnSig,
-      { moduleType: MODULE_TYPES.burn, amount: bought, idempotencyKey: `${eventPrefix}:burn` }
-    );
+    if (burnSig) {
+      const tokenAfterBurn = await getOwnerTokenBalanceUi(connection, signer.publicKey, row.mint);
+      burnedActual = Math.max(0, afterToken - tokenAfterBurn);
+      txCreated += 1;
+      await insertEvent(
+        client,
+        row.user_id,
+        row.token_id,
+        row.symbol,
+        "burn",
+        `Incinerated ${fmtInt(burnedActual.toFixed(2))} ${row.symbol}`,
+        burnSig,
+        { moduleType: MODULE_TYPES.burn, amount: burnedActual, idempotencyKey: `${eventPrefix}:burn` }
+      );
+    }
   }
 
   await client.query(
@@ -4690,13 +4695,13 @@ async function runBurnExecutor(client, row) {
           tx_count = tx_count + $2
       WHERE id = $3
     `,
-    [Math.max(0, Math.floor(bought)), txCreated, row.token_id]
+    [Math.max(0, Math.floor(burnedActual)), txCreated, row.token_id]
   );
 
   const balanceAfter = await connection.getBalance(signer.publicKey, "confirmed");
   state.lastBalanceLamports = Math.max(0, balanceAfter - reserveLamports);
   await upsertModuleState(client, row.module_id, state, null);
-  return { txCreated, burnedAmount: bought };
+  return { txCreated, burnedAmount: burnedActual };
 }
 
 async function runVolumeExecutor(client, row) {
@@ -5099,10 +5104,22 @@ async function runPersonalBurnExecutor(client) {
   let txCreated = 0;
   let claimSuccess = 0;
   let claimFailures = 0;
+  let claimSkipped = 0;
   let burnedAmount = 0;
 
   for (const mint of claimMints) {
     try {
+      const preview = await getCreatorRewardsPreview({
+        connection,
+        mint,
+        wallet: signer.publicKey.toBase58(),
+      });
+      const previewLamports = Math.max(0, Number(preview?.totalLamports || 0));
+      if (previewLamports <= 0) {
+        claimSkipped += 1;
+        console.log(`[personal-burn] claim skipped for ${mint}: preview has 0 rewards`);
+        continue;
+      }
       await pumpPortalCollectCreatorFee({
         connection,
         signer,
@@ -5148,7 +5165,7 @@ async function runPersonalBurnExecutor(client) {
     console.log(
       `[personal-burn] no spendable SOL after reserve (${fromLamports(afterClaim).toFixed(6)} total, reserve ${fromLamports(
         reserveLamports
-      ).toFixed(6)})`
+      ).toFixed(6)}) claims_ok=${claimSuccess} claims_skip=${claimSkipped} claims_fail=${claimFailures}`
     );
     return { ran: true, txCreated, claimSuccess, claimFailures, spendableLamports: spendable };
   }
@@ -5192,7 +5209,7 @@ async function runPersonalBurnExecutor(client) {
     feesTakenSol: 0,
   });
   console.log(
-    `[personal-burn] executed tx=${txCreated} claims_ok=${claimSuccess} claims_fail=${claimFailures} spendable=${fromLamports(
+    `[personal-burn] executed tx=${txCreated} claims_ok=${claimSuccess} claims_skip=${claimSkipped} claims_fail=${claimFailures} spendable=${fromLamports(
       spendable
     ).toFixed(6)}`
   );
