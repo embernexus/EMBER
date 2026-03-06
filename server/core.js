@@ -2199,6 +2199,19 @@ export async function getPublicDashboard() {
     ? new Date().toISOString()
     : protocolAt.toISOString();
 
+  // Keep burn breakdown aligned with public metrics, which include protocol_metrics aggregates.
+  if (protocolEmber > 0) {
+    const emberIdx = burnBreakdown.findIndex(
+      (row) => String(row?.symbol || "").trim().toUpperCase() === "EMBER"
+    );
+    if (emberIdx >= 0) {
+      burnBreakdown[emberIdx].amount = Math.max(0, Number(burnBreakdown[emberIdx].amount || 0)) + protocolEmber;
+    } else {
+      burnBreakdown.push({ symbol: "EMBER", amount: protocolEmber });
+    }
+    burnBreakdown.sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0));
+  }
+
   // Fallback path: if historical rows are empty but protocol aggregates are non-zero,
   // surface a synthetic protocol burn entry so Burns page is never blank.
   if (!logRows.length && protocolLifetime > 0) {
