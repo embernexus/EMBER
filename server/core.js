@@ -749,14 +749,48 @@ async function sendSolTransfer(connection, signer, toAddress, lamports) {
 async function getOwnerTokenBalanceUi(connection, owner, mint) {
   const ownerPk = owner instanceof PublicKey ? owner : new PublicKey(owner);
   const mintPk = mint instanceof PublicKey ? mint : new PublicKey(mint);
-  const res = await connection.getParsedTokenAccountsByOwner(ownerPk, { mint: mintPk }, "confirmed");
-  if (!res.value.length) return 0;
+  const accounts = await getOwnerTokenAccountsForMint(connection, ownerPk, mintPk);
+  if (!accounts.length) return 0;
   let total = 0;
-  for (const item of res.value) {
+  for (const item of accounts) {
     const ui = Number(item.account?.data?.parsed?.info?.tokenAmount?.uiAmount || 0);
     if (Number.isFinite(ui)) total += ui;
   }
   return total;
+}
+
+async function getOwnerTokenAccountsForMint(connection, owner, mint) {
+  const ownerPk = owner instanceof PublicKey ? owner : new PublicKey(owner);
+  const mintPk = mint instanceof PublicKey ? mint : new PublicKey(mint);
+  const mintText = mintPk.toBase58();
+
+  try {
+    const byMint = await connection.getParsedTokenAccountsByOwner(ownerPk, { mint: mintPk }, "confirmed");
+    if (Array.isArray(byMint?.value) && byMint.value.length) {
+      return byMint.value;
+    }
+  } catch {
+    // fall through to explicit per-program scan
+  }
+
+  const out = [];
+  const seen = new Set();
+  for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+    try {
+      const res = await connection.getParsedTokenAccountsByOwner(ownerPk, { programId }, "confirmed");
+      for (const item of res?.value || []) {
+        const tokenMint = String(item?.account?.data?.parsed?.info?.mint || "");
+        if (tokenMint !== mintText) continue;
+        const key = item?.pubkey?.toBase58?.() || "";
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        out.push(item);
+      }
+    } catch {
+      // best effort
+    }
+  }
+  return out;
 }
 
 function trimNumber(value, digits = 6) {
@@ -821,7 +855,9 @@ async function sendTokenToIncinerator(connection, signer, mintAddress, uiAmount)
   const isToken2022 = tokenProgramId.equals(TOKEN_2022_PROGRAM_ID);
   if (!isLegacy && !isToken2022) return null;
 
-  const sourceAccounts = await connection.getParsedTokenAccountsByOwner(owner, { mint }, "confirmed");
+  const sourceAccounts = {
+    value: await getOwnerTokenAccountsForMint(connection, owner, mint),
+  };
   if (!Array.isArray(sourceAccounts?.value) || sourceAccounts.value.length === 0) return null;
 
   let decimals = 0;
@@ -2721,12 +2757,18 @@ async function getEmberHolderCount() {
   try {
     const connection = getConnection();
     const mintPk = new PublicKey(mint);
-    const accounts = await connection.getParsedProgramAccounts(TOKEN_PROGRAM_ID, {
+    const mintInfo = await connection.getAccountInfo(mintPk, "confirmed");
+    const programId =
+      mintInfo?.owner?.equals?.(TOKEN_2022_PROGRAM_ID)
+        ? TOKEN_2022_PROGRAM_ID
+        : TOKEN_PROGRAM_ID;
+    const filters = [{ memcmp: { offset: 0, bytes: mintPk.toBase58() } }];
+    if (programId.equals(TOKEN_PROGRAM_ID)) {
+      filters.unshift({ dataSize: 165 });
+    }
+    const accounts = await connection.getParsedProgramAccounts(programId, {
       commitment: "confirmed",
-      filters: [
-        { dataSize: 165 },
-        { memcmp: { offset: 0, bytes: mintPk.toBase58() } },
-      ],
+      filters,
     });
 
     let holders = 0;
