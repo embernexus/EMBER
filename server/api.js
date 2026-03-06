@@ -32,6 +32,8 @@ import { initDb } from "./db.js";
 
 const app = express();
 app.disable("x-powered-by");
+let dbReady = false;
+let dbInitRunning = false;
 
 const trustProxy = String(process.env.TRUST_PROXY || "true").toLowerCase() !== "false";
 if (trustProxy) app.set("trust proxy", 1);
@@ -72,6 +74,22 @@ function parseAllowedOrigins() {
 }
 
 const allowedOrigins = parseAllowedOrigins();
+
+function isDbAuthFailureMessage(input) {
+  const msg = String(input || "").toLowerCase();
+  return (
+    msg.includes("authentication") ||
+    msg.includes("circuit breaker open") ||
+    msg.includes("too many authentication errors") ||
+    msg.includes("password authentication failed")
+  );
+}
+
+function isDbInitTimeout(error) {
+  const code = String(error?.code || "").trim();
+  const msg = String(error?.message || "").toLowerCase();
+  return code === "57014" || msg.includes("statement timeout");
+}
 
 function requestIp(req) {
   const fwd = String(req.headers["x-forwarded-for"] || "").split(",")[0]?.trim();
@@ -258,6 +276,12 @@ async function authRequired(req, res, next) {
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+app.use("/api", (req, res, next) => {
+  if (req.path === "/health") return next();
+  if (dbReady) return next();
+  return res.status(503).json({ error: "Service warming up. Database reconnecting." });
 });
 
 app.get("/api/public-metrics", async (_req, res, next) => {
@@ -545,6 +569,11 @@ app.get(/^\/(?!api).*/, (_req, res) => {
 
 app.use((error, _req, res, _next) => {
   const message = String(error?.message || "Internal server error");
+  const dbAuthFailure = isDbAuthFailureMessage(message);
+  if (dbAuthFailure) {
+    dbReady = false;
+    void initDbWithRetry();
+  }
   const isClient =
     message.includes("required") ||
     message.includes("exists") ||
@@ -554,7 +583,13 @@ app.use((error, _req, res, _next) => {
     message.includes("denied") ||
     message.includes("not allowed");
 
-  const status = Number.isInteger(error?.status) ? Number(error.status) : isClient ? 400 : 500;
+  const status = Number.isInteger(error?.status)
+    ? Number(error.status)
+    : dbAuthFailure
+      ? 503
+      : isClient
+        ? 400
+        : 500;
   const safeMessage = status >= 500 && process.env.NODE_ENV === "production"
     ? "Internal server error"
     : message;
@@ -564,45 +599,48 @@ app.use((error, _req, res, _next) => {
   res.status(status).json({ error: safeMessage });
 });
 
-let dbReady = false;
-
-function isDbInitTimeout(error) {
-  const code = String(error?.code || "").trim();
-  const msg = String(error?.message || "").toLowerCase();
-  return code === "57014" || msg.includes("statement timeout");
-}
-
 async function initDbWithRetry() {
-  const retryMs = Math.max(3000, Number(process.env.DB_INIT_RETRY_MS || 5000));
-  const maxRetries = Math.max(1, Number(process.env.DB_INIT_MAX_RETRIES || 5));
+  if (dbInitRunning || dbReady) return;
+  dbInitRunning = true;
+  const baseRetryMs = Math.max(3000, Number(process.env.DB_INIT_RETRY_MS || 5000));
+  const maxRetryMs = Math.max(baseRetryMs, Number(process.env.DB_INIT_MAX_RETRY_MS || 60000));
   let attempts = 0;
-  while (!dbReady) {
-    try {
-      await initDb();
-      dbReady = true;
-      console.log("[api] database initialized");
-      void ensureDepositPool().catch((error) => {
-        console.warn("[api] deposit pool warmup failed:", error?.message || error);
-      });
-      const refillMs = Math.max(5000, Number(config.depositPoolRefillIntervalMs || 15000));
-      setInterval(() => {
-        void ensureDepositPool().catch((error) => {
-          console.warn("[api] deposit pool refill failed:", error?.message || error);
-        });
-      }, refillMs);
-      return;
-    } catch (error) {
-      attempts += 1;
-      if (isDbInitTimeout(error) || attempts >= maxRetries) {
+  let retryMs = baseRetryMs;
+  try {
+    while (!dbReady) {
+      try {
+        await initDb();
         dbReady = true;
-        console.warn(
-          `[api] database init skipped after ${attempts} attempt(s): ${error?.message || error}`
-        );
+        console.log("[api] database initialized");
+        void ensureDepositPool().catch((error) => {
+          console.warn("[api] deposit pool warmup failed:", error?.message || error);
+        });
+        const refillMs = Math.max(5000, Number(config.depositPoolRefillIntervalMs || 15000));
+        setInterval(() => {
+          void ensureDepositPool().catch((error) => {
+            console.warn("[api] deposit pool refill failed:", error?.message || error);
+          });
+        }, refillMs);
         return;
+      } catch (error) {
+        attempts += 1;
+        const msg = String(error?.message || error);
+        if (isDbInitTimeout(error)) {
+          dbReady = true;
+          console.warn(`[api] database init skipped on timeout after ${attempts} attempt(s): ${msg}`);
+          return;
+        }
+        if (isDbAuthFailureMessage(msg)) {
+          retryMs = Math.min(maxRetryMs, Math.max(15000, retryMs * 2));
+        } else {
+          retryMs = Math.min(maxRetryMs, Math.max(baseRetryMs, Math.floor(retryMs * 1.5)));
+        }
+        console.warn(`[api] database init failed, retrying in ${retryMs}ms:`, msg);
+        await new Promise((resolve) => setTimeout(resolve, retryMs));
       }
-      console.warn(`[api] database init failed, retrying in ${retryMs}ms:`, error?.message || error);
-      await new Promise((resolve) => setTimeout(resolve, retryMs));
     }
+  } finally {
+    dbInitRunning = false;
   }
 }
 

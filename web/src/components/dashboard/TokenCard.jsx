@@ -537,6 +537,10 @@ export default function TokenCard({
       if (nextModuleConfig.maxTradeSol < nextModuleConfig.minTradeSol) {
         nextModuleConfig.maxTradeSol = nextModuleConfig.minTradeSol;
       }
+      const expectedWalletCount =
+        String(local.selectedBot || "burn") === "volume"
+          ? Math.max(1, Math.min(5, Math.floor(toNum(nextModuleConfig.tradeWalletCount, 1))))
+          : null;
       await onUpdate({
         ...local,
         active: currentActive,
@@ -546,7 +550,27 @@ export default function TokenCard({
         moduleConfig: nextModuleConfig,
       });
       setEditing(false);
-      void fetchDetails(true);
+      const first = await fetchDetails(true);
+      if (expectedWalletCount && expectedWalletCount > 0) {
+        const firstCount = Array.isArray(first?.addresses) ? first.addresses.length : 0;
+        if (firstCount !== expectedWalletCount) {
+          setActionMsg(`Updating wallets... target ${expectedWalletCount}`);
+          const maxAttempts = 20;
+          for (let i = 0; i < maxAttempts; i += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            const next = await fetchDetails(true);
+            const countNow = Array.isArray(next?.addresses) ? next.addresses.length : 0;
+            if (countNow === expectedWalletCount) {
+              setActionMsg(`Wallets updated: ${countNow}`);
+              setTimeout(() => setActionMsg(""), 2000);
+              break;
+            }
+            if (i === maxAttempts - 1) {
+              setActionMsg("Wallet update still processing. Refreshing in background.");
+            }
+          }
+        }
+      }
     } catch (error) {
       setErr(error?.message || "Unable to update token settings.");
     } finally {
