@@ -74,6 +74,9 @@ try {
 export const pool = new Pool({
   connectionString: poolConnectionString,
   ssl: process.env.PGSSLMODE === "disable" ? false : { rejectUnauthorized: false },
+  statement_timeout: 0,
+  query_timeout: 0,
+  idle_in_transaction_session_timeout: 0,
 });
 
 export async function withTx(fn) {
