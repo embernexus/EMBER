@@ -750,7 +750,25 @@ async function getOwnerTokenBalanceUi(connection, owner, mint) {
   const ownerPk = owner instanceof PublicKey ? owner : new PublicKey(owner);
   const mintPk = mint instanceof PublicKey ? mint : new PublicKey(mint);
   const balances = await getOwnerTokenAccountBalancesForMint(connection, ownerPk, mintPk, null);
-  return balances.reduce((sum, item) => sum + item.uiAmount, 0);
+  const rawPathTotal = balances.reduce((sum, item) => sum + item.uiAmount, 0);
+
+  // Parsed fallback path for RPCs that expose parsed balances but not raw account bytes consistently.
+  let parsedTotal = 0;
+  for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+    try {
+      const parsed = await connection.getParsedTokenAccountsByOwner(ownerPk, { programId }, "confirmed");
+      for (const item of parsed?.value || []) {
+        const tokenMint = String(item?.account?.data?.parsed?.info?.mint || "");
+        if (tokenMint !== mintPk.toBase58()) continue;
+        const ui = Number(item?.account?.data?.parsed?.info?.tokenAmount?.uiAmount || 0);
+        if (Number.isFinite(ui) && ui > 0) parsedTotal += ui;
+      }
+    } catch {
+      // best effort
+    }
+  }
+
+  return Math.max(rawPathTotal, parsedTotal);
 }
 
 function getTokenAccountMintAddress(rawData) {
@@ -3913,8 +3931,8 @@ async function incrementProtocolMetrics(client, delta = {}) {
     return;
   }
 
-  try {
-    await client.query(
+  const upsertMetrics = async () =>
+    client.query(
       `
         INSERT INTO protocol_metrics (
           id,
@@ -3937,7 +3955,38 @@ async function incrementProtocolMetrics(client, delta = {}) {
       `,
       [totalBotTransactions, lifetimeIncinerated, emberIncinerated, rewardsProcessedSol, feesTakenSol]
     );
+
+  try {
+    await upsertMetrics();
   } catch (error) {
+    const code = String(error?.code || "").trim();
+    if (code === "42P01" || String(error?.message || "").toLowerCase().includes("protocol_metrics")) {
+      try {
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS protocol_metrics (
+            id SMALLINT PRIMARY KEY,
+            total_bot_transactions BIGINT NOT NULL DEFAULT 0,
+            lifetime_incinerated NUMERIC NOT NULL DEFAULT 0,
+            ember_incinerated NUMERIC NOT NULL DEFAULT 0,
+            rewards_processed_sol NUMERIC NOT NULL DEFAULT 0,
+            fees_taken_sol NUMERIC NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          );
+        `);
+        await client.query(`
+          INSERT INTO protocol_metrics (
+            id, total_bot_transactions, lifetime_incinerated, ember_incinerated, rewards_processed_sol, fees_taken_sol
+          )
+          VALUES (1, 0, 0, 0, 0, 0)
+          ON CONFLICT (id) DO NOTHING;
+        `);
+        await upsertMetrics();
+        return;
+      } catch (recoveryError) {
+        console.warn(`[metrics] protocol metrics recovery failed: ${recoveryError?.message || recoveryError}`);
+        return;
+      }
+    }
     console.warn(`[metrics] protocol metrics update skipped: ${error?.message || error}`);
   }
 }
@@ -5073,6 +5122,11 @@ async function runPersonalBurnExecutor(client) {
   const spendable = Math.max(0, afterClaim - reserveLamports);
   const burnableBefore = await getOwnerTokenBalanceUi(connection, signer.publicKey, config.emberTokenMint);
   const hasGasForBurn = afterClaim > getTxFeeSafetyLamports();
+  console.log(
+    `[personal-burn] mint=${config.emberTokenMint} balance=${burnableBefore.toFixed(6)} spendable=${fromLamports(
+      spendable
+    ).toFixed(6)}`
+  );
   if (spendable <= toLamports(0.0005)) {
     if (burnableBefore > 0 && hasGasForBurn) {
       try {
