@@ -1979,6 +1979,82 @@ export async function getDashboard(userId) {
   };
 }
 
+export async function getPublicDashboard() {
+  const [tokensRes, logsRes, chartRes, burnBreakdownRes] = await Promise.all([
+    pool.query(
+      `
+        SELECT
+          t.*,
+          GREATEST(
+            COALESCE(t.burned::numeric, 0),
+            COALESCE(be.burned_from_events, 0)
+          ) AS display_burned,
+          m.module_type,
+          m.enabled AS module_enabled,
+          m.config_json AS module_config,
+          m.state_json AS module_state,
+          m.last_error AS module_last_error
+        FROM tokens t
+        LEFT JOIN (
+          SELECT
+            token_id,
+            COALESCE(SUM(amount), 0)::numeric AS burned_from_events
+          FROM token_events
+          WHERE event_type = 'burn'
+          GROUP BY token_id
+        ) be ON be.token_id = t.id
+        LEFT JOIN bot_modules m
+          ON m.token_id = t.id
+         AND m.module_type = t.selected_bot
+        ORDER BY t.active DESC, t.updated_at DESC, t.created_at DESC
+        LIMIT 200
+      `
+    ),
+    pool.query(
+      `
+        SELECT id, token_id, token_symbol, module_type, event_type, amount, message, tx, created_at
+        FROM token_events
+        WHERE event_type IN ('burn', 'buyback')
+        ORDER BY created_at DESC
+        LIMIT 300
+      `
+    ),
+    pool.query(
+      `
+        SELECT event_type, amount, message, created_at
+        FROM token_events
+        WHERE event_type = 'burn'
+          AND created_at >= NOW() - INTERVAL '7 days'
+        ORDER BY created_at DESC
+      `
+    ),
+    pool.query(
+      `
+        SELECT
+          UPPER(COALESCE(NULLIF(token_symbol, ''), 'UNKNOWN')) AS symbol,
+          COALESCE(SUM(amount), 0)::numeric AS amount
+        FROM token_events
+        WHERE event_type = 'burn'
+        GROUP BY 1
+        ORDER BY amount DESC
+      `
+    ),
+  ]);
+
+  const tokenRows = attachMarketCaps(tokensRes.rows);
+  const burnBreakdown = burnBreakdownRes.rows.map((row) => ({
+    symbol: String(row.symbol || "UNKNOWN"),
+    amount: Number(row.amount || 0),
+  }));
+
+  return {
+    tokens: tokenRows.map(toToken),
+    logs: logsRes.rows.map(toEvent),
+    chartData: buildChartData(chartRes.rows),
+    burnBreakdown,
+  };
+}
+
 async function readTokenWalletAddresses(client, userId, tokenRow) {
   const tokenId = String(tokenRow.id);
   const addresses = [

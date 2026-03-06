@@ -5,6 +5,7 @@ import { API_BASE } from "../config/site";
 /** @typedef {{ key: string, d: string, v: number }} ChartPoint */
 /** @typedef {{ tokens: Token[], feed: FeedEvent[], logs: FeedEvent[], chartData: ChartPoint[] }} DashboardResponse */
 /** @typedef {{ lifetimeIncinerated: number, totalBotTransactions: number, activeTokens: number, totalHolders: number, emberIncinerated: number, totalRewardsProcessedSol: number, totalFeesTakenSol: number }} PublicMetrics */
+/** @typedef {{ symbol: string, amount: number }} BurnBreakdownItem */
 
 function apiUrl(path) {
   return `${API_BASE}${path}`;
@@ -190,6 +191,20 @@ export async function apiPublicMetrics() {
     totalRewardsProcessedSol: num(data.totalRewardsProcessedSol ?? data.totalRewardsProcessed),
     totalFeesTakenSol: num(data.totalFeesTakenSol ?? data.totalFeesTaken),
   };
+}
+
+export async function apiPublicDashboard() {
+  const data = await requestJson("/api/public-dashboard", { method: "GET" });
+  const tokens = Array.isArray(data.tokens) ? data.tokens.map(toToken) : [];
+  const logs = Array.isArray(data.logs) ? data.logs.map(toEvent) : [];
+  const chartData = Array.isArray(data.chartData) ? data.chartData.map(toChartPoint) : [];
+  const burnBreakdown = Array.isArray(data.burnBreakdown)
+    ? data.burnBreakdown.map((row) => ({
+        symbol: str(row?.symbol).toUpperCase(),
+        amount: num(row?.amount),
+      }))
+    : [];
+  return { tokens, logs, chartData, burnBreakdown };
 }
 
 export async function apiCreateToken(payload) {

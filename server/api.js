@@ -9,6 +9,7 @@ import {
   cookieMaxAgeMs,
   deleteToken,
   getDashboard,
+  getPublicDashboard,
   deployToken,
   ensureDepositPool,
   generatePendingDepositAddress,
@@ -262,6 +263,15 @@ app.get("/api/health", (_req, res) => {
 app.get("/api/public-metrics", async (_req, res, next) => {
   try {
     const data = await getPublicMetrics();
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/public-dashboard", async (_req, res, next) => {
+  try {
+    const data = await getPublicDashboard();
     res.json(data);
   } catch (error) {
     next(error);

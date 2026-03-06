@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useI18n } from "../i18n/I18nProvider";
 import { fmtAge, fmtFull, solscanTx } from "../lib/format";
 
-export default function BurnsPage({ tokens, allLogs, publicMetrics, chartData }) {
+export default function BurnsPage({ tokens, allLogs, publicMetrics, chartData, burnBreakdown = [] }) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
   const [historyPage, setHistoryPage] = useState(1);
@@ -20,9 +20,14 @@ export default function BurnsPage({ tokens, allLogs, publicMetrics, chartData })
       )
     : burnRows;
 
-  const tokenBreakdown = tokens
-    .map(t => ({ symbol: t.symbol, amount: Number(t.burned) || 0 }))
-    .sort((a, b) => b.amount - a.amount);
+  const tokenBreakdown = (
+    Array.isArray(burnBreakdown) && burnBreakdown.length
+      ? burnBreakdown.map((row) => ({
+          symbol: String(row?.symbol || "UNKNOWN").toUpperCase(),
+          amount: Number(row?.amount) || 0,
+        }))
+      : tokens.map((t) => ({ symbol: String(t?.symbol || "UNKNOWN").toUpperCase(), amount: Number(t?.burned) || 0 }))
+  ).sort((a, b) => b.amount - a.amount);
   const totalTokenBurned = tokenBreakdown.reduce((sum, t) => sum + t.amount, 0);
   const hasHistory = filteredRows.length > 0;
   const hasBreakdown = tokenBreakdown.some(t => t.amount > 0);

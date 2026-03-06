@@ -13,6 +13,7 @@ import {
   apiVolumeWithdrawOptions,
   apiTokenLiveDetails,
   apiPublicMetrics,
+  apiPublicDashboard,
   apiUpdateToken,
   isApiError,
 } from "./api/client";
@@ -64,6 +65,10 @@ export default function App() {
   const [chartData, setChartData] = useState([]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [publicMetrics, setPublicMetrics] = useState(DEFAULT_PUBLIC_METRICS);
+  const [publicTickerTokens, setPublicTickerTokens] = useState([]);
+  const [publicBurnLogs, setPublicBurnLogs] = useState([]);
+  const [publicBurnChartData, setPublicBurnChartData] = useState([]);
+  const [publicBurnBreakdown, setPublicBurnBreakdown] = useState([]);
   const [activeOverrides, setActiveOverrides] = useState({});
   const [emberTickerMeta, setEmberTickerMeta] = useState({
     mint: "",
@@ -97,9 +102,19 @@ export default function App() {
     [tokens, activeOverrides]
   );
 
+  const tickerSourceTokens = useMemo(
+    () =>
+      publicTickerTokens.map((t) => {
+        const key = String(t?.id || "");
+        if (!key || activeOverrides[key] === undefined) return t;
+        return { ...t, active: Boolean(activeOverrides[key]) };
+      }),
+    [publicTickerTokens, activeOverrides]
+  );
+
   useEffect(() => {
     if (!configuredTickerMint || !user) return;
-    const hasConfiguredToken = tokensForUi.some((t) => normalizedMint(t?.mint) === configuredTickerMint);
+    const hasConfiguredToken = tickerSourceTokens.some((t) => normalizedMint(t?.mint) === configuredTickerMint);
     if (hasConfiguredToken) return;
     if (normalizedMint(emberTickerMeta.mint) === configuredTickerMint) return;
 
@@ -129,10 +144,10 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [configuredTickerMint, user, tokensForUi, emberTickerMeta.mint]);
+  }, [configuredTickerMint, user, tickerSourceTokens, emberTickerMeta.mint]);
 
   const tickerTokens = useMemo(() => {
-    if (!configuredTickerMint) return tokensForUi;
+    if (!configuredTickerMint) return tickerSourceTokens;
 
     const forcedBurning = (token, fallback = {}) => ({
       ...token,
@@ -144,9 +159,9 @@ export default function App() {
       burned: Number(publicMetrics?.emberIncinerated) || Number(token?.burned) || 0,
     });
 
-    const existing = tokensForUi.find((t) => normalizedMint(t?.mint) === configuredTickerMint);
+    const existing = tickerSourceTokens.find((t) => normalizedMint(t?.mint) === configuredTickerMint);
     if (existing) {
-      return tokensForUi.map((t) => {
+      return tickerSourceTokens.map((t) => {
         if (normalizedMint(t?.mint) !== configuredTickerMint) return t;
         return forcedBurning(t, {
           symbol: String(t?.symbol || emberTickerMeta.symbol || "EMBER").toUpperCase(),
@@ -162,7 +177,7 @@ export default function App() {
     }
 
     return [
-      ...tokensForUi,
+      ...tickerSourceTokens,
       forcedBurning(
         {
           id: "ember-ticker",
@@ -192,7 +207,7 @@ export default function App() {
       ),
     ];
   }, [
-    tokensForUi,
+    tickerSourceTokens,
     configuredTickerMint,
     emberTickerMeta,
     publicMetrics?.emberIncinerated,
@@ -217,11 +232,28 @@ export default function App() {
     }
   }, []);
 
+  const loadPublicDashboard = useCallback(async () => {
+    try {
+      const data = await apiPublicDashboard();
+      setPublicTickerTokens(Array.isArray(data.tokens) ? data.tokens : []);
+      setPublicBurnLogs(Array.isArray(data.logs) ? data.logs : []);
+      setPublicBurnChartData(Array.isArray(data.chartData) ? data.chartData : []);
+      setPublicBurnBreakdown(Array.isArray(data.burnBreakdown) ? data.burnBreakdown : []);
+    } catch {
+      // keep previous public data if endpoint is temporarily unavailable
+    }
+  }, []);
+
   useEffect(() => {
     loadPublicMetrics();
-    const id = setInterval(loadPublicMetrics, 30_000);
-    return () => clearInterval(id);
-  }, [loadPublicMetrics]);
+    loadPublicDashboard();
+    const metricsId = setInterval(loadPublicMetrics, 30_000);
+    const dashboardId = setInterval(loadPublicDashboard, 8_000);
+    return () => {
+      clearInterval(metricsId);
+      clearInterval(dashboardId);
+    };
+  }, [loadPublicMetrics, loadPublicDashboard]);
 
   useEffect(() => {
     const heroWords = ["BURN", "AUTO", "PUMP"];
@@ -514,10 +546,11 @@ export default function App() {
       {page === "roadmap" && <RoadmapPage />}
       {page === "burns" && (
         <BurnsPage
-          tokens={tokens}
-          allLogs={allLogs}
+          tokens={publicTickerTokens}
+          allLogs={publicBurnLogs}
           publicMetrics={publicMetrics}
-          chartData={chartData}
+          chartData={publicBurnChartData}
+          burnBreakdown={publicBurnBreakdown}
         />
       )}
       {page === "docs" && <ProtocolHubPage />}
