@@ -1,6 +1,6 @@
 import { API_BASE } from "../config/site";
 
-/** @typedef {{ id: string, symbol: string, name: string, mint: string, pictureUrl: string, deposit: string, claimSec: number, burnSec: number, splits: number, selectedBot: string, active: boolean, disconnected: boolean, burned: number, pending: number, txCount: number, marketCap: number, moduleType: string, moduleEnabled: boolean, moduleConfig: Record<string, any>, moduleState: Record<string, any>, moduleLastError: string }} Token */
+/** @typedef {{ id: string, symbol: string, name: string, mint: string, pictureUrl: string, deposit: string, claimSec: number, burnSec: number, splits: number, selectedBot: string, active: boolean, disconnected: boolean, burned: number, pending: number, txCount: number, marketCap: number, moduleType: string, moduleEnabled: boolean, moduleConfig: Record<string, any>, moduleState: Record<string, any>, moduleLastError: string, deployedViaEmber: boolean, deployWalletPubkey: string }} Token */
 /** @typedef {{ id: number|string, tokenId: string|null, token: string, moduleType: string, type: string, amount: number, msg: string, tx: string|null, age: number, createdAt: string }} FeedEvent */
 /** @typedef {{ key: string, d: string, v: number }} ChartPoint */
 /** @typedef {{ tokens: Token[], feed: FeedEvent[], logs: FeedEvent[], chartData: ChartPoint[] }} DashboardResponse */
@@ -104,6 +104,8 @@ function toToken(value) {
     moduleConfig: isRecord(value.moduleConfig) ? value.moduleConfig : {},
     moduleState: isRecord(value.moduleState) ? value.moduleState : {},
     moduleLastError: str(value.moduleLastError),
+    deployedViaEmber: bool(value.deployedViaEmber),
+    deployWalletPubkey: str(value.deployWalletPubkey),
   };
 }
 
@@ -142,7 +144,19 @@ function toUserPayload(data) {
   }
   const username = str(data.user.username);
   if (!username) return { user: null };
-  return { user: { username } };
+  return {
+    user: {
+      id: num(data.user.id),
+      username,
+      ownerUserId: num(data.user.ownerUserId),
+      ownerUsername: str(data.user.ownerUsername),
+      role: str(data.user.role, "owner"),
+      isOperator: bool(data.user.isOperator),
+      canManageFunds: bool(data.user.canManageFunds, true),
+      canDelete: bool(data.user.canDelete, true),
+      canManageAccess: bool(data.user.canManageAccess, true),
+    },
+  };
 }
 
 export async function apiAuthLogin(username, password) {
@@ -168,6 +182,83 @@ export async function apiAuthMe() {
 
 export async function apiAuthLogout() {
   await requestJson("/api/auth/logout", { method: "POST", headers: {} });
+}
+
+export async function apiManagerAccess() {
+  const data = await requestJson("/api/auth/manager-access", { method: "GET" });
+  return {
+    enabled: bool(data.enabled),
+    username: str(data.username),
+    userId: num(data.userId),
+  };
+}
+
+export async function apiUpsertManagerAccess(payload) {
+  const data = await requestJson("/api/auth/manager-access", {
+    method: "PUT",
+    body: JSON.stringify(payload || {}),
+  });
+  return {
+    enabled: bool(data.enabled, true),
+    username: str(data.username),
+    userId: num(data.userId),
+    user: toUserPayload(data).user,
+  };
+}
+
+export async function apiDeleteManagerAccess() {
+  const data = await requestJson("/api/auth/manager-access", { method: "DELETE" });
+  return {
+    ok: bool(data.ok, true),
+    removed: bool(data.removed),
+    user: toUserPayload(data).user,
+  };
+}
+
+export async function apiTelegramAlerts() {
+  const data = await requestJson("/api/alerts/telegram", { method: "GET" });
+  return {
+    connected: bool(data.connected),
+    chatIdMasked: str(data.chatIdMasked),
+    telegramUsername: str(data.telegramUsername),
+    firstName: str(data.firstName),
+    lastName: str(data.lastName),
+    connectedAt: str(data.connectedAt),
+    updatedAt: str(data.updatedAt),
+    botUsername: str(data.botUsername),
+    connectToken: str(data.connectToken),
+    connectUrl: str(data.connectUrl),
+    prefs: isRecord(data.prefs) ? data.prefs : {},
+  };
+}
+
+export async function apiUpdateTelegramAlerts(payload) {
+  const data = await requestJson("/api/alerts/telegram", {
+    method: "PATCH",
+    body: JSON.stringify(payload || {}),
+  });
+  return {
+    prefs: isRecord(data.prefs) ? data.prefs : {},
+  };
+}
+
+export async function apiTelegramTestAlert() {
+  const data = await requestJson("/api/alerts/telegram/test", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return {
+    ok: bool(data.ok, true),
+  };
+}
+
+export async function apiDisconnectTelegramAlerts() {
+  const data = await requestJson("/api/alerts/telegram", {
+    method: "DELETE",
+  });
+  return {
+    ok: bool(data.ok, true),
+  };
 }
 
 export async function apiDashboard() {
@@ -264,6 +355,15 @@ export async function apiTokenLiveDetails(id) {
   };
 }
 
+export async function apiTokenDeployWallet(id) {
+  const data = await requestJson(`/api/tokens/${id}/deploy-wallet`, { method: "GET" });
+  return {
+    publicKey: str(data.publicKey),
+    privateKeyBase58: str(data.privateKeyBase58),
+    privateKeyArray: Array.isArray(data.privateKeyArray) ? data.privateKeyArray : [],
+  };
+}
+
 export async function apiVolumeWithdrawOptions(id) {
   const data = await requestJson(`/api/tokens/${id}/volume/withdraw-options`, { method: "GET" });
   const sources = Array.isArray(data.sources) ? data.sources : [];
@@ -325,6 +425,11 @@ export async function apiDeleteToken(id) {
   return { ok: bool(data.ok, true) };
 }
 
+export async function apiRestoreToken(id) {
+  const data = await requestJson(`/api/tokens/${id}/restore`, { method: "POST" });
+  return { token: toToken(data.token) };
+}
+
 export async function apiGenerateDepositAddress() {
   const data = await requestJson("/api/tokens/generate-deposit", {
     method: "POST",
@@ -364,4 +469,24 @@ export async function apiRecordDeploy(payload) {
     body: JSON.stringify(payload),
   });
   return data;
+}
+
+export async function apiReserveVanityDeployWallet(payload) {
+  return requestJson("/api/deploy/vanity-reserve", {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export async function apiGetVanityDeployWalletStatus(reservationId) {
+  return requestJson(`/api/deploy/vanity-reserve/${encodeURIComponent(String(reservationId || "").trim())}`, {
+    method: "GET",
+  });
+}
+
+export async function apiSubmitVanityDeploy(payload) {
+  return requestJson("/api/deploy/vanity-submit", {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
 }

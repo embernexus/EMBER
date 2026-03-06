@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
-import { apiRecordDeploy } from "../../api/client";
+import {
+  apiGetVanityDeployWalletStatus,
+  apiRecordDeploy,
+  apiReserveVanityDeployWallet,
+  apiSubmitVanityDeploy,
+} from "../../api/client";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
   BOT_ATTACH_OPTIONS,
@@ -11,6 +16,7 @@ import {
   DEPLOY_PRIORITY_FEE,
   DEPLOY_RPC_URL,
   DEPLOY_SLIPPAGE,
+  DEPLOY_VANITY_BUFFER_SOL,
   DEPLOY_VIDEO_MAX_BYTES,
   PUMP_GLOBAL_DEFAULT_RESERVES,
   PUMP_GLOBAL_SEED,
@@ -255,7 +261,7 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
   const [form, setForm] = useState({
     name: "",
     symbol: "",
-    description: "Deployed by EMBER.nexus",
+    description: "Deployed on EMBER.nexus",
     twitter: "",
     telegram: "",
     website: "",
@@ -280,12 +286,20 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
   const [globalReserves, setGlobalReserves] = useState(null);
   const [quoteLoading, setQuoteLoading] = useState(true);
   const [quoteError, setQuoteError] = useState("");
+  const [deployMode, setDeployMode] = useState("wallet");
+  const [vanityWallet, setVanityWallet] = useState(null);
+  const [vanityLoading, setVanityLoading] = useState(false);
+  const [vanityMessage, setVanityMessage] = useState("");
+  const [showVanitySecret, setShowVanitySecret] = useState(false);
 
   const setField = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
   const isDecimalInput = (raw) => /^(\d+|\d*\.\d*)$/.test(raw) || raw === "";
 
   const onInitialBuySolChange = (raw) => {
     if (!isDecimalInput(raw)) return;
+    if (vanityWallet && raw !== form.initialBuySol) {
+      invalidateVanityWallet("EMBR deploy wallet cleared because the initial buy changed. Generate a new one.");
+    }
     setForm(prev => {
       if (!globalReserves) return { ...prev, initialBuySol: raw };
       const solLamports = parseDecimalToScaledBigInt(raw, 9);
@@ -301,6 +315,9 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
 
   const onInitialBuyTokensChange = (raw) => {
     if (!isDecimalInput(raw)) return;
+    if (vanityWallet && raw !== form.initialBuyTokens) {
+      invalidateVanityWallet("EMBR deploy wallet cleared because the initial buy changed. Generate a new one.");
+    }
     setForm(prev => {
       if (!globalReserves) return { ...prev, initialBuyTokens: raw };
       const tokenBase = parseDecimalToScaledBigInt(raw, PUMP_TOKEN_DECIMALS);
@@ -316,6 +333,27 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
   const autoAttach = Boolean(selectedBot);
   const requiresLoginForSubmit = autoAttach && !user;
   const noBuyIn = Number(form.initialBuySol || 0) === 0;
+  const vanityReady = Boolean(vanityWallet?.funded);
+
+  const invalidateVanityWallet = (message = "") => {
+    if (!vanityWallet) return;
+    setVanityWallet(null);
+    setShowVanitySecret(false);
+    if (message) {
+      setVanityMessage(message);
+    }
+  };
+
+  const copyText = async (value, successMessage) => {
+    const text = String(value || "").trim();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setVanityMessage(successMessage);
+    } catch {
+      setVanityMessage("Copy failed. Please copy it manually.");
+    }
+  };
 
   useEffect(()=>{
     if(!imageFile){
@@ -364,6 +402,30 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
     run();
     return () => { mounted = false; };
   }, []);
+
+  useEffect(() => {
+    if (!vanityWallet?.reservationId || vanityWallet?.status === "deployed") return undefined;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const next = await apiGetVanityDeployWalletStatus(vanityWallet.reservationId);
+        if (!cancelled) {
+          setVanityWallet((prev) => {
+            if (!prev || prev.reservationId !== vanityWallet.reservationId) return prev;
+            return { ...prev, ...next };
+          });
+        }
+      } catch {}
+    };
+    const id = setInterval(() => {
+      void refresh();
+    }, 5000);
+    void refresh();
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [vanityWallet?.reservationId, vanityWallet?.status]);
 
   const connectWallet = async (preferredKey = "") => {
     setError("");
@@ -747,6 +809,166 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
     void submit(walletChoice || "");
   };
 
+  const refreshVanityWallet = async () => {
+    if (!vanityWallet?.reservationId) return;
+    setVanityLoading(true);
+    setVanityMessage("");
+    setError("");
+    try {
+      const next = await apiGetVanityDeployWalletStatus(vanityWallet.reservationId);
+      setVanityWallet((prev) => ({ ...(prev || {}), ...next }));
+      setVanityMessage(
+        next?.funded
+          ? "Deploy wallet funded. You can deploy now."
+          : "Funding status refreshed."
+      );
+    } catch (e) {
+      setError(e?.message || "Failed to refresh EMBR deploy wallet status.");
+    } finally {
+      setVanityLoading(false);
+    }
+  };
+
+  const reserveVanityWallet = async () => {
+    setError("");
+    setResult(null);
+    setVanityMessage("");
+    if (!form.name.trim() || !form.symbol.trim() || !form.description.trim()) {
+      setError(t("deploy.errors.requiredFields"));
+      return;
+    }
+    if (!imageFile) {
+      setError(t("deploy.errors.mediaRequired"));
+      return;
+    }
+    const mediaError = validateDeployMediaFile(imageFile);
+    if (mediaError) {
+      setError(mediaError);
+      return;
+    }
+    if (bannerFile) {
+      const bannerError = validateDeployBannerFile(bannerFile);
+      if (bannerError) {
+        setError(bannerError);
+        return;
+      }
+    }
+    const initialBuySolNum = Number(form.initialBuySol || 0);
+    if (!Number.isFinite(initialBuySolNum) || initialBuySolNum <= 0) {
+      setError("Pump deploy requires an initial buy greater than 0 SOL.");
+      return;
+    }
+
+    setVanityLoading(true);
+    try {
+      const next = await apiReserveVanityDeployWallet({
+        initialBuySol: initialBuySolNum,
+      });
+      setVanityWallet(next);
+      setShowVanitySecret(false);
+      setVanityMessage("EMBR deploy wallet generated. Fund it, then click Deploy.");
+    } catch (e) {
+      setError(e?.message || "Failed to generate EMBR deploy wallet.");
+    } finally {
+      setVanityLoading(false);
+    }
+  };
+
+  const submitVanity = async () => {
+    if (!vanityWallet?.reservationId) {
+      setError("Generate an EMBR deploy wallet first.");
+      return;
+    }
+    if (requiresLoginForSubmit) {
+      setError(t("deploy.errors.signInRequired"));
+      return;
+    }
+    if (!vanityWallet?.funded) {
+      setError("Fund the EMBR deploy wallet before deploying.");
+      return;
+    }
+    if (!form.name.trim() || !form.symbol.trim() || !form.description.trim()) {
+      setError(t("deploy.errors.requiredFields"));
+      return;
+    }
+    if (!imageFile) {
+      setError(t("deploy.errors.mediaRequired"));
+      return;
+    }
+    const mediaError = validateDeployMediaFile(imageFile);
+    if (mediaError) {
+      setError(mediaError);
+      return;
+    }
+    if (bannerFile) {
+      const bannerError = validateDeployBannerFile(bannerFile);
+      if (bannerError) {
+        setError(bannerError);
+        return;
+      }
+    }
+
+    setLoading(true);
+    setError("");
+    setResult(null);
+    setDeployStep("Preparing EMBR deploy wallet...");
+    try {
+      const imageDataUri = await fileToDataUri(imageFile);
+      const bannerDataUri = bannerFile ? await fileToDataUri(bannerFile) : "";
+      setDeployStep("Submitting deploy from EMBR wallet...");
+      const deployRes = await apiSubmitVanityDeploy({
+        reservationId: vanityWallet.reservationId,
+        name: form.name.trim(),
+        symbol: form.symbol.trim().toUpperCase().slice(0, 12),
+        description: form.description.trim(),
+        twitter: form.twitter.trim(),
+        telegram: form.telegram.trim(),
+        website: form.website.trim(),
+        initialBuySol: Number(form.initialBuySol || 0),
+        mayhemMode: Boolean(form.mayhemMode),
+        imageDataUri,
+        imageFileName: imageFile?.name || "token-media",
+        bannerDataUri,
+        bannerFileName: bannerFile?.name || "token-banner",
+        autoAttach,
+        selectedBot: autoAttach ? selectedBot : "",
+      });
+
+      if (deployRes?.attachedToken && onAutoAttach) {
+        await onAutoAttach(deployRes.attachedToken);
+      } else if (deployRes?.autoAttached && onAutoAttach) {
+        await onAutoAttach();
+      }
+
+      setVanityWallet((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: "deployed",
+              deployedMint: deployRes?.mint || "",
+              deploySignature: deployRes?.signature || "",
+            }
+          : prev
+      );
+      setResult({
+        mint: deployRes?.mint || "",
+        signature: deployRes?.signature || "",
+        solscanTx: deployRes?.solscanTx || "",
+        solscanMint: deployRes?.solscanMint || "",
+        pumpfunUrl: deployRes?.pumpfunUrl || "",
+        autoAttached: Boolean(deployRes?.autoAttached),
+        postDeployWarning: deployRes?.remainingSol > 0
+          ? `Remaining SOL stays in the EMBR deploy wallet (${Number(deployRes.remainingSol || 0).toFixed(6)} SOL).`
+          : "",
+      });
+    } catch (e) {
+      setError(e?.message || "EMBR wallet deploy failed.");
+    } finally {
+      setDeployStep("");
+      setLoading(false);
+    }
+  };
+
   const labelStyle = {
     display: "block",
     fontSize: 11,
@@ -768,6 +990,35 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
             </div>
             <div style={{fontWeight:800,fontSize:24,color:"#fff",marginBottom:4}}>{t("deploy.launchToken")}</div>
             <div style={{fontSize:12,color:"rgba(255,255,255,.45)"}}>{t("deploy.subtitle")}</div>
+            <div style={{display:"inline-flex",gap:8,marginTop:14,padding:4,borderRadius:999,background:"rgba(255,255,255,.04)",border:"1px solid rgba(255,255,255,.08)"}}>
+              {[
+                { key: "wallet", label: "Wallet Sign" },
+                { key: "embr", label: "EMBR Address" },
+              ].map((tab) => {
+                const active = deployMode === tab.key;
+                return (
+                  <button
+                    key={tab.key}
+                    className={active ? "btn-fire" : "btn-ghost"}
+                    onClick={() => {
+                      setDeployMode(tab.key);
+                      setShowWalletSelect(false);
+                      setError("");
+                      setVanityMessage("");
+                    }}
+                    style={{
+                      padding: "8px 14px",
+                      fontSize: 12,
+                      borderRadius: 999,
+                      minWidth: 116,
+                      opacity: active ? 1 : 0.9,
+                    }}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
 
@@ -951,7 +1202,7 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
           </div>
         </div>
 
-          <div style={{marginTop:12}}>
+        <div style={{marginTop:12}}>
           <label style={labelStyle}>AUTO-ATTACH BOT (OPTIONAL)</label>
           <select
             className="input-f"
@@ -979,6 +1230,113 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
             {t("deploy.afterDeploy")}
           </div>
         </div>
+
+        {deployMode === "embr" && (
+          <div style={{marginTop:12,border:"1px solid rgba(255,106,0,.24)",borderRadius:14,background:"linear-gradient(180deg, rgba(255,106,0,.08), rgba(255,255,255,.02))",padding:"14px 14px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:10}}>
+              <div>
+                <div style={{fontSize:14,fontWeight:800,color:"#fff"}}>Deploy With EMBR Vanity Wallet</div>
+                <div style={{fontSize:12,color:"rgba(255,255,255,.58)",marginTop:4,lineHeight:1.55}}>
+                  Generate an EMBR address, fund the minimum required SOL, then deploy without connecting a wallet. This becomes the real creator wallet for the token.
+                </div>
+              </div>
+              <div
+                style={{
+                  minWidth: 12,
+                  width: 12,
+                  height: 12,
+                  borderRadius: 999,
+                  background: vanityReady ? "#52ffb3" : "rgba(255,255,255,.18)",
+                  boxShadow: vanityReady ? "0 0 18px rgba(82,255,179,.75)" : "none",
+                }}
+              />
+            </div>
+
+            <div style={{background:"rgba(255,64,96,.08)",border:"1px solid rgba(255,64,96,.2)",borderRadius:12,padding:"10px 12px",fontSize:12,color:"rgba(255,230,235,.9)",lineHeight:1.65}}>
+              This wallet is generated for this deploy flow and becomes the actual deployer/creator wallet on-chain. Developer buys and sells from this wallet can show on the chart as creator activity. External deposit and creator-reward bots do not make the bot wallet the token creator. Fund only the amount you are comfortable using for launch. Save the private key immediately. Anyone with that key controls the wallet and any leftover SOL.
+            </div>
+
+            {!vanityWallet && (
+              <div style={{marginTop:12,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+                <div style={{fontSize:12,color:"rgba(255,255,255,.62)",lineHeight:1.6}}>
+                  Minimum funding required: <span style={{color:"#fff",fontWeight:800}}>{(Number(form.initialBuySol || 0) + DEPLOY_VANITY_BUFFER_SOL).toFixed(6)} SOL</span>
+                  <br />
+                  This includes your initial buy plus launch buffer for network and account costs. When this wallet is funded, deploy unlocks automatically.
+                </div>
+                <button className="btn-fire" onClick={reserveVanityWallet} disabled={vanityLoading || loading} style={{padding:"10px 14px",fontSize:12}}>
+                  {vanityLoading ? "Generating..." : "Generate EMBR Wallet"}
+                </button>
+              </div>
+            )}
+
+            {vanityWallet && (
+              <div style={{marginTop:12,display:"grid",gap:12}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:10,alignItems:"start"}}>
+                  <div style={{padding:"12px 12px",borderRadius:12,background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.08)"}}>
+                    <div style={{fontSize:11,color:"rgba(255,255,255,.42)",fontWeight:700,letterSpacing:1,marginBottom:6}}>EMBR DEPLOY ADDRESS</div>
+                    <div style={{fontSize:13,color:"#fff",wordBreak:"break-all",lineHeight:1.6}}>{vanityWallet.deposit}</div>
+                  </div>
+                  <button className="btn-ghost" onClick={() => copyText(vanityWallet.deposit, "Deploy address copied.")} style={{padding:"10px 12px",fontSize:12}}>
+                    Copy
+                  </button>
+                </div>
+
+                <div style={{display:"grid",gridTemplateColumns:"repeat(3, minmax(0,1fr))",gap:10}}>
+                  <div style={{padding:"10px 12px",borderRadius:12,background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.08)"}}>
+                    <div style={{fontSize:11,color:"rgba(255,255,255,.42)",fontWeight:700,letterSpacing:1,marginBottom:6}}>REQUIRED</div>
+                    <div style={{fontSize:16,fontWeight:800,color:"#fff"}}>{Number(vanityWallet.requiredSol || 0).toFixed(6)} SOL</div>
+                  </div>
+                  <div style={{padding:"10px 12px",borderRadius:12,background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.08)"}}>
+                    <div style={{fontSize:11,color:"rgba(255,255,255,.42)",fontWeight:700,letterSpacing:1,marginBottom:6}}>CURRENT BALANCE</div>
+                    <div style={{fontSize:16,fontWeight:800,color:vanityReady ? "#7fffd0" : "#fff"}}>{Number(vanityWallet.balanceSol || 0).toFixed(6)} SOL</div>
+                  </div>
+                  <div style={{padding:"10px 12px",borderRadius:12,background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.08)"}}>
+                    <div style={{fontSize:11,color:"rgba(255,255,255,.42)",fontWeight:700,letterSpacing:1,marginBottom:6}}>STATUS</div>
+                    <div style={{fontSize:14,fontWeight:800,color:vanityReady ? "#7fffd0" : "#ffcf7d"}}>
+                      {vanityReady ? "FUNDED" : "AWAITING FUNDING"}
+                    </div>
+                  </div>
+                </div>
+
+                {!vanityReady && (
+                  <div style={{fontSize:12,color:"rgba(255,255,255,.62)",lineHeight:1.6}}>
+                    Shortfall: <span style={{color:"#fff",fontWeight:800}}>{Number(vanityWallet.shortfallSol || 0).toFixed(6)} SOL</span>
+                  </div>
+                )}
+
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                  <button className="btn-ghost" onClick={refreshVanityWallet} disabled={vanityLoading || loading} style={{padding:"9px 12px",fontSize:12}}>
+                    {vanityLoading ? "Refreshing..." : "Refresh Funding"}
+                  </button>
+                  <button className="btn-ghost" onClick={() => setShowVanitySecret((prev) => !prev)} style={{padding:"9px 12px",fontSize:12}}>
+                    {showVanitySecret ? "Hide Private Key" : "Reveal Private Key"}
+                  </button>
+                </div>
+
+                {showVanitySecret && (
+                  <div style={{display:"grid",gap:10}}>
+                    <div style={{padding:"12px 12px",borderRadius:12,background:"rgba(0,0,0,.28)",border:"1px solid rgba(255,64,96,.22)"}}>
+                      <div style={{fontSize:11,color:"rgba(255,255,255,.42)",fontWeight:700,letterSpacing:1,marginBottom:6}}>PRIVATE KEY (BASE58)</div>
+                      <div style={{fontSize:12,color:"#fff",wordBreak:"break-all",lineHeight:1.6}}>{vanityWallet.privateKeyBase58}</div>
+                    </div>
+                    <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                      <button className="btn-ghost" onClick={() => copyText(vanityWallet.privateKeyBase58, "Private key copied.")} style={{padding:"9px 12px",fontSize:12}}>
+                        Copy Base58
+                      </button>
+                      <button className="btn-ghost" onClick={() => copyText(JSON.stringify(vanityWallet.privateKeyArray || []), "Private key array copied.")} style={{padding:"9px 12px",fontSize:12}}>
+                        Copy JSON Array
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {vanityMessage && (
+                  <div style={{fontSize:12,color:"rgba(158,245,197,.92)",lineHeight:1.6}}>{vanityMessage}</div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
           <div style={{marginTop:12,background:"rgba(255,106,0,.08)",border:"1px solid rgba(255,106,0,.22)",borderRadius:10,padding:"10px 12px",fontSize:12,color:"rgba(255,232,211,.85)",lineHeight:1.55}}>
           {t("deploy.executesThroughPumpfun")}
@@ -1026,12 +1384,28 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
 
         <div className="deploy-actions">
           <button className="btn-ghost" onClick={onClose} style={{padding:"10px 16px",fontSize:13}}>{t("common.close")}</button>
-          <button className="btn-fire" onClick={handleDeployClick} disabled={loading || requiresLoginForSubmit || walletConnecting} style={{padding:"10px 18px",fontSize:13}}>
-            {loading ? t("deploy.deploying") : walletConnecting ? t("deploy.connectingWallet") : t("deploy.deploy")}
+          <button
+            className="btn-fire"
+            onClick={deployMode === "embr" ? submitVanity : handleDeployClick}
+            disabled={
+              loading ||
+              requiresLoginForSubmit ||
+              walletConnecting ||
+              (deployMode === "embr" && (!vanityWallet?.reservationId || !vanityReady))
+            }
+            style={{padding:"10px 18px",fontSize:13}}
+          >
+            {loading
+              ? t("deploy.deploying")
+              : walletConnecting
+                ? t("deploy.connectingWallet")
+                : deployMode === "embr"
+                  ? "Deploy From EMBR Wallet"
+                  : t("deploy.deploy")}
           </button>
         </div>
       </div>
-      {showWalletSelect && (
+      {deployMode === "wallet" && showWalletSelect && (
         <div
           style={{position:"fixed",inset:0,zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center"}}
           onClick={()=>setShowWalletSelect(false)}

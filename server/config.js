@@ -114,6 +114,8 @@ export const config = {
   depositPoolTarget: Number(process.env.DEPOSIT_POOL_TARGET || 20),
   depositPoolRefillIntervalMs: Number(process.env.DEPOSIT_POOL_REFILL_INTERVAL_MS || 15000),
   depositPoolEtaPerAddressSec: Number(process.env.DEPOSIT_POOL_ETA_PER_ADDRESS_SEC || 45),
+  deployVanityBufferSol: Number(process.env.DEPLOY_VANITY_BUFFER_SOL || 0.03),
+  deployVanityReservationMinutes: Number(process.env.DEPLOY_VANITY_RESERVATION_MINUTES || 30),
   depositKeyEncryptionKey: String(process.env.DEPOSIT_KEY_ENCRYPTION_KEY || "").trim(),
   devWalletPrivateKey: parsedDevWallet?.secretKey || null,
   devWalletPublicKey: parsedDevWallet?.publicKey || "",

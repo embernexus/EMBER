@@ -2,12 +2,19 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   apiAuthLogout,
   apiAuthMe,
+  apiDeleteManagerAccess,
+  apiDisconnectTelegramAlerts,
+  apiManagerAccess,
+  apiTelegramAlerts,
+  apiTelegramTestAlert,
   apiCreateToken,
   apiDeleteToken,
   apiDashboard,
   apiBurnWithdraw,
   apiGenerateDepositAddress,
+  apiRestoreToken,
   apiResolveMint,
+  apiTokenDeployWallet,
   apiVolumeSweep,
   apiVolumeWithdraw,
   apiVolumeWithdrawOptions,
@@ -15,6 +22,8 @@ import {
   apiPublicMetrics,
   apiPublicDashboard,
   apiUpdateToken,
+  apiUpdateTelegramAlerts,
+  apiUpsertManagerAccess,
   isApiError,
 } from "./api/client";
 import { EMBER_TOKEN_CONTRACT } from "./config/site";
@@ -54,7 +63,7 @@ function normalizedMint(value) {
 
 export default function App() {
   const [page, setPage] = useState("home");
-  const [user, setUser] = useState(null);
+  const [authUser, setAuthUser] = useState(null);
   const [showLogin, setShowLogin] = useState(false);
   const [showAttach, setShowAttach] = useState(false);
   const [showDeploy, setShowDeploy] = useState(false);
@@ -83,6 +92,7 @@ export default function App() {
     if (!mint || mint === DEFAULT_EMBER_MINT) return "";
     return mint;
   }, []);
+  const username = authUser?.username || null;
 
   const clearPrivateState = useCallback(() => {
     setTokens([]);
@@ -113,7 +123,7 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (!configuredTickerMint || !user) return;
+    if (!configuredTickerMint || !username) return;
     const hasConfiguredToken = tickerSourceTokens.some((t) => normalizedMint(t?.mint) === configuredTickerMint);
     if (hasConfiguredToken) return;
     if (normalizedMint(emberTickerMeta.mint) === configuredTickerMint) return;
@@ -144,7 +154,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [configuredTickerMint, user, tickerSourceTokens, emberTickerMeta.mint]);
+  }, [configuredTickerMint, username, tickerSourceTokens, emberTickerMeta.mint]);
 
   const tickerTokens = useMemo(() => {
     if (!configuredTickerMint) return tickerSourceTokens;
@@ -273,15 +283,15 @@ export default function App() {
         const data = await apiAuthMe();
         if (!mounted) return;
         if (data?.user?.username) {
-          setUser(data.user.username);
+          setAuthUser(data.user);
           setPage("dashboard");
         } else {
-          setUser(null);
+          setAuthUser(null);
           clearPrivateState();
         }
       } catch {
         if (!mounted) return;
-        setUser(null);
+        setAuthUser(null);
         clearPrivateState();
       }
     };
@@ -293,7 +303,7 @@ export default function App() {
   }, [clearPrivateState]);
 
   useEffect(() => {
-    if (!user) return;
+    if (!authUser) return;
     let active = true;
 
     const pull = async () => {
@@ -304,7 +314,7 @@ export default function App() {
         const msg = String(error?.message || "").toLowerCase();
         const unauthorized = msg.includes("unauthorized") || (isApiError(error) && error.status === 401);
         if (unauthorized) {
-          setUser(null);
+          setAuthUser(null);
           clearPrivateState();
           setPage("home");
         }
@@ -317,7 +327,7 @@ export default function App() {
       active = false;
       clearInterval(id);
     };
-  }, [user, loadDashboard, clearPrivateState]);
+  }, [authUser, loadDashboard, clearPrivateState]);
 
   const handleSignOut = useCallback(async () => {
     try {
@@ -325,7 +335,7 @@ export default function App() {
     } catch {
       // best-effort sign-out
     } finally {
-      setUser(null);
+      setAuthUser(null);
       setMenuOpen(false);
       setShowAttach(false);
       setShowDeploy(false);
@@ -333,6 +343,42 @@ export default function App() {
       clearPrivateState();
     }
   }, [clearPrivateState]);
+
+  const handleManagerAccessLoad = useCallback(async () => {
+    return apiManagerAccess();
+  }, []);
+
+  const handleManagerAccessSave = useCallback(async (payload) => {
+    const result = await apiUpsertManagerAccess(payload || {});
+    if (result?.user?.username) {
+      setAuthUser(result.user);
+    }
+    return result;
+  }, []);
+
+  const handleManagerAccessDelete = useCallback(async () => {
+    const result = await apiDeleteManagerAccess();
+    if (result?.user?.username) {
+      setAuthUser(result.user);
+    }
+    return result;
+  }, []);
+
+  const handleTelegramAlertsLoad = useCallback(async () => {
+    return apiTelegramAlerts();
+  }, []);
+
+  const handleTelegramAlertsSave = useCallback(async (payload) => {
+    return apiUpdateTelegramAlerts(payload || {});
+  }, []);
+
+  const handleTelegramAlertsDisconnect = useCallback(async () => {
+    return apiDisconnectTelegramAlerts();
+  }, []);
+
+  const handleTelegramAlertsTest = useCallback(async () => {
+    return apiTelegramTestAlert();
+  }, []);
 
   const handleAttachToken = useCallback(async (payload) => {
     const data = await apiCreateToken(payload);
@@ -388,6 +434,10 @@ export default function App() {
         nextToken.moduleConfig && nextToken.moduleConfig.maxTradeSol !== undefined
           ? Number(nextToken.moduleConfig.maxTradeSol)
           : undefined,
+      targetInventoryPct:
+        nextToken.moduleConfig && nextToken.moduleConfig.targetInventoryPct !== undefined
+          ? Number(nextToken.moduleConfig.targetInventoryPct)
+          : undefined,
     };
     try {
       const data = await apiUpdateToken(nextToken.id, payload);
@@ -432,8 +482,13 @@ export default function App() {
   const handleTokenDelete = useCallback(async (tokenId) => {
     await apiDeleteToken(tokenId);
     await loadDashboard();
+    try {
+      await loadPublicDashboard();
+    } catch {
+      // best effort refresh for ticker/archive state
+    }
     return true;
-  }, [loadDashboard]);
+  }, [loadDashboard, loadPublicDashboard]);
 
   const handleVolumeSweep = useCallback(async (tokenId) => {
     const result = await apiVolumeSweep(tokenId);
@@ -452,6 +507,21 @@ export default function App() {
     await loadDashboard();
     return result;
   }, [loadDashboard]);
+
+  const handleRestoreToken = useCallback(async (tokenId) => {
+    const result = await apiRestoreToken(tokenId);
+    await loadDashboard();
+    try {
+      await loadPublicDashboard();
+    } catch {
+      // best effort refresh for ticker/archive state
+    }
+    return result.token;
+  }, [loadDashboard, loadPublicDashboard]);
+
+  const handleFetchDeployWallet = useCallback(async (tokenId) => {
+    return apiTokenDeployWallet(tokenId);
+  }, []);
 
   const onNavItemClick = useCallback((item) => {
     if (!item.enabled) return;
@@ -487,7 +557,7 @@ export default function App() {
       return;
     }
     if (item.key === "dashboard") {
-      if (!user) {
+      if (!authUser) {
         setShowLogin(true);
         return;
       }
@@ -507,7 +577,7 @@ export default function App() {
         document.getElementById("how-it-works")?.scrollIntoView({ behavior: "smooth" });
       }, 30);
     }
-  }, [user]);
+  }, [authUser]);
 
   const handleBrandClick = useCallback(() => {
     setMenuOpen(false);
@@ -522,7 +592,7 @@ export default function App() {
 
       <NavBar
         page={page}
-        user={user}
+        user={authUser}
         menuOpen={menuOpen}
         onToggleMenu={() => setMenuOpen((m) => !m)}
         onSignOut={handleSignOut}
@@ -540,7 +610,7 @@ export default function App() {
           heroWord={heroWord}
           publicMetrics={publicMetrics}
           onShowLogin={() => {
-            if (user) {
+            if (authUser) {
               setPage("dashboard");
               return;
             }
@@ -563,9 +633,9 @@ export default function App() {
       {page === "whitepaper" && <WhitepaperPage />}
       {page === "updates" && <DevLogsPage />}
 
-      {page === "dashboard" && user && (
+      {page === "dashboard" && authUser && (
         <DashboardPage
-          user={user}
+          user={authUser}
           tokens={tokensForUi}
           allLogs={allLogs}
           chartData={chartData}
@@ -573,11 +643,20 @@ export default function App() {
           onShowAttach={() => setShowAttach(true)}
           onUpdateToken={handleTokenUpdate}
           onDeleteToken={handleTokenDelete}
+          onRestoreToken={handleRestoreToken}
           onFetchTokenDetails={apiTokenLiveDetails}
+          onFetchDeployWallet={handleFetchDeployWallet}
           onFetchVolumeWithdrawOptions={apiVolumeWithdrawOptions}
           onVolumeSweep={handleVolumeSweep}
           onVolumeWithdraw={handleVolumeWithdraw}
           onBurnWithdraw={handleBurnWithdraw}
+          onLoadManagerAccess={handleManagerAccessLoad}
+          onSaveManagerAccess={handleManagerAccessSave}
+          onDeleteManagerAccess={handleManagerAccessDelete}
+          onLoadTelegramAlerts={handleTelegramAlertsLoad}
+          onSaveTelegramAlerts={handleTelegramAlertsSave}
+          onDisconnectTelegramAlerts={handleTelegramAlertsDisconnect}
+          onSendTelegramTestAlert={handleTelegramAlertsTest}
         />
       )}
 
@@ -587,8 +666,8 @@ export default function App() {
       {showLogin && (
         <LoginModal
           onClose={() => setShowLogin(false)}
-          onLogin={async (username) => {
-            setUser(username);
+          onLogin={async (user) => {
+            setAuthUser(user);
             setShowLogin(false);
             setShowDeploy(false);
             setPage("dashboard");
@@ -612,7 +691,7 @@ export default function App() {
       {showDeploy && (
         <DeployModal
           onClose={() => setShowDeploy(false)}
-          user={user}
+          user={username}
           onRequireLogin={() => setShowLogin(true)}
           onGoDashboard={() => {
             setShowDeploy(false);

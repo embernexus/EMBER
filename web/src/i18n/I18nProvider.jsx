@@ -134,6 +134,7 @@ export function I18nProvider({ children }) {
     let destroyed = false;
     let muting = false;
     let persistTimer = null;
+    let restoreTimer = null;
 
     const withMute = (fn) => {
       muting = true;
@@ -317,7 +318,15 @@ export function I18nProvider({ children }) {
     };
 
     scan(root);
-    restoreEnglishPhase = false;
+    if (restoreEnglishPhase) {
+      // Keep the restore guard active briefly so React can finish repainting
+      // English content before we allow the original-text cache to change again.
+      restoreTimer = window.setTimeout(() => {
+        restoreEnglishPhase = false;
+      }, 250);
+    } else {
+      restoreEnglishPhase = false;
+    }
 
     const observer = new MutationObserver((mutations) => {
       if (destroyed || muting) return;
@@ -346,6 +355,7 @@ export function I18nProvider({ children }) {
       destroyed = true;
       observer.disconnect();
       if (persistTimer) window.clearTimeout(persistTimer);
+      if (restoreTimer) window.clearTimeout(restoreTimer);
     };
   }, [locale]);
 

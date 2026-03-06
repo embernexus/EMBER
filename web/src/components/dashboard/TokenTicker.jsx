@@ -18,7 +18,13 @@ function activeStatus(token) {
   if (!token?.active) return "PAUSED";
   if (bot === "volume") return "VOLUME";
   if (bot === "market_maker") return "MM";
+  if (bot === "dca") return "DCA";
+  if (bot === "rekindle") return "REKINDLE";
   return "BURNING";
+}
+
+function isTradeBot(bot) {
+  return ["volume", "market_maker", "dca", "rekindle"].includes(String(bot || ""));
 }
 
 function fmtMarketCap(value) {
@@ -70,7 +76,7 @@ export default function TokenTicker({ tokens }) {
             >
               {(() => {
                 const bot = String(t?.selectedBot || t?.moduleType || "burn");
-                const metric = bot === "volume"
+                const metric = isTradeBot(bot)
                   ? { icon: "\u{1F504}", value: fmt(t.txCount), label: "tx" }
                   : { icon: "\u{1F525}", value: fmt(t.burned), label: "" };
                 return (

@@ -87,6 +87,40 @@ export default function HomePage({ heroWord, publicMetrics, onShowLogin }) {
           {t("home.subtitle")}
         </p>
 
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center", maxWidth: 760, marginBottom: 26 }}>
+          {[
+            "Burn Bot",
+            "Volume Bot",
+            "Market Maker",
+            "DCA Bot",
+            "Rekindle Bot",
+            "Telegram Alerts",
+            "Creator Rewards / External Funding / Hybrid",
+            "Manager Access",
+          ].map((item) => (
+            <div
+              key={item}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 999,
+                background: "rgba(255,255,255,.04)",
+                border: "1px solid rgba(255,106,0,.16)",
+                color: "rgba(255,232,214,.84)",
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: 0.6,
+                textTransform: "uppercase",
+              }}
+            >
+              {item}
+            </div>
+          ))}
+        </div>
+
+        <div style={{ maxWidth: 720, marginBottom: 38, fontSize: 12, color: "rgba(255,255,255,.42)", lineHeight: 1.7 }}>
+          Market Maker now runs attached-token two-sided execution with inventory targeting. DCA and Rekindle add recurring accumulation and pullback-triggered buys, and primary accounts can create one manager login for shared operations without granting withdraw, sweep, or delete permissions.
+        </div>
+
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", justifyContent: "center" }}>
           <button className="btn-fire" onClick={onShowLogin} style={{ padding: "15px 38px", fontSize: 15 }}>
             {t("home.getStarted")}

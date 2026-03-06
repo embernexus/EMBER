@@ -18,7 +18,7 @@ export default function LoginModal({onClose,onLogin}) {
       const data = tab === "login"
         ? await apiAuthLogin(f.user.trim(), f.pass)
         : await apiAuthRegister(f.user.trim(), f.pass);
-      onLogin(data?.user?.username || f.user.trim());
+      onLogin(data?.user || { username: f.user.trim() });
     } catch (e) {
       if (isUpgradeRequiredError(e)) {
         setErr(t("login.errors.upgradeRequired"));

@@ -2,12 +2,14 @@ export const BOT_ATTACH_OPTIONS = [
   { value: "", label: "No Auto-Attach" },
   { value: "burn", label: "Burn Bot" },
   { value: "volume", label: "Volume Bot" },
-  { value: "market_maker", label: "Market Maker Bot (Coming Soon)", disabled: true },
-  { value: "more_automation", label: "More automation coming soon", disabled: true },
+  { value: "market_maker", label: "Market Maker Bot" },
+  { value: "dca", label: "DCA Bot" },
+  { value: "rekindle", label: "Rekindle Bot" },
 ];
 
 export const DEPLOY_SLIPPAGE = 10;
 export const DEPLOY_PRIORITY_FEE = 0.0005;
+export const DEPLOY_VANITY_BUFFER_SOL = 0.03;
 export const DEPLOY_RPC_URL = import.meta.env.VITE_SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
 
 export const DEPLOY_IMAGE_MAX_BYTES = 15 * 1024 * 1024;

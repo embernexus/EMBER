@@ -27,6 +27,8 @@ export default function NavBar({
   onBrandClick,
 }) {
   const { t } = useI18n();
+  const username = typeof user === "string" ? user : String(user?.username || "");
+  const isManager = Boolean(user?.role === "manager" || user?.isOperator);
   const [showStatsHover, setShowStatsHover] = useState(false);
   const [statsHoverPos, setStatsHoverPos] = useState(null);
   const [showComingSoonHover, setShowComingSoonHover] = useState(false);
@@ -251,7 +253,7 @@ export default function NavBar({
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "flex-end" }}>
-        {user ? (
+        {username ? (
           <div style={{ position: "relative" }}>
             <button
               onClick={onToggleMenu}
@@ -282,9 +284,14 @@ export default function NavBar({
                   fontWeight: 800,
                 }}
               >
-                {String(user).slice(0, 1).toUpperCase()}
+                {String(username).slice(0, 1).toUpperCase()}
               </div>
-              {user}
+              <span>{username}</span>
+              {isManager && (
+                <span style={{ fontSize: 10, color: "#ffb26b", fontWeight: 800, letterSpacing: 0.6 }}>
+                  MANAGER
+                </span>
+              )}
             </button>
             {menuOpen && (
               <div
@@ -309,8 +316,20 @@ export default function NavBar({
                     borderBottom: "1px solid rgba(255,255,255,.06)",
                   }}
                 >
-                  {t("nav.signedInAs", { user })}
+                  {t("nav.signedInAs", { user: username })}
                 </div>
+                {isManager && (
+                  <div
+                    style={{
+                      padding: "10px 16px",
+                      fontSize: 11,
+                      color: "rgba(255,178,107,.86)",
+                      borderBottom: "1px solid rgba(255,255,255,.06)",
+                    }}
+                  >
+                    Manager access: withdraw, sweep, and delete are disabled.
+                  </div>
+                )}
                 <button
                   onClick={onSignOut}
                   style={{

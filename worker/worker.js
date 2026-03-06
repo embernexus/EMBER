@@ -1,4 +1,5 @@
 import { config } from "../server/config.js";
+import { initDb } from "../server/db.js";
 import { runWorkerTick } from "../server/core.js";
 
 let busy = false;
@@ -42,8 +43,26 @@ async function tick() {
   }
 }
 
+async function initDbWithRetry() {
+  let retryMs = Math.max(3000, Number(process.env.DB_INIT_RETRY_MS || 5000));
+  const maxRetryMs = Math.max(retryMs, Number(process.env.DB_INIT_MAX_RETRY_MS || 60000));
+  while (true) {
+    try {
+      await initDb();
+      console.log("[worker] database initialized");
+      return;
+    } catch (error) {
+      const message = String(error?.message || error);
+      console.warn(`[worker] initDb failed, retrying in ${retryMs}ms: ${message}`);
+      await new Promise((resolve) => setTimeout(resolve, retryMs));
+      retryMs = Math.min(maxRetryMs, Math.floor(retryMs * 1.5));
+    }
+  }
+}
+
 async function start() {
   console.log(`[worker] running every ${config.workerTickMs}ms`);
+  await initDbWithRetry();
   await tick();
   setInterval(tick, config.workerTickMs);
 }

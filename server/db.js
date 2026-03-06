@@ -146,6 +146,38 @@ export function makeSessionToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
+const requiredInitTables = [
+  "users",
+  "tokens",
+  "bot_modules",
+  "user_access_grants",
+  "user_telegram_alert_queue",
+  "deploy_wallet_reservations",
+];
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function areRequiredTablesPresent() {
+  const names = requiredInitTables.map((table) => `public.${table}`);
+  const res = await pool.query("SELECT to_regclass(name) AS regclass FROM unnest($1::text[]) AS name", [names]);
+  return res.rows.every((row) => Boolean(row.regclass));
+}
+
+async function waitForRequiredTables(timeoutMs = 45000, pollMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      if (await areRequiredTablesPresent()) return true;
+    } catch {
+      // best effort while another process is still initializing
+    }
+    await wait(pollMs);
+  }
+  return false;
+}
+
 export async function initDb() {
   const lockClient = await pool.connect();
   const initLockKey = "884420002777";
@@ -154,7 +186,11 @@ export async function initDb() {
     const lockRes = await lockClient.query("SELECT pg_try_advisory_lock($1::bigint) AS ok", [initLockKey]);
     acquired = Boolean(lockRes.rows[0]?.ok);
     if (!acquired) {
-      console.log("[db] init already running in another process; skipping duplicate init");
+      console.log("[db] init already running in another process; waiting for schema");
+      const ready = await waitForRequiredTables();
+      if (!ready) {
+        throw new Error("database init wait timed out before required tables were ready");
+      }
       return;
     }
 
@@ -174,6 +210,24 @@ export async function initDb() {
       expires_at TIMESTAMPTZ NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_access_grants (
+      id BIGSERIAL PRIMARY KEY,
+      owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      grantee_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role TEXT NOT NULL DEFAULT 'manager',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (owner_user_id),
+      UNIQUE (grantee_user_id),
+      CHECK (owner_user_id <> grantee_user_id)
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_user_access_grants_owner
+    ON user_access_grants(owner_user_id);
   `);
 
   await pool.query(`
@@ -221,6 +275,21 @@ export async function initDb() {
   `);
 
   await pool.query(`
+    ALTER TABLE tokens
+    ADD COLUMN IF NOT EXISTS deployed_via_ember BOOLEAN NOT NULL DEFAULT FALSE;
+  `);
+
+  await pool.query(`
+    ALTER TABLE tokens
+    ADD COLUMN IF NOT EXISTS deploy_wallet_pubkey TEXT;
+  `);
+
+  await pool.query(`
+    ALTER TABLE tokens
+    ADD COLUMN IF NOT EXISTS deploy_wallet_secret_key_base58 TEXT;
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS token_deposit_keys (
       token_id TEXT PRIMARY KEY REFERENCES tokens(id) ON DELETE CASCADE,
       user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -253,6 +322,34 @@ export async function initDb() {
 
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_token_deposit_pool_reserved_user_id ON token_deposit_pool(reserved_user_id);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS deploy_wallet_reservations (
+      id TEXT PRIMARY KEY,
+      user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+      deposit_pubkey TEXT NOT NULL UNIQUE,
+      secret_key_base58 TEXT NOT NULL,
+      required_lamports BIGINT NOT NULL,
+      balance_lamports BIGINT NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'reserved',
+      last_error TEXT,
+      expires_at TIMESTAMPTZ NOT NULL,
+      deployed_mint TEXT,
+      deploy_signature TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_deploy_wallet_reservations_status
+    ON deploy_wallet_reservations(status, created_at DESC);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_deploy_wallet_reservations_user
+    ON deploy_wallet_reservations(user_id, created_at DESC);
   `);
 
   await pool.query(`
@@ -329,6 +426,83 @@ export async function initDb() {
     )
     VALUES (1, 0, 0, 0, 0, 0)
     ON CONFLICT (id) DO NOTHING;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_telegram_links (
+      user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      chat_id BIGINT NOT NULL UNIQUE,
+      telegram_username TEXT,
+      first_name TEXT,
+      last_name TEXT,
+      is_connected BOOLEAN NOT NULL DEFAULT TRUE,
+      connected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_telegram_connect_tokens (
+      token TEXT PRIMARY KEY,
+      user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      consumed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_user_telegram_connect_tokens_user
+    ON user_telegram_connect_tokens(user_id, expires_at DESC);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_telegram_alert_prefs (
+      user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      delivery_mode TEXT NOT NULL DEFAULT 'smart',
+      digest_interval_min INTEGER NOT NULL DEFAULT 15,
+      alert_deposit BOOLEAN NOT NULL DEFAULT TRUE,
+      alert_claim BOOLEAN NOT NULL DEFAULT TRUE,
+      alert_burn BOOLEAN NOT NULL DEFAULT TRUE,
+      alert_trade BOOLEAN NOT NULL DEFAULT FALSE,
+      alert_error BOOLEAN NOT NULL DEFAULT TRUE,
+      alert_status BOOLEAN NOT NULL DEFAULT TRUE,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_telegram_alert_queue (
+      id BIGSERIAL PRIMARY KEY,
+      user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_id TEXT,
+      token_symbol TEXT,
+      module_type TEXT,
+      event_type TEXT NOT NULL,
+      amount NUMERIC NOT NULL DEFAULT 0,
+      message TEXT NOT NULL,
+      tx TEXT,
+      delivery_kind TEXT NOT NULL,
+      digest_key TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      scheduled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      sent_at TIMESTAMPTZ,
+      error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_user_telegram_alert_queue_due
+    ON user_telegram_alert_queue(status, scheduled_at, delivery_kind);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_user_telegram_alert_queue_digest
+    ON user_telegram_alert_queue(user_id, digest_key, status);
   `);
 
   await pool.query(`
@@ -498,6 +672,12 @@ export async function initDb() {
   await pool.query(`
     CREATE OR REPLACE TRIGGER trg_protocol_fee_credits_updated_at
     BEFORE UPDATE ON protocol_fee_credits
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  `);
+
+  await pool.query(`
+    CREATE OR REPLACE TRIGGER trg_deploy_wallet_reservations_updated_at
+    BEFORE UPDATE ON deploy_wallet_reservations
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   `);
   } finally {

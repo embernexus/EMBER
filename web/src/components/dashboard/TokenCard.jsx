@@ -46,13 +46,21 @@ function maskAddress(addr) {
 function botModeName(bot) {
   if (bot === "volume") return "Volume Bot";
   if (bot === "market_maker") return "Market Maker Bot";
+  if (bot === "dca") return "DCA Bot";
+  if (bot === "rekindle") return "Rekindle Bot";
   return "Burn Bot";
 }
 
 function botModeUpper(bot) {
   if (bot === "volume") return "VOLUME";
   if (bot === "market_maker") return "MM";
+  if (bot === "dca") return "DCA";
+  if (bot === "rekindle") return "REKINDLE";
   return "BURN";
+}
+
+function isTradeBot(bot) {
+  return ["volume", "market_maker", "dca", "rekindle"].includes(bot);
 }
 
 function runningLabel(bot, active, disconnected) {
@@ -60,6 +68,8 @@ function runningLabel(bot, active, disconnected) {
   if (!active) return `${botModeUpper(bot)} PAUSED`;
   if (bot === "volume") return "VOLUME RUNNING";
   if (bot === "market_maker") return "MM RUNNING";
+  if (bot === "dca") return "DCA RUNNING";
+  if (bot === "rekindle") return "REKINDLING";
   return "BURNING";
 }
 
@@ -83,6 +93,7 @@ function normalizeTokenState(token) {
       aggression: Math.max(0, Math.min(100, toNum(moduleConfig.aggression, 35))),
       minTradeSol: Math.max(0.001, toNum(moduleConfig.minTradeSol, 0.01)),
       maxTradeSol: Math.max(0.001, toNum(moduleConfig.maxTradeSol, 0.05)),
+      targetInventoryPct: Math.max(20, Math.min(80, toNum(moduleConfig.targetInventoryPct, 50))),
     },
   };
 }
@@ -286,7 +297,7 @@ function LiveLogsPanel({ token, logs, details, detailsLoading, detailsError, onR
   const depositAddr = String(addresses.find((a) => String(a.type) === "deposit")?.pubkey || token.deposit || "");
   const creatorRewardsHref = String(creatorRewards?.profileUrl || pumpCreatorRewardsUrl(depositAddr));
   const burnCycleCount = tokenLogs.filter((l) => String(l.type) === "burn").length;
-  const cycleCount = bot === "volume"
+  const cycleCount = isTradeBot(bot)
     ? tokenLogs.filter((l) => ["buy", "sell", "claim"].includes(String(l.type))).length
     : burnCycleCount;
 
@@ -358,8 +369,8 @@ function LiveLogsPanel({ token, logs, details, detailsLoading, detailsError, onR
             </div>
           </div>
           <div style={{ background: "rgba(255,255,255,.03)", borderRadius: 8, padding: "9px 10px" }}>
-            <div style={{ fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 0.5, marginBottom: 4 }}>{bot === "volume" ? "TOTAL TX" : "TOTAL TOKENS BURNED"}</div>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>{bot === "volume" ? fmtFull(token.txCount) : fmt(token.burned)}</div>
+            <div style={{ fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 0.5, marginBottom: 4 }}>{isTradeBot(bot) ? "TOTAL TX" : "TOTAL TOKENS BURNED"}</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>{isTradeBot(bot) ? fmtFull(token.txCount) : fmt(token.burned)}</div>
             <div style={{ fontSize: 10, color: "rgba(255,255,255,.3)", marginTop: 2 }}>Total cycles: {fmtFull(cycleCount)}</div>
           </div>
         </div>
@@ -407,11 +418,15 @@ export default function TokenCard({
   onUpdate,
   allLogs,
   onDelete,
+  onRestore,
   onFetchDetails,
+  onFetchDeployWallet,
   onFetchVolumeWithdrawOptions,
   onVolumeSweep,
   onVolumeWithdraw,
   onBurnWithdraw,
+  canManageFunds = true,
+  canDelete = true,
 }) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState("overview");
@@ -434,6 +449,10 @@ export default function TokenCard({
   const [withdrawOptions, setWithdrawOptions] = useState(null);
   const [actionMsg, setActionMsg] = useState("");
   const [optimisticActive, setOptimisticActive] = useState(null);
+  const [restoring, setRestoring] = useState(false);
+  const [deployWalletLoading, setDeployWalletLoading] = useState(false);
+  const [deployWalletInfo, setDeployWalletInfo] = useState(null);
+  const [showDeployWalletSecret, setShowDeployWalletSecret] = useState(false);
   const clamp01 = (v) => Math.max(0.001, Number(v) || 0.001);
   const deriveMaxTradeSol = (minTrade, aggression) => {
     const min = clamp01(minTrade);
@@ -460,7 +479,12 @@ export default function TokenCard({
   }, [token.id]);
 
   useEffect(() => {
-    if (String(local.selectedBot || "burn") !== "volume") return;
+    setDeployWalletInfo(null);
+    setShowDeployWalletSecret(false);
+  }, [token.id]);
+
+  useEffect(() => {
+    if (!isTradeBot(String(local.selectedBot || "burn"))) return;
     const derived = deriveMaxTradeSol(local.moduleConfig.minTradeSol, local.moduleConfig.aggression);
     if (Math.abs(Number(local.moduleConfig.maxTradeSol || 0) - derived) < 0.0005) return;
     setLocal((prev) => ({
@@ -502,11 +526,29 @@ export default function TokenCard({
     };
   }, [open, showLiveLogs, fetchDetails]);
 
-  const isVolumeMode = String(local.selectedBot || "burn") === "volume";
+  const selectedBotMode = String(local.selectedBot || "burn");
+  const isVolumeMode = selectedBotMode === "volume";
+  const isMarketMakerMode = selectedBotMode === "market_maker";
+  const isDcaMode = selectedBotMode === "dca";
+  const isRekindleMode = selectedBotMode === "rekindle";
   const currentActive =
     optimisticActive === null ? Boolean(token.active) : Boolean(optimisticActive);
-  const cycleSeconds = isVolumeMode
-    ? Math.max(3, 25 - Math.round((toNum(local.moduleConfig.speed, 35) / 100) * 20))
+  const cycleSeconds = isTradeBot(selectedBotMode)
+    ? Math.max(
+        4,
+        Math.floor(
+          toNum(
+            local.moduleConfig.cycleIntervalSec,
+            isVolumeMode
+              ? Math.max(3, 25 - Math.round((toNum(local.moduleConfig.speed, 35) / 100) * 20))
+              : isMarketMakerMode
+                ? Math.max(4, 22 - Math.round(toNum(local.moduleConfig.aggression, 45) * 0.16))
+                : isDcaMode
+                  ? Math.max(20, 180 - Math.round(toNum(local.moduleConfig.aggression, 35) * 1.2))
+                  : Math.max(20, 110 - Math.round(toNum(local.moduleConfig.aggression, 42) * 0.5))
+          )
+        )
+      )
     : local.burnSec;
   const tokenLogs = Array.isArray(allLogs) ? allLogs : [];
   const tokenLogCount = useMemo(() => tokenLogs.filter((l) => l.tokenId === token.id).length, [tokenLogs, token.id]);
@@ -533,12 +575,13 @@ export default function TokenCard({
         aggression: Math.max(0, Math.min(100, toNum(local.moduleConfig.aggression, 35))),
         minTradeSol: Math.max(0.001, toNum(local.moduleConfig.minTradeSol, 0.01)),
         maxTradeSol: Math.max(0.001, toNum(local.moduleConfig.maxTradeSol, 0.05)),
+        targetInventoryPct: Math.max(20, Math.min(80, toNum(local.moduleConfig.targetInventoryPct, 50))),
       };
       if (nextModuleConfig.maxTradeSol < nextModuleConfig.minTradeSol) {
         nextModuleConfig.maxTradeSol = nextModuleConfig.minTradeSol;
       }
       const expectedWalletCount =
-        String(local.selectedBot || "burn") === "volume"
+        isTradeBot(String(local.selectedBot || "burn"))
           ? Math.max(1, Math.min(5, Math.floor(toNum(nextModuleConfig.tradeWalletCount, 1))))
           : null;
       await onUpdate({
@@ -607,6 +650,10 @@ export default function TokenCard({
   };
 
   const handleDelete = async () => {
+    if (!canDelete) {
+      setErr("Managers cannot delete bots.");
+      return;
+    }
     if (typeof onDelete !== "function") return;
     setErr("");
     setDeleting(true);
@@ -620,8 +667,52 @@ export default function TokenCard({
     }
   };
 
+  const handleRestore = async (e) => {
+    e.stopPropagation();
+    if (typeof onRestore !== "function") return;
+    if (!canDelete) {
+      setErr("Managers cannot restore archived bots.");
+      return;
+    }
+    setErr("");
+    setActionMsg("");
+    setRestoring(true);
+    try {
+      await onRestore(token.id);
+      setActionMsg("Token restored in paused mode.");
+    } catch (error) {
+      setErr(error?.message || "Unable to restore token.");
+    } finally {
+      setRestoring(false);
+    }
+  };
+
+  const handleFetchSavedDeployWallet = async (e) => {
+    e.stopPropagation();
+    if (typeof onFetchDeployWallet !== "function") return;
+    if (!canManageFunds) {
+      setErr("Manager access cannot reveal EMBR deploy wallet keys.");
+      return;
+    }
+    setErr("");
+    setDeployWalletLoading(true);
+    try {
+      const data = await onFetchDeployWallet(token.id);
+      setDeployWalletInfo(data);
+      setShowDeployWalletSecret(true);
+    } catch (error) {
+      setErr(error?.message || "Unable to load saved EMBR deploy wallet.");
+    } finally {
+      setDeployWalletLoading(false);
+    }
+  };
+
   const handleBurnWithdraw = async (e) => {
     e.stopPropagation();
+    if (!canManageFunds) {
+      setErr("Managers cannot withdraw bot funds.");
+      return;
+    }
     if (typeof onBurnWithdraw !== "function") return;
     if (bot !== "burn" || isDisconnected) return;
     const input = window.prompt("Destination wallet for burn-bot withdrawal:");
@@ -668,6 +759,7 @@ export default function TokenCard({
   const deleteReason = hasKnownFunds
     ? "Cannot delete while funds remain on deposit or trade wallets."
     : "Deleting keeps this token in your ticker and marks it as disconnected.";
+  const deployWalletPubkey = String(token.deployWalletPubkey || deployWalletInfo?.publicKey || "");
 
   return (
     <>
@@ -703,7 +795,7 @@ export default function TokenCard({
             </div>
             <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
               {[
-                ...(bot === "volume" ? [] : [["BURNED", fmt(token.burned), "#ff8c42"]]),
+                ...(isTradeBot(bot) ? [] : [["BURNED", fmt(token.burned), "#ff8c42"]]),
                 ["TXS", fmtFull(token.txCount), "rgba(255,255,255,.6)"],
                 ["BOT", botModeUpper(bot), "rgba(255,255,255,.65)"],
               ].map(([label, value, color]) => (
@@ -721,16 +813,32 @@ export default function TokenCard({
               <button
                 className="btn-ghost"
                 onClick={handleBurnWithdraw}
-                disabled={saving || withdrawing || isDisconnected || isActive}
+                disabled={saving || withdrawing || isDisconnected || isActive || !canManageFunds}
                 style={{
                   padding: "6px 14px",
                   fontSize: 12,
-                  opacity: (isDisconnected || isActive) ? 0.55 : 1,
-                  cursor: (isDisconnected || isActive) ? "not-allowed" : "pointer",
+                  opacity: (isDisconnected || isActive || !canManageFunds) ? 0.55 : 1,
+                  cursor: (isDisconnected || isActive || !canManageFunds) ? "not-allowed" : "pointer",
                 }}
-                title={isActive ? "Pause the burn bot before withdrawing." : "Withdraw remaining SOL from burn deposit wallet."}
+                title={!canManageFunds ? "Manager access cannot withdraw funds." : isActive ? "Pause the burn bot before withdrawing." : "Withdraw remaining SOL from burn deposit wallet."}
               >
                 {withdrawing ? "Withdrawing..." : "Withdraw"}
+              </button>
+            )}
+            {isDisconnected && (
+              <button
+                className="btn-fire"
+                onClick={handleRestore}
+                disabled={restoring || !canDelete}
+                style={{
+                  padding: "6px 14px",
+                  fontSize: 12,
+                  opacity: !canDelete ? 0.55 : 1,
+                  cursor: !canDelete ? "not-allowed" : "pointer",
+                }}
+                title={!canDelete ? "Manager access cannot restore archived bots." : "Restore this archived token in paused mode."}
+              >
+                {restoring ? "Restoring..." : "Re-enable"}
               </button>
             )}
             <button className="btn-ghost" onClick={toggle} disabled={saving || isDisconnected} style={{ padding: "6px 14px", fontSize: 12, opacity: isDisconnected ? 0.55 : 1, cursor: isDisconnected ? "not-allowed" : "pointer" }}>
@@ -830,6 +938,87 @@ export default function TokenCard({
                     )}
                   </div>
 
+                  {Boolean(token.deployedViaEmber) && (
+                    <div style={{ background: "rgba(255,106,0,.05)", borderRadius: 8, padding: "12px 12px", border: "1px solid rgba(255,106,0,.18)" }}>
+                      <div style={{ fontSize: 10, color: "rgba(255,255,255,.3)", marginBottom: 6, fontWeight: 600, letterSpacing: 0.5 }}>EMBR DEPLOY WALLET</div>
+                      <div style={{ fontSize: 12, color: "rgba(255,255,255,.78)", lineHeight: 1.6, marginBottom: 8 }}>
+                        This token was launched from an EMBR vanity wallet. Buys and sells from that wallet can appear on-chart as developer activity because it is the creator wallet, not an external reward/deposit bot wallet.
+                      </div>
+                      {deployWalletPubkey ? (
+                        <div className="mono" style={{ fontSize: 11, color: "#fff", wordBreak: "break-all", lineHeight: 1.6, marginBottom: 8 }}>
+                          <AddrLink addr={deployWalletPubkey} label={deployWalletPubkey} />
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: 11, color: "rgba(255,255,255,.45)", marginBottom: 8 }}>
+                          Saved deploy wallet address will appear here after the token is stored from EMBR deploy.
+                        </div>
+                      )}
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        {canManageFunds && (
+                          <button
+                            className="btn-ghost"
+                            onClick={handleFetchSavedDeployWallet}
+                            disabled={deployWalletLoading}
+                            style={{ padding: "6px 12px", fontSize: 11 }}
+                          >
+                            {deployWalletLoading ? "Loading Key..." : deployWalletInfo ? "Refresh Saved Key" : "Reveal Saved Key"}
+                          </button>
+                        )}
+                        {deployWalletPubkey && (
+                          <button
+                            className="btn-ghost"
+                            onClick={() => navigator.clipboard.writeText(deployWalletPubkey).catch(() => {})}
+                            style={{ padding: "6px 12px", fontSize: 11 }}
+                          >
+                            Copy Pubkey
+                          </button>
+                        )}
+                      </div>
+                      {showDeployWalletSecret && deployWalletInfo && (
+                        <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
+                          <div style={{ padding: "12px 12px", borderRadius: 10, background: "rgba(0,0,0,.28)", border: "1px solid rgba(255,64,96,.18)" }}>
+                            <div style={{ fontSize: 10, color: "rgba(255,255,255,.38)", marginBottom: 6, fontWeight: 700, letterSpacing: 0.5 }}>PRIVATE KEY (BASE58)</div>
+                            <div className="mono" style={{ fontSize: 11, color: "#fff", wordBreak: "break-all", lineHeight: 1.6 }}>
+                              {deployWalletInfo.privateKeyBase58}
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                            <button
+                              className="btn-ghost"
+                              onClick={() => navigator.clipboard.writeText(deployWalletInfo.privateKeyBase58).catch(() => {})}
+                              style={{ padding: "6px 12px", fontSize: 11 }}
+                            >
+                              Copy Base58
+                            </button>
+                            <button
+                              className="btn-ghost"
+                              onClick={() => navigator.clipboard.writeText(JSON.stringify(deployWalletInfo.privateKeyArray || [])).catch(() => {})}
+                              style={{ padding: "6px 12px", fontSize: 11 }}
+                            >
+                              Copy JSON Array
+                            </button>
+                            <button
+                              className="btn-ghost"
+                              onClick={() => setShowDeployWalletSecret(false)}
+                              style={{ padding: "6px 12px", fontSize: 11 }}
+                            >
+                              Hide Key
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {isDisconnected && (
+                    <div style={{ background: "rgba(255,200,0,.08)", borderRadius: 8, padding: "12px 12px", border: "1px solid rgba(255,200,0,.18)" }}>
+                      <div style={{ fontSize: 10, color: "rgba(255,255,255,.32)", marginBottom: 6, fontWeight: 700, letterSpacing: 0.5 }}>ARCHIVED</div>
+                      <div style={{ fontSize: 12, color: "rgba(255,255,255,.76)", lineHeight: 1.6 }}>
+                        This bot is archived on your account. Re-enable restores it in paused mode so you can review settings and start it again when ready.
+                      </div>
+                    </div>
+                  )}
+
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                     {[["Claim Every", fmtSec(token.claimSec)], ["Cycle Every", fmtSec(cycleSeconds)], ["Mode", botModeName(bot)], ["Mint", <AddrLink addr={token.mint} label={token.mint} />]].map(([key, value]) => (
                       <div key={key} style={{ background: "rgba(255,255,255,.03)", borderRadius: 8, padding: "10px 12px" }}>
@@ -871,10 +1060,76 @@ export default function TokenCard({
                           className="input-f"
                           value={local.selectedBot}
                           disabled={currentActive}
-                          onChange={(e) => setLocal((prev) => ({ ...prev, selectedBot: String(e.target.value || "burn") }))}
+                          onChange={(e) =>
+                            setLocal((prev) => {
+                              const nextBot = String(e.target.value || "burn");
+                              if (nextBot === "volume") {
+                                return {
+                                  ...prev,
+                                  selectedBot: nextBot,
+                                  moduleConfig: {
+                                    ...prev.moduleConfig,
+                                    claimEnabled: prev.moduleConfig.claimEnabled ?? false,
+                                    tradeWalletCount: Math.max(1, Math.min(5, toNum(prev.moduleConfig.tradeWalletCount, 1))),
+                                    speed: Math.max(0, Math.min(100, toNum(prev.moduleConfig.speed, 35))),
+                                    aggression: Math.max(0, Math.min(100, toNum(prev.moduleConfig.aggression, 35))),
+                                    minTradeSol: Math.max(0.001, toNum(prev.moduleConfig.minTradeSol, 0.01)),
+                                    maxTradeSol: Math.max(0.001, toNum(prev.moduleConfig.maxTradeSol, 0.05)),
+                                  },
+                                };
+                              }
+                              if (nextBot === "market_maker") {
+                                return {
+                                  ...prev,
+                                  selectedBot: nextBot,
+                                  moduleConfig: {
+                                    ...prev.moduleConfig,
+                                    claimEnabled: prev.moduleConfig.claimEnabled !== false,
+                                    tradeWalletCount: Math.max(1, Math.min(5, toNum(prev.moduleConfig.tradeWalletCount, 2))),
+                                    aggression: Math.max(0, Math.min(100, toNum(prev.moduleConfig.aggression, 45))),
+                                    minTradeSol: Math.max(0.001, toNum(prev.moduleConfig.minTradeSol, 0.01)),
+                                    maxTradeSol: Math.max(0.001, toNum(prev.moduleConfig.maxTradeSol, deriveMaxTradeSol(prev.moduleConfig.minTradeSol, prev.moduleConfig.aggression))),
+                                    targetInventoryPct: Math.max(20, Math.min(80, toNum(prev.moduleConfig.targetInventoryPct, 50))),
+                                  },
+                                };
+                              }
+                              if (nextBot === "dca") {
+                                return {
+                                  ...prev,
+                                  selectedBot: nextBot,
+                                  moduleConfig: {
+                                    ...prev.moduleConfig,
+                                    claimEnabled: prev.moduleConfig.claimEnabled !== false,
+                                    tradeWalletCount: Math.max(1, Math.min(5, toNum(prev.moduleConfig.tradeWalletCount, 1))),
+                                    aggression: Math.max(0, Math.min(100, toNum(prev.moduleConfig.aggression, 35))),
+                                    minTradeSol: Math.max(0.001, toNum(prev.moduleConfig.minTradeSol, 0.01)),
+                                    maxTradeSol: Math.max(0.001, toNum(prev.moduleConfig.maxTradeSol, deriveMaxTradeSol(prev.moduleConfig.minTradeSol, prev.moduleConfig.aggression))),
+                                  },
+                                };
+                              }
+                              if (nextBot === "rekindle") {
+                                return {
+                                  ...prev,
+                                  selectedBot: nextBot,
+                                  moduleConfig: {
+                                    ...prev.moduleConfig,
+                                    claimEnabled: prev.moduleConfig.claimEnabled !== false,
+                                    tradeWalletCount: Math.max(1, Math.min(5, toNum(prev.moduleConfig.tradeWalletCount, 1))),
+                                    aggression: Math.max(0, Math.min(100, toNum(prev.moduleConfig.aggression, 42))),
+                                    minTradeSol: Math.max(0.001, toNum(prev.moduleConfig.minTradeSol, 0.01)),
+                                    maxTradeSol: Math.max(0.001, toNum(prev.moduleConfig.maxTradeSol, deriveMaxTradeSol(prev.moduleConfig.minTradeSol, prev.moduleConfig.aggression))),
+                                  },
+                                };
+                              }
+                              return { ...prev, selectedBot: nextBot };
+                            })
+                          }
                         >
                           <option value="burn">Burn Bot</option>
                           <option value="volume">Volume Bot</option>
+                          <option value="market_maker">Market Maker Bot</option>
+                          <option value="dca">DCA Bot</option>
+                          <option value="rekindle">Rekindle Bot</option>
                         </select>
                         {currentActive && (
                           <div style={{ fontSize: 11, color: "rgba(255,189,120,.82)", marginTop: 6 }}>
@@ -883,7 +1138,7 @@ export default function TokenCard({
                         )}
                       </div>
 
-                      {isVolumeMode ? (
+                      {isTradeBot(selectedBotMode) ? (
                         <>
                           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
                             <div>
@@ -910,18 +1165,61 @@ export default function TokenCard({
                             </div>
                           </div>
 
-                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-                            <div>
-                              <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 7, fontWeight: 600 }}>SPEED ({Math.round(toNum(local.moduleConfig.speed, 35))})</label>
-                              <input type="range" min={0} max={100} className="input-f ember-range" value={local.moduleConfig.speed} onChange={(e) => setLocal((prev) => ({ ...prev, moduleConfig: { ...prev.moduleConfig, speed: Math.max(0, Math.min(100, toNum(e.target.value, prev.moduleConfig.speed))) } }))} />
-                              <div style={{ fontSize: 11, color: "rgba(255,255,255,.35)", marginTop: 6 }}>Executes around every <span className="mono" style={{ color: "#ff9f5a" }}>{speedEverySec(local.moduleConfig.speed)}s</span>.</div>
+                          {isVolumeMode ? (
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                              <div>
+                                <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 7, fontWeight: 600 }}>SPEED ({Math.round(toNum(local.moduleConfig.speed, 35))})</label>
+                                <input type="range" min={0} max={100} className="input-f ember-range" value={local.moduleConfig.speed} onChange={(e) => setLocal((prev) => ({ ...prev, moduleConfig: { ...prev.moduleConfig, speed: Math.max(0, Math.min(100, toNum(e.target.value, prev.moduleConfig.speed))) } }))} />
+                                <div style={{ fontSize: 11, color: "rgba(255,255,255,.35)", marginTop: 6 }}>Executes around every <span className="mono" style={{ color: "#ff9f5a" }}>{speedEverySec(local.moduleConfig.speed)}s</span>.</div>
+                              </div>
+                              <div>
+                                <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 7, fontWeight: 600 }}>AGGRESSION ({Math.round(toNum(local.moduleConfig.aggression, 35))})</label>
+                                <input type="range" min={0} max={100} className="input-f ember-range" value={local.moduleConfig.aggression} onChange={(e) => setLocal((prev) => ({ ...prev, moduleConfig: { ...prev.moduleConfig, aggression: Math.max(0, Math.min(100, toNum(e.target.value, prev.moduleConfig.aggression))), maxTradeSol: deriveMaxTradeSol(prev.moduleConfig.minTradeSol, e.target.value) } }))} />
+                                <div style={{ fontSize: 11, color: "rgba(255,255,255,.35)", marginTop: 6 }}>Max trade auto-tunes to <span className="mono" style={{ color: "#ff9f5a" }}>{Number(local.moduleConfig.maxTradeSol || 0).toFixed(3)} SOL</span>.</div>
+                              </div>
                             </div>
-                            <div>
-                              <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 7, fontWeight: 600 }}>AGGRESSION ({Math.round(toNum(local.moduleConfig.aggression, 35))})</label>
-                              <input type="range" min={0} max={100} className="input-f ember-range" value={local.moduleConfig.aggression} onChange={(e) => setLocal((prev) => ({ ...prev, moduleConfig: { ...prev.moduleConfig, aggression: Math.max(0, Math.min(100, toNum(e.target.value, prev.moduleConfig.aggression))), maxTradeSol: deriveMaxTradeSol(prev.moduleConfig.minTradeSol, e.target.value) } }))} />
-                              <div style={{ fontSize: 11, color: "rgba(255,255,255,.35)", marginTop: 6 }}>Max trade auto-tunes to <span className="mono" style={{ color: "#ff9f5a" }}>{Number(local.moduleConfig.maxTradeSol || 0).toFixed(3)} SOL</span>.</div>
+                          ) : isMarketMakerMode ? (
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                              <div>
+                                <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 7, fontWeight: 600 }}>AGGRESSION ({Math.round(toNum(local.moduleConfig.aggression, 45))})</label>
+                                <input type="range" min={0} max={100} className="input-f ember-range" value={local.moduleConfig.aggression} onChange={(e) => setLocal((prev) => ({ ...prev, moduleConfig: { ...prev.moduleConfig, aggression: Math.max(0, Math.min(100, toNum(e.target.value, prev.moduleConfig.aggression))), maxTradeSol: deriveMaxTradeSol(prev.moduleConfig.minTradeSol, e.target.value) } }))} />
+                                <div style={{ fontSize: 11, color: "rgba(255,255,255,.35)", marginTop: 6 }}>Higher aggression increases cycle pace and order splitting.</div>
+                              </div>
+                              <div>
+                                <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 7, fontWeight: 600 }}>TARGET INVENTORY ({Math.round(toNum(local.moduleConfig.targetInventoryPct, 50))}% token)</label>
+                                <input type="range" min={20} max={80} className="input-f ember-range" value={local.moduleConfig.targetInventoryPct} onChange={(e) => setLocal((prev) => ({ ...prev, moduleConfig: { ...prev.moduleConfig, targetInventoryPct: Math.max(20, Math.min(80, toNum(e.target.value, prev.moduleConfig.targetInventoryPct))) } }))} />
+                                <div style={{ fontSize: 11, color: "rgba(255,255,255,.35)", marginTop: 6 }}>50/50 balances SOL and token inventory. Lower values keep more SOL on hand, higher values keep more token inventory.</div>
+                              </div>
                             </div>
-                          </div>
+                          ) : (
+                            <div>
+                              <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 7, fontWeight: 600 }}>
+                                AGGRESSION ({Math.round(toNum(local.moduleConfig.aggression, isDcaMode ? 35 : 42))})
+                              </label>
+                              <input
+                                type="range"
+                                min={0}
+                                max={100}
+                                className="input-f ember-range"
+                                value={local.moduleConfig.aggression}
+                                onChange={(e) =>
+                                  setLocal((prev) => ({
+                                    ...prev,
+                                    moduleConfig: {
+                                      ...prev.moduleConfig,
+                                      aggression: Math.max(0, Math.min(100, toNum(e.target.value, prev.moduleConfig.aggression))),
+                                      maxTradeSol: deriveMaxTradeSol(prev.moduleConfig.minTradeSol, e.target.value),
+                                    },
+                                  }))
+                                }
+                              />
+                              <div style={{ fontSize: 11, color: "rgba(255,255,255,.35)", marginTop: 6 }}>
+                                {isDcaMode
+                                  ? <>Higher aggression increases recurring buy size and cadence.</>
+                                  : <>Higher aggression buys shallower dips and responds harder when the chart cools off.</>}
+                              </div>
+                            </div>
+                          )}
 
                           <label style={{ display: "inline-flex", alignItems: "center", gap: 10, fontSize: 12, color: "rgba(255,255,255,.72)" }}>
                             <span className="ember-toggle">
@@ -930,6 +1228,21 @@ export default function TokenCard({
                             </span>
                             Enable creator reward claiming
                           </label>
+                          {isMarketMakerMode && (
+                            <div style={{ fontSize: 11, color: "rgba(255,255,255,.38)", marginTop: 2 }}>
+                              MM keeps the attached token near its configured inventory target and biases buy/sell flow around that posture.
+                            </div>
+                          )}
+                          {isDcaMode && (
+                            <div style={{ fontSize: 11, color: "rgba(255,255,255,.38)", marginTop: 2 }}>
+                              DCA steadily accumulates the attached token from rewards, deposits, or both on a recurring cadence.
+                            </div>
+                          )}
+                          {isRekindleMode && (
+                            <div style={{ fontSize: 11, color: "rgba(255,255,255,.38)", marginTop: 2 }}>
+                              Rekindle waits for real pullbacks, then buys the attached token when sell pressure takes over.
+                            </div>
+                          )}
                           <div style={{ fontSize: 11, color: "rgba(255,255,255,.38)", marginTop: 6 }}>
                             Shared/designated creator rewards can appear with delay. Claimable balance may show 0.00 for a few minutes before it updates.
                           </div>
@@ -976,22 +1289,40 @@ export default function TokenCard({
                       </div>
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                         <button className="btn-ghost" onClick={() => setEditing(true)} disabled={isDisconnected} style={{ padding: "8px 18px", fontSize: 12, width: "fit-content", opacity: isDisconnected ? 0.55 : 1, cursor: isDisconnected ? "not-allowed" : "pointer" }}>
-                          {isDisconnected ? "Reattach To Edit" : "Edit Settings"}
+                          {isDisconnected ? "Restore To Edit" : "Edit Settings"}
                         </button>
                         <button className="btn-ghost" onClick={() => setShowLiveLogs(true)} style={{ padding: "8px 18px", fontSize: 12, width: "fit-content" }}>Live Logs</button>
+                        {isDisconnected && (
+                          <button
+                            className="btn-fire"
+                            onClick={handleRestore}
+                            disabled={restoring || !canDelete}
+                            style={{
+                              padding: "8px 18px",
+                              fontSize: 12,
+                              width: "fit-content",
+                              opacity: !canDelete ? 0.55 : 1,
+                              cursor: !canDelete ? "not-allowed" : "pointer",
+                            }}
+                            title={!canDelete ? "Manager access cannot restore archived bots." : undefined}
+                          >
+                            {restoring ? "Restoring..." : "Re-enable"}
+                          </button>
+                        )}
                         <button
                           className="btn-ghost"
                           onClick={() => { void fetchDetails(false); setShowDeleteConfirm(true); }}
-                          disabled={isDisconnected}
+                          disabled={isDisconnected || !canDelete}
                           style={{
                             padding: "8px 18px",
                             fontSize: 12,
                             width: "fit-content",
                             borderColor: "rgba(255,90,90,.3)",
                             color: "#ff9f9f",
-                            opacity: isDisconnected ? 0.55 : 1,
-                            cursor: isDisconnected ? "not-allowed" : "pointer",
+                            opacity: (isDisconnected || !canDelete) ? 0.55 : 1,
+                            cursor: (isDisconnected || !canDelete) ? "not-allowed" : "pointer",
                           }}
+                          title={!canDelete ? "Manager access cannot delete bots." : undefined}
                         >
                           Delete Bot
                         </button>

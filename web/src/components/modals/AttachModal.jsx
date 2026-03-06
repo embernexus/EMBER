@@ -6,7 +6,9 @@ import { fmtSec, solscanAddr } from "../../lib/format";
 const BOT_MODE_OPTIONS = [
   { value: "burn", label: "Burn Bot" },
   { value: "volume", label: "Volume Bot" },
-  { value: "market_maker", label: "Market Maker Bot (Coming Soon)", disabled: true },
+  { value: "market_maker", label: "Market Maker Bot" },
+  { value: "dca", label: "DCA Bot" },
+  { value: "rekindle", label: "Rekindle Bot" },
 ];
 
 const BOT_PRESETS = {
@@ -32,7 +34,37 @@ const BOT_PRESETS = {
     minTradeSol: 0.01,
     maxTradeSol: 0.05,
   },
-  market_maker: { claimSec: 60, burnSec: 180, splits: 4 },
+  market_maker: {
+    claimSec: 90,
+    burnSec: 180,
+    splits: 2,
+    claimEnabled: true,
+    tradeWalletCount: 2,
+    aggression: 45,
+    minTradeSol: 0.01,
+    maxTradeSol: 0.053,
+    targetInventoryPct: 50,
+  },
+  dca: {
+    claimSec: 120,
+    burnSec: 180,
+    splits: 1,
+    claimEnabled: true,
+    tradeWalletCount: 1,
+    aggression: 35,
+    minTradeSol: 0.01,
+    maxTradeSol: 0.035,
+  },
+  rekindle: {
+    claimSec: 120,
+    burnSec: 120,
+    splits: 1,
+    claimEnabled: true,
+    tradeWalletCount: 1,
+    aggression: 42,
+    minTradeSol: 0.01,
+    maxTradeSol: 0.056,
+  },
 };
 
 function AddrLink({addr, label}) {
@@ -77,6 +109,7 @@ export default function AttachModal({onClose,onAttach,onGenerateDeposit}) {
     aggression:35,
     minTradeSol:0.01,
     maxTradeSol:0.05,
+    targetInventoryPct:50,
   });
   const [err,setErr]=useState("");
   const [dep,setDep]=useState("");
@@ -124,7 +157,7 @@ export default function AttachModal({onClose,onAttach,onGenerateDeposit}) {
   },[resolved?.pictureUrl]);
 
   useEffect(()=>{
-    if (f.botMode !== "volume") return;
+    if (!["volume", "market_maker", "dca", "rekindle"].includes(f.botMode)) return;
     const derived = deriveMaxTradeSol(f.minTradeSol, f.aggression);
     if (Math.abs(Number(f.maxTradeSol || 0) - derived) < 0.0005) return;
     setF(prev=>({ ...prev, maxTradeSol: derived }));
@@ -139,7 +172,7 @@ export default function AttachModal({onClose,onAttach,onGenerateDeposit}) {
       if(f.burnSec<60) return setErr(t("attach.errors.intervalMin"));
       if(!Number.isFinite(f.splits)||f.splits<1) return setErr(t("attach.errors.splitMin"));
     }
-    if(f.botMode==="volume"){
+    if(["volume", "market_maker", "dca", "rekindle"].includes(f.botMode)){
       const tw = Math.max(1, Math.min(5, Math.floor(Number(f.tradeWalletCount)||1)));
       const minSol = Number(f.minTradeSol || 0);
       const maxSol = Number(f.maxTradeSol || 0);
@@ -186,10 +219,11 @@ export default function AttachModal({onClose,onAttach,onGenerateDeposit}) {
         splits:normalizedSplits,
         claimEnabled:Boolean(f.claimEnabled),
         tradeWalletCount,
-        speed,
         aggression,
         minTradeSol,
         maxTradeSol,
+        targetInventoryPct: Math.max(20, Math.min(80, Number(f.targetInventoryPct) || 50)),
+        ...(f.botMode === "volume" ? { speed } : {}),
       });
       onClose();
     } catch (e) {
@@ -278,6 +312,7 @@ export default function AttachModal({onClose,onAttach,onGenerateDeposit}) {
                     aggression:preset.aggression ?? prev.aggression,
                     minTradeSol:preset.minTradeSol ?? prev.minTradeSol,
                     maxTradeSol:preset.maxTradeSol ?? prev.maxTradeSol,
+                    targetInventoryPct:preset.targetInventoryPct ?? prev.targetInventoryPct,
                   }));
                 }}
               >
@@ -326,7 +361,7 @@ export default function AttachModal({onClose,onAttach,onGenerateDeposit}) {
                   <div>
                     <label style={{display:"block",fontSize:11,color:"rgba(255,255,255,.35)",letterSpacing:1,marginBottom:7,fontWeight:600}}>TRADE WALLETS</label>
                     <input type="number" min={1} max={5} step={1} className="input-f" value={f.tradeWalletCount} onChange={e=>setF({...f,tradeWalletCount:Math.max(1,Math.min(5,Math.floor(Number(e.target.value)||1)) )})}/>
-                    <div style={{fontSize:10,color:"rgba(255,255,255,.2)",marginTop:4}}>Choose 1 to 5 wallets.</div>
+                    <div style={{fontSize:10,color:"rgba(255,255,255,.2)",marginTop:4}}>Deposit wallet counts as wallet #1.</div>
                   </div>
                 </div>
 
@@ -342,25 +377,49 @@ export default function AttachModal({onClose,onAttach,onGenerateDeposit}) {
                 </div>
 
                 <div>
-                  <label style={{display:"block",fontSize:11,color:"rgba(255,255,255,.35)",letterSpacing:1,marginBottom:7,fontWeight:600}}>SPEED ({Math.round(Number(f.speed)||0)})</label>
-                  <input type="range" min={0} max={100} value={f.speed} className="input-f ember-range" onChange={e=>setF({...f,speed:Number(e.target.value)})}/>
-                  <div style={{fontSize:11,color:"rgba(255,255,255,.35)",marginTop:6}}>Execution pace auto-updates to about every <span className="mono" style={{color:"#ff9f5a"}}>{speedEverySec(f.speed)}s</span>.</div>
-                </div>
-
-                <div>
                   <label style={{display:"block",fontSize:11,color:"rgba(255,255,255,.35)",letterSpacing:1,marginBottom:7,fontWeight:600}}>AGGRESSION ({Math.round(Number(f.aggression)||0)})</label>
                   <input type="range" min={0} max={100} value={f.aggression} className="input-f ember-range" onChange={e=>setF({...f,aggression:Number(e.target.value),maxTradeSol:deriveMaxTradeSol(f.minTradeSol,e.target.value)})}/>
-                  <div style={{fontSize:11,color:"rgba(255,255,255,.35)",marginTop:6}}>Aggression auto-updates max trade size to <span className="mono" style={{color:"#ff9f5a"}}>{Number(f.maxTradeSol||0).toFixed(3)} SOL</span>.</div>
+                  <div style={{fontSize:11,color:"rgba(255,255,255,.35)",marginTop:6}}>
+                    {f.botMode==="volume"
+                      ? <>Aggression auto-updates max trade size to <span className="mono" style={{color:"#ff9f5a"}}>{Number(f.maxTradeSol||0).toFixed(3)} SOL</span>.</>
+                      : f.botMode==="market_maker"
+                        ? <>Higher aggression increases cycle frequency and the number of buy/sell child trades.</>
+                        : f.botMode==="dca"
+                          ? <>Higher aggression increases recurring buy size and cadence.</>
+                          : <>Higher aggression buys shallower dips and increases dip-response size.</>}
+                  </div>
                 </div>
+
+                {f.botMode==="volume" ? (
+                  <div>
+                    <label style={{display:"block",fontSize:11,color:"rgba(255,255,255,.35)",letterSpacing:1,marginBottom:7,fontWeight:600}}>SPEED ({Math.round(Number(f.speed)||0)})</label>
+                    <input type="range" min={0} max={100} value={f.speed} className="input-f ember-range" onChange={e=>setF({...f,speed:Number(e.target.value)})}/>
+                    <div style={{fontSize:11,color:"rgba(255,255,255,.35)",marginTop:6}}>Execution pace auto-updates to about every <span className="mono" style={{color:"#ff9f5a"}}>{speedEverySec(f.speed)}s</span>.</div>
+                  </div>
+                ) : (
+                  <div>
+                    <label style={{display:"block",fontSize:11,color:"rgba(255,255,255,.35)",letterSpacing:1,marginBottom:7,fontWeight:600}}>TARGET INVENTORY ({Math.round(Number(f.targetInventoryPct)||50)}% token)</label>
+                    <input type="range" min={20} max={80} value={f.targetInventoryPct} className="input-f ember-range" onChange={e=>setF({...f,targetInventoryPct:Number(e.target.value)})}/>
+                    <div style={{fontSize:11,color:"rgba(255,255,255,.35)",marginTop:6}}>50/50 keeps balanced inventory. Lower leans more SOL, higher keeps more token inventory for two-sided flow.</div>
+                  </div>
+                )}
 
                 <label style={{display:"inline-flex",alignItems:"center",gap:10,fontSize:12,color:"rgba(255,255,255,.75)"}}>
                   <span className="ember-toggle">
                     <input type="checkbox" checked={Boolean(f.claimEnabled)} onChange={e=>setF({...f,claimEnabled:e.target.checked})}/>
                     <span className="ember-toggle-track" />
                   </span>
-                  Enable creator reward claiming for this volume bot
+                  Enable creator reward claiming for this {(BOT_MODE_OPTIONS.find(opt=>opt.value===f.botMode)?.label || "trade bot").toLowerCase()}
                 </label>
-                <div style={{fontSize:11,color:"rgba(255,255,255,.33)",marginTop:6}}>If disabled, this module runs from external wallet funding only.</div>
+                <div style={{fontSize:11,color:"rgba(255,255,255,.33)",marginTop:6}}>
+                  {f.botMode==="market_maker"
+                    ? "MM holds a target inventory and alternates buy/sell pressure around that target using the attached token only."
+                    : f.botMode==="dca"
+                      ? "DCA steadily accumulates the attached token on a recurring cadence."
+                      : f.botMode==="rekindle"
+                        ? "Rekindle waits for real pullbacks, then buys the attached token when the chart cools off."
+                        : "If disabled, this module runs from external wallet funding only."}
+                </div>
                 <div style={{fontSize:11,color:"rgba(255,255,255,.33)",marginTop:6}}>If creator rewards are shared/designated from another wallet, claimable balance can appear with delay. It may show 0.00 for a few minutes before updating.</div>
               </>
             )}
@@ -395,10 +454,11 @@ export default function AttachModal({onClose,onAttach,onGenerateDeposit}) {
                 ["Token",`$${resolved?.symbol} - ${resolved?.name}`],
                 ["Bot Mode",BOT_MODE_OPTIONS.find(opt=>opt.value===f.botMode)?.label || "Burn Bot"],
                 ["Claim Every",fmtSec(f.claimSec)],
-                ...(f.botMode==="volume"
+                ...(["volume", "market_maker", "dca", "rekindle"].includes(f.botMode)
                   ? [
                       ["Trade Wallets",`${Math.max(1, Math.min(5, Math.floor(Number(f.tradeWalletCount)||1)))}x`],
                       ["Trade Range",`${Number(f.minTradeSol||0).toFixed(3)} - ${Math.max(Number(f.minTradeSol||0), Number(f.maxTradeSol||0)).toFixed(3)} SOL`],
+                      ...(f.botMode==="market_maker" ? [["Inventory Target",`${Math.round(Number(f.targetInventoryPct)||50)}% token`]] : []),
                     ]
                   : [
                       ["Burn Every",fmtSec(f.burnSec)],

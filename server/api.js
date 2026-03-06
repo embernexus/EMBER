@@ -13,7 +13,11 @@ import {
   deployToken,
   ensureDepositPool,
   generatePendingDepositAddress,
+  getTelegramAlertSettings,
+  getOperatorAccess,
   getTokenLiveDetails,
+  getTokenDeployWallet,
+  getUserAuthProfile,
   getVolumeWithdrawOptions,
   recordDeployFromChain,
   getPublicMetrics,
@@ -21,11 +25,20 @@ import {
   loginUser,
   resolveMintMetadata,
   registerUser,
+  sendTelegramTestAlert,
   sweepVolumeWallets,
   submitSignedDeployTx,
+  disconnectTelegramAlerts,
   updateToken,
+  updateTelegramAlertSettings,
+  upsertOperatorAccess,
+  reserveVanityDeployWallet,
+  restoreToken,
+  getVanityDeployWalletStatus,
+  submitVanityDeploy,
   withdrawBurnFunds,
   withdrawVolumeFunds,
+  deleteOperatorAccess,
 } from "./core.js";
 import { config } from "./config.js";
 import { initDb } from "./db.js";
@@ -153,6 +166,13 @@ const deployLimiter = createRateLimiter({
   max: 30,
   keyFn: (req) => `${requestIp(req)}:deploy`,
   message: "Too many deploy requests. Please slow down.",
+});
+
+const deployWalletLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 4,
+  keyFn: (req) => `${requestIp(req)}:deploy-wallet`,
+  message: "Too many EMBR deploy wallet requests. Please wait before generating another one.",
 });
 
 app.use(express.json({ limit: "50mb" }));
@@ -399,6 +419,15 @@ app.get("/api/tokens/:id/details", authRequired, async (req, res, next) => {
   }
 });
 
+app.get("/api/tokens/:id/deploy-wallet", authRequired, async (req, res, next) => {
+  try {
+    const data = await getTokenDeployWallet(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/tokens/:id/volume/withdraw-options", authRequired, async (req, res, next) => {
   try {
     const data = await getVolumeWithdrawOptions(req.user.id, req.params.id);
@@ -426,6 +455,73 @@ app.post("/api/tokens/:id/volume/withdraw", authRequired, async (req, res, next)
   }
 });
 
+app.get("/api/auth/manager-access", authRequired, async (req, res, next) => {
+  try {
+    const data = await getOperatorAccess(req.user.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/auth/manager-access", authRequired, async (req, res, next) => {
+  try {
+    const username = req.body?.username;
+    const password = req.body?.password;
+    const data = await upsertOperatorAccess(req.user.id, username, password);
+    const user = await getUserAuthProfile(req.user.id);
+    res.json({ ...data, user });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/auth/manager-access", authRequired, async (req, res, next) => {
+  try {
+    const data = await deleteOperatorAccess(req.user.id);
+    const user = await getUserAuthProfile(req.user.id);
+    res.json({ ...data, user });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/alerts/telegram", authRequired, async (req, res, next) => {
+  try {
+    const data = await getTelegramAlertSettings(req.user.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/alerts/telegram", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await updateTelegramAlertSettings(req.user.id, req.body || {});
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/alerts/telegram/test", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await sendTelegramTestAlert(req.user.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/alerts/telegram", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await disconnectTelegramAlerts(req.user.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/tokens/:id/burn/withdraw", authRequired, async (req, res, next) => {
   try {
     const data = await withdrawBurnFunds(req.user.id, req.params.id, req.body || {});
@@ -439,6 +535,15 @@ app.delete("/api/tokens/:id", authRequired, async (req, res, next) => {
   try {
     const data = await deleteToken(req.user.id, req.params.id);
     res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/tokens/:id/restore", authRequired, async (req, res, next) => {
+  try {
+    const token = await restoreToken(req.user.id, req.params.id);
+    res.json({ token });
   } catch (error) {
     next(error);
   }
@@ -550,6 +655,33 @@ app.post("/api/deploy/pump-trade-local", deployLimiter, authOptional, async (req
 app.post("/api/deploy/submit-signed", deployLimiter, authOptional, async (req, res, next) => {
   try {
     const result = await submitSignedDeployTx(req.body || {});
+    return res.json(result);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/deploy/vanity-reserve", deployWalletLimiter, authOptional, async (req, res, next) => {
+  try {
+    const result = await reserveVanityDeployWallet(req.user?.id || null, req.body || {});
+    return res.json(result);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get("/api/deploy/vanity-reserve/:id", deployLimiter, authOptional, async (req, res, next) => {
+  try {
+    const result = await getVanityDeployWalletStatus(req.params.id);
+    return res.json(result);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/deploy/vanity-submit", deployLimiter, authOptional, async (req, res, next) => {
+  try {
+    const result = await submitVanityDeploy(req.user?.id || null, req.body || {});
     return res.json(result);
   } catch (error) {
     return next(error);

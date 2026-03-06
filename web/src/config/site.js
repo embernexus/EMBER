@@ -23,7 +23,10 @@ export const EMBER_TOKEN_CONTRACT = envOr(
   "EMBEReyhmvbc6hfdFsvkfLf4eb4jdKSoybnbJ8oUzL66"
 );
 
-export const BUY_EMBER_URL = envOr(import.meta.env.VITE_BUY_EMBER_URL, "https://pump.fun");
+export const BUY_EMBER_URL = envOr(
+  import.meta.env.VITE_BUY_EMBER_URL,
+  "https://pump.fun/coin/EMBEReyhmvbc6hfdFsvkfLf4eb4jdKSoybnbJ8oUzL66"
+);
 export const SOLANA_WEBSITE_URL = envOr(import.meta.env.VITE_SOLANA_URL, "https://solana.com");
 export const CREATOR_X_URL = envOr(import.meta.env.VITE_CREATOR_X_URL, "https://x.com/satoshEH_");
 

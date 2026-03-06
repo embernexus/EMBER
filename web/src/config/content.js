@@ -21,7 +21,7 @@ export const HOW_IT_WORKS_STEPS = [
     n: "04",
     icon: "\u{1F504}",
     title: "Strategy Executes",
-    body: "Available balance is executed according to your bot configuration, including burn routing, volume operations, and liquidity strategy actions. Execution logic stays the same whether funds came from rewards, external deposits, or hybrid mode.",
+    body: "Available balance is executed according to your bot configuration. Burn Bot routes buybacks into supply reduction, Volume Bot drives controlled chart activity, Market Maker Bot runs attached-token two-sided execution around a target inventory posture, DCA Bot steadily accumulates, and Rekindle Bot buys real pullbacks on the attached chart.",
   },
   {
     n: "05",
@@ -34,6 +34,12 @@ export const HOW_IT_WORKS_STEPS = [
     icon: "\u{1F4CA}",
     title: "Track Everything On-Chain",
     body: "Every claim, external transfer, swap, and execution action is logged with a real transaction signature you can verify on Solscan. Your dashboard updates in real time with source-aware events so you always know exactly what happened and why.",
+  },
+  {
+    n: "07",
+    icon: "\u{1F465}",
+    title: "Manager Access",
+    body: "Primary accounts can create one secondary manager login for shared operations. Managers can run bots and edit settings, but withdraw, sweep, and delete actions remain locked to the primary account.",
   },
 ];
 
@@ -63,7 +69,11 @@ export const ROADMAP_PHASES = [
     text: "#ffbc74",
     items: [
       "Volume bot v1 (creator rewards, external funding, hybrid funding)",
-      "Market maker bot v1 (spread and liquidity controls)",
+      "Market maker bot (inventory-aware two-sided execution with migration-aware routing)",
+      "DCA bot for recurring attached-token accumulation",
+      "Rekindle bot for pullback-triggered attached-token dip buying",
+      "Manager access (shared secondary login with restricted custody actions)",
+      "Telegram user alerts with smart instant/digest delivery",
       "Other platform integrations",
       "Execution reliability hardening and retry logic",
       "Ops monitoring and alerting for live bot health",
@@ -79,7 +89,7 @@ export const ROADMAP_PHASES = [
     items: [
       "Browser extension v1 (deploy, attach, start/stop, live logs)",
       "Dapp store submission and distribution",
-      "Team features (multi-user access and permissions)",
+      "Expanded shared access beyond single-manager mode",
       "Public API keys and webhook events for integrations",
       "Cross-chain expansion research",
       "Advanced analytics and execution controls",
@@ -102,6 +112,20 @@ export const ROADMAP_PHASES = [
 ];
 
 export const DEV_LOGS = [
+  {
+    version: "v1.4.0",
+    date: "March 6, 2026",
+    channel: "Production",
+    title: "Market Maker + Manager + New Strategy Bots",
+    summary: "Attached-token market making, restricted shared account access, DCA, and Rekindle are now live.",
+    changes: [
+      "Market Maker Bot added with inventory targeting and migration-aware routing.",
+      "DCA Bot added for recurring attached-token accumulation from rewards, deposits, or both.",
+      "Rekindle Bot added for pullback-triggered attached-token buying with cooldown-aware dip handling.",
+      "Primary accounts can provision one manager login with restricted custody permissions.",
+      "Dashboard controls now enforce manager-safe restrictions for withdraw, sweep, and delete.",
+    ],
+  },
   {
     version: "v1.0.0",
     date: "March 4, 2026",
@@ -168,6 +192,7 @@ export const DOC_SECTIONS = [
       "Create account and sign in to unlock Nexus dashboard.",
       "Deploy directly from EMBER or attach an existing Solana token by mint.",
       "Choose module strategy and funding mode per bot, then monitor all on-chain events in real time.",
+      "Primary accounts can optionally add one manager login for shared day-to-day operations without handing over custody actions.",
     ],
   },
   {
@@ -192,8 +217,21 @@ export const DOC_SECTIONS = [
       "Protocol-owned creator rewards are allocated 50% to treasury and 50% to EMBER buyback + burn.",
       "Burn Bot: reward-to-buyback-to-incineration automation.",
       "Volume Bot: controlled market activity for stronger visibility.",
-      "Market Maker Bot: liquidity and spread management profiles.",
+      "Market Maker Bot: attached-token two-sided execution with target inventory control and migration-aware routing.",
+      "DCA Bot: recurring attached-token accumulation with auto-sized recurring buys.",
+      "Rekindle Bot: pullback-triggered attached-token buying with cooldown-aware dip detection.",
       "AI Trading Bot: strategy execution within configured constraints.",
+    ],
+  },
+  {
+    id: "access",
+    title: "Account Access Model",
+    text: "EMBER currently supports a primary account plus one optional manager login. This keeps shared operations simple without introducing a full workspace system yet.",
+    points: [
+      "Primary account retains full control over setup, bot execution, wallet access, and account-level management.",
+      "Manager login can start/stop bots, edit configs, and work from the same dashboard as the owner.",
+      "Manager login cannot withdraw funds, sweep balances, delete tokens, or manage access settings.",
+      "This model is designed for token teams that need shared daily operations without handing over custody permissions.",
     ],
   },
   {
@@ -203,6 +241,7 @@ export const DOC_SECTIONS = [
     points: [
       "Event feed tracks deploy, external funding, creator-reward claims, buybacks, burns, and failures.",
       "Funding-source attribution is preserved in logs so each execution can be traced back to rewards or external deposits.",
+      "Direct Telegram alerts can be connected per login with smart instant/digest delivery controls.",
       "Burn tracker provides charting, token breakdown, and transaction history.",
       "Public metrics endpoint surfaces core protocol telemetry.",
     ],
@@ -213,6 +252,7 @@ export const DOC_SECTIONS = [
     text: "Protocol design prioritizes account isolation, encrypted key custody, and verifiable execution trails.",
     points: [
       "Session-based authentication and per-account token ownership checks.",
+      "Primary/manager separation keeps custody actions limited to the owner account.",
       "Bot/deposit wallets are generated as vanity addresses with EMBR/EMBER prefixes for transparent attribution and branding.",
       "Private keys are encrypted at rest with AES-256-GCM and decrypted only inside backend execution workers for signing.",
       "Per-account wallet ownership is enforced in Postgres so user bot state never mixes between accounts.",
@@ -253,6 +293,10 @@ export const DOC_FAQ = [
     a: "Yes. Multiple token configs can run under one account, each with its own schedules and module settings.",
   },
   {
+    q: "Can I share dashboard access with someone else?",
+    a: "Yes. The primary account can create one manager login. Managers can operate bots and change configs, but cannot withdraw funds, sweep balances, or delete tokens.",
+  },
+  {
     q: "Where can users verify bot activity?",
     a: "On the burn tracker and transaction links to Solscan, where each logged event can be independently validated.",
   },
@@ -288,7 +332,7 @@ export const WHITEPAPER_SECTIONS = [
     title: "2. Problem Statement",
     paragraphs: [
       "Most token teams cannot run institutional-grade execution across burn, liquidity, and volume operations at scale.",
-      "Manual workflows create fragmented execution, inconsistent outcomes, and weak transparency for communities and operators.",
+      "Manual workflows create fragmented execution, inconsistent outcomes, weak transparency for communities, and poor access control when multiple people need to operate the same token.",
     ],
     bullets: [
       "Running many bot types with consistent controls is operationally complex.",
@@ -306,6 +350,7 @@ export const WHITEPAPER_SECTIONS = [
       "Frontend: user auth, token setup, module controls, and execution visibility.",
       "API: account isolation, token config, deploy orchestration, funding-mode policy validation, and event data access.",
       "Worker cluster: burn bots, volume bots, market-maker bots, AI trading bots, and pluggable strategy modules.",
+      "Account model: one primary owner plus one optional restricted manager login.",
       "Database: Postgres source of truth for token state and history.",
       "Deploy path: PumpPortal-backed launch pipeline with metadata upload, mint/tx response, and Pump.fun link output.",
     ],
@@ -324,7 +369,7 @@ export const WHITEPAPER_SECTIONS = [
       "Creator rewards, external funding, or both can be routed into the configured execution pipeline.",
       "External deposits are accepted directly to the module deposit wallet and become execution-ready after policy checks.",
       "When creator claiming is disabled for a module, execution runs external-only and skips claim polling.",
-      "Bots execute actions such as buy, sell, quote management, liquidity balancing, and burn routing.",
+      "Bots execute actions such as buy, sell, inventory rebalancing, liquidity support, and burn routing.",
       "AI trading modules can apply strategy logic within configured execution limits.",
       "Every action is source-tagged, signed, logged, and exposed with a verifiable transaction reference.",
     ],
@@ -342,7 +387,7 @@ export const WHITEPAPER_SECTIONS = [
     ],
     paragraphs2: [
       "These treasury and buyback allocations keep execution infrastructure reliable while adding ongoing burn pressure to the EMBER ecosystem.",
-      "Fee schedules for volume bots, market-maker bots, AI trading bots, and other future modules are not finalized yet and will be published when each module is production-ready.",
+      "Fee schedules for volume bots, market-maker bots, AI trading bots, and other future modules evolve as each module reaches production maturity.",
     ],
   },
   {
@@ -367,6 +412,7 @@ export const WHITEPAPER_SECTIONS = [
     bullets: [
       "Username/password auth with server-side session cookies.",
       "Per-account token limits and ownership isolation.",
+      "Restricted manager access for shared operations without custody rights.",
       "Policy-based execution controls per bot module.",
       "Bot/deposit wallets are generated as EMBR/EMBER vanity addresses for transparent on-chain attribution and branding.",
       "Wallet private keys are encrypted at rest (AES-256-GCM) and decrypted only inside execution workers when signatures are required.",

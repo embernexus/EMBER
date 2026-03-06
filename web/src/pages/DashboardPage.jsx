@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import BurnChart from "../components/BurnChart";
 import LiveFeed from "../components/dashboard/LiveFeed";
 import TokenCard from "../components/dashboard/TokenCard";
@@ -13,14 +14,27 @@ export default function DashboardPage({
   onShowAttach,
   onUpdateToken,
   onDeleteToken,
+  onRestoreToken,
   onFetchTokenDetails,
+  onFetchDeployWallet,
   onFetchVolumeWithdrawOptions,
   onVolumeSweep,
   onVolumeWithdraw,
   onBurnWithdraw,
+  onLoadManagerAccess,
+  onSaveManagerAccess,
+  onDeleteManagerAccess,
+  onLoadTelegramAlerts,
+  onSaveTelegramAlerts,
+  onDisconnectTelegramAlerts,
+  onSendTelegramTestAlert,
 }) {
   const { t } = useI18n();
+  const username = typeof user === "string" ? user : String(user?.username || "");
+  const isManager = Boolean(user?.role === "manager" || user?.isOperator);
+  const canManageAccess = Boolean(user?.canManageAccess);
   const visibleTokens = tokens.filter((t) => !t?.disconnected);
+  const archivedTokens = tokens.filter((t) => t?.disconnected);
   const totalBurned = tokens.reduce((sum, t) => sum + (Number(t.burned) || 0), 0);
   const totalTransactions = tokens.reduce((sum, t) => sum + (Number(t.txCount) || 0), 0);
   const activeCount = visibleTokens.filter((t) => t.active).length;
@@ -41,11 +55,203 @@ export default function DashboardPage({
   const pieOther = tokenBreakdown.slice(5).reduce((sum, t) => sum + t.amount, 0);
   const pieSlices = pieOther > 0 ? [...pieHead, { symbol: "OTHER", amount: pieOther }] : pieHead;
   const pieTotal = pieSlices.reduce((sum, s) => sum + s.amount, 0);
+  const [managerAccess, setManagerAccess] = useState({ enabled: false, username: "" });
+  const [managerForm, setManagerForm] = useState({ username: "", password: "" });
+  const [managerLoading, setManagerLoading] = useState(false);
+  const [managerError, setManagerError] = useState("");
+  const [managerMessage, setManagerMessage] = useState("");
+  const [telegramState, setTelegramState] = useState({
+    connected: false,
+    chatIdMasked: "",
+    telegramUsername: "",
+    botUsername: "",
+    connectUrl: "",
+    prefs: {
+      enabled: false,
+      deliveryMode: "smart",
+      digestIntervalMin: 15,
+      alertDeposit: true,
+      alertClaim: true,
+      alertBurn: true,
+      alertTrade: false,
+      alertError: true,
+      alertStatus: true,
+    },
+  });
+  const [telegramLoading, setTelegramLoading] = useState(false);
+  const [telegramError, setTelegramError] = useState("");
+  const [telegramMessage, setTelegramMessage] = useState("");
+
+  useEffect(() => {
+    if (!canManageAccess || typeof onLoadManagerAccess !== "function") return;
+    let alive = true;
+    (async () => {
+      try {
+        const data = await onLoadManagerAccess();
+        if (!alive) return;
+        setManagerAccess({
+          enabled: Boolean(data?.enabled),
+          username: String(data?.username || ""),
+        });
+        setManagerForm((prev) => ({ ...prev, username: String(data?.username || "") }));
+      } catch (error) {
+        if (!alive) return;
+        setManagerError(error?.message || "Unable to load manager access.");
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [canManageAccess, onLoadManagerAccess]);
+
+  useEffect(() => {
+    if (typeof onLoadTelegramAlerts !== "function") return;
+    let alive = true;
+    (async () => {
+      try {
+        const data = await onLoadTelegramAlerts();
+        if (!alive) return;
+        setTelegramState((prev) => ({
+          ...prev,
+          ...data,
+          prefs: {
+            ...prev.prefs,
+            ...(data?.prefs || {}),
+          },
+        }));
+      } catch (error) {
+        if (!alive) return;
+        setTelegramError(error?.message || "Unable to load Telegram alerts.");
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [onLoadTelegramAlerts]);
+
+  const saveManager = async () => {
+    if (typeof onSaveManagerAccess !== "function") return;
+    setManagerError("");
+    setManagerMessage("");
+    setManagerLoading(true);
+    try {
+      const data = await onSaveManagerAccess(managerForm);
+      setManagerAccess({
+        enabled: Boolean(data?.enabled),
+        username: String(data?.username || managerForm.username || ""),
+      });
+      setManagerForm((prev) => ({ ...prev, password: "" }));
+      setManagerMessage("Manager access saved.");
+    } catch (error) {
+      setManagerError(error?.message || "Unable to save manager access.");
+    } finally {
+      setManagerLoading(false);
+    }
+  };
+
+  const removeManager = async () => {
+    if (typeof onDeleteManagerAccess !== "function") return;
+    setManagerError("");
+    setManagerMessage("");
+    setManagerLoading(true);
+    try {
+      await onDeleteManagerAccess();
+      setManagerAccess({ enabled: false, username: "" });
+      setManagerForm({ username: "", password: "" });
+      setManagerMessage("Manager access removed.");
+    } catch (error) {
+      setManagerError(error?.message || "Unable to remove manager access.");
+    } finally {
+      setManagerLoading(false);
+    }
+  };
+
+  const saveTelegram = async () => {
+    if (typeof onSaveTelegramAlerts !== "function") return;
+    setTelegramError("");
+    setTelegramMessage("");
+    setTelegramLoading(true);
+    try {
+      const data = await onSaveTelegramAlerts(telegramState.prefs);
+      setTelegramState((prev) => ({
+        ...prev,
+        prefs: {
+          ...prev.prefs,
+          ...(data?.prefs || {}),
+        },
+      }));
+      setTelegramMessage("Telegram alerts saved.");
+    } catch (error) {
+      setTelegramError(error?.message || "Unable to save Telegram alerts.");
+    } finally {
+      setTelegramLoading(false);
+    }
+  };
+
+  const refreshTelegram = async () => {
+    if (typeof onLoadTelegramAlerts !== "function") return;
+    setTelegramError("");
+    setTelegramLoading(true);
+    try {
+      const data = await onLoadTelegramAlerts();
+      setTelegramState((prev) => ({
+        ...prev,
+        ...data,
+        prefs: {
+          ...prev.prefs,
+          ...(data?.prefs || {}),
+        },
+      }));
+    } catch (error) {
+      setTelegramError(error?.message || "Unable to refresh Telegram alerts.");
+    } finally {
+      setTelegramLoading(false);
+    }
+  };
+
+  const disconnectTelegram = async () => {
+    if (typeof onDisconnectTelegramAlerts !== "function") return;
+    setTelegramError("");
+    setTelegramMessage("");
+    setTelegramLoading(true);
+    try {
+      await onDisconnectTelegramAlerts();
+      const data = await onLoadTelegramAlerts();
+      setTelegramState((prev) => ({
+        ...prev,
+        ...data,
+        prefs: {
+          ...prev.prefs,
+          ...(data?.prefs || {}),
+        },
+      }));
+      setTelegramMessage("Telegram alerts disconnected.");
+    } catch (error) {
+      setTelegramError(error?.message || "Unable to disconnect Telegram alerts.");
+    } finally {
+      setTelegramLoading(false);
+    }
+  };
+
+  const sendTelegramTest = async () => {
+    if (typeof onSendTelegramTestAlert !== "function") return;
+    setTelegramError("");
+    setTelegramMessage("");
+    setTelegramLoading(true);
+    try {
+      await onSendTelegramTestAlert();
+      setTelegramMessage("Test alert sent.");
+    } catch (error) {
+      setTelegramError(error?.message || "Unable to send Telegram test alert.");
+    } finally {
+      setTelegramLoading(false);
+    }
+  };
 
   return (
     <div style={{ position: "relative", zIndex: 2, maxWidth: 1300, margin: "0 auto", padding: "32px 24px" }}>
       <div style={{ marginBottom: 24, animation: "slideUp .4s ease" }}>
-        <h1 style={{ fontSize: 26, fontWeight: 800, color: "#fff", marginBottom: 4 }}>{t("dashboard.hey", { user })} {"\u{1F525}"}</h1>
+        <h1 style={{ fontSize: 26, fontWeight: 800, color: "#fff", marginBottom: 4 }}>{t("dashboard.hey", { user: username })} {"\u{1F525}"}</h1>
         <p style={{ fontSize: 13, color: "rgba(255,255,255,.3)" }}>{t("dashboard.synced")}</p>
       </div>
 
@@ -94,16 +300,49 @@ export default function DashboardPage({
               allLogs={allLogs}
               onUpdate={onUpdateToken}
               onDelete={onDeleteToken}
+              onRestore={onRestoreToken}
               onFetchDetails={onFetchTokenDetails}
+              onFetchDeployWallet={onFetchDeployWallet}
               onFetchVolumeWithdrawOptions={onFetchVolumeWithdrawOptions}
               onVolumeSweep={onVolumeSweep}
               onVolumeWithdraw={onVolumeWithdraw}
               onBurnWithdraw={onBurnWithdraw}
+              canManageFunds={Boolean(user?.canManageFunds)}
+              canDelete={Boolean(user?.canDelete)}
             />
           ))}
           {!visibleTokens.length && (
             <div className="glass" style={{ padding: "18px 20px", fontSize: 13, color: "rgba(255,255,255,.5)", textAlign: "center" }}>
               No active bots on dashboard. Use Attach to connect a token.
+            </div>
+          )}
+
+          {archivedTokens.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: "#fff" }}>Archived EMBR Tokens</div>
+                <div style={{ fontSize: 12, color: "rgba(255,255,255,.28)" }}>
+                  Archived tokens stay on your account and can be restored in paused mode.
+                </div>
+              </div>
+              {archivedTokens.map((t) => (
+                <TokenCard
+                  key={t.id}
+                  token={t}
+                  allLogs={allLogs}
+                  onUpdate={onUpdateToken}
+                  onDelete={onDeleteToken}
+                  onRestore={onRestoreToken}
+                  onFetchDetails={onFetchTokenDetails}
+                  onFetchDeployWallet={onFetchDeployWallet}
+                  onFetchVolumeWithdrawOptions={onFetchVolumeWithdrawOptions}
+                  onVolumeSweep={onVolumeSweep}
+                  onVolumeWithdraw={onVolumeWithdraw}
+                  onBurnWithdraw={onBurnWithdraw}
+                  canManageFunds={Boolean(user?.canManageFunds)}
+                  canDelete={Boolean(user?.canDelete)}
+                />
+              ))}
             </div>
           )}
 
@@ -211,6 +450,176 @@ export default function DashboardPage({
                 <span style={{ color: "#fff", fontWeight: 700 }}>{v}</span>
               </div>
             ))}
+          </div>
+
+          <div className="glass" style={{ padding: "20px 22px" }}>
+            <div style={{ fontSize: 14, fontWeight: 800, color: "#fff", marginBottom: 10 }}>
+              {canManageAccess ? "Manager Access" : "Access Level"}
+            </div>
+            {canManageAccess ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <div style={{ fontSize: 12, color: "rgba(255,255,255,.45)" }}>
+                  Secondary manager login can run bots and edit configs, but cannot withdraw, sweep, or delete.
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 6, fontWeight: 700 }}>MANAGER USERNAME</label>
+                  <input className="input-f" value={managerForm.username} onChange={(e) => setManagerForm((prev) => ({ ...prev, username: e.target.value }))} />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 6, fontWeight: 700 }}>MANAGER PASSWORD</label>
+                  <input className="input-f" type="password" value={managerForm.password} onChange={(e) => setManagerForm((prev) => ({ ...prev, password: e.target.value }))} placeholder={managerAccess.enabled ? "Set a new password" : "Create a password"} />
+                </div>
+                {managerAccess.enabled && (
+                  <div style={{ fontSize: 11, color: "rgba(255,255,255,.42)" }}>
+                    Active manager: <span style={{ color: "#fff", fontWeight: 700 }}>{managerAccess.username}</span>
+                  </div>
+                )}
+                {managerError && <div style={{ fontSize: 12, color: "#ff8f8f" }}>{managerError}</div>}
+                {managerMessage && <div style={{ fontSize: 12, color: "#7ae7ab" }}>{managerMessage}</div>}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="btn-fire" onClick={saveManager} disabled={managerLoading} style={{ padding: "9px 16px", fontSize: 12 }}>
+                    {managerLoading ? "Saving..." : managerAccess.enabled ? "Update Manager" : "Create Manager"}
+                  </button>
+                  {managerAccess.enabled && (
+                    <button className="btn-ghost" onClick={removeManager} disabled={managerLoading} style={{ padding: "9px 16px", fontSize: 12 }}>
+                      Remove Manager
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, color: "rgba(255,178,107,.86)", lineHeight: 1.6 }}>
+                Signed in as manager. Withdraw, sweep, delete, and access management are disabled on this login.
+              </div>
+            )}
+          </div>
+
+          <div className="glass" style={{ padding: "20px 22px" }}>
+            <div style={{ fontSize: 14, fontWeight: 800, color: "#fff", marginBottom: 10 }}>
+              Telegram Alerts
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ fontSize: 12, color: "rgba(255,255,255,.45)", lineHeight: 1.55 }}>
+                Connect the existing EMBER Telegram bot to receive direct alerts without channel spam. Errors can stay instant while routine trade activity can roll into digests.
+              </div>
+              <div style={{ fontSize: 11, color: telegramState.connected ? "#7ae7ab" : "rgba(255,178,107,.86)" }}>
+                {telegramState.connected
+                  ? `Connected${telegramState.telegramUsername ? ` as @${telegramState.telegramUsername}` : ""}${telegramState.chatIdMasked ? ` (${telegramState.chatIdMasked})` : ""}`
+                  : "Not connected yet. Open the bot link below, press Start, then refresh this card."}
+              </div>
+              {telegramState.connectUrl && (
+                <a
+                  href={telegramState.connectUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn-ghost"
+                  style={{ padding: "9px 16px", fontSize: 12, textAlign: "center", textDecoration: "none" }}
+                >
+                  Open Telegram Bot
+                </a>
+              )}
+
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 10, fontSize: 12, color: "rgba(255,255,255,.72)" }}>
+                <span className="ember-toggle">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(telegramState.prefs.enabled)}
+                    onChange={(e) =>
+                      setTelegramState((prev) => ({
+                        ...prev,
+                        prefs: { ...prev.prefs, enabled: e.target.checked },
+                      }))
+                    }
+                  />
+                  <span className="ember-toggle-track" />
+                </span>
+                Enable Telegram alerts
+              </label>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 6, fontWeight: 700 }}>DELIVERY MODE</label>
+                  <select
+                    className="input-f"
+                    value={telegramState.prefs.deliveryMode}
+                    onChange={(e) =>
+                      setTelegramState((prev) => ({
+                        ...prev,
+                        prefs: { ...prev.prefs, deliveryMode: e.target.value },
+                      }))
+                    }
+                  >
+                    <option value="smart">Smart</option>
+                    <option value="instant">Instant</option>
+                    <option value="digest">Digest</option>
+                  </select>
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 6, fontWeight: 700 }}>DIGEST MINUTES</label>
+                  <input
+                    type="number"
+                    min={5}
+                    max={120}
+                    className="input-f"
+                    value={telegramState.prefs.digestIntervalMin}
+                    onChange={(e) =>
+                      setTelegramState((prev) => ({
+                        ...prev,
+                        prefs: {
+                          ...prev.prefs,
+                          digestIntervalMin: Math.max(5, Math.min(120, Math.floor(Number(e.target.value) || 15))),
+                        },
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                {[
+                  ["alertDeposit", "Deposits"],
+                  ["alertClaim", "Claims"],
+                  ["alertBurn", "Burns"],
+                  ["alertTrade", "Trades"],
+                  ["alertError", "Errors"],
+                  ["alertStatus", "Status"],
+                ].map(([key, label]) => (
+                  <label key={key} style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, color: "rgba(255,255,255,.72)" }}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(telegramState.prefs[key])}
+                      onChange={(e) =>
+                        setTelegramState((prev) => ({
+                          ...prev,
+                          prefs: { ...prev.prefs, [key]: e.target.checked },
+                        }))
+                      }
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
+
+              {telegramError && <div style={{ fontSize: 12, color: "#ff8f8f" }}>{telegramError}</div>}
+              {telegramMessage && <div style={{ fontSize: 12, color: "#7ae7ab" }}>{telegramMessage}</div>}
+
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button className="btn-fire" onClick={saveTelegram} disabled={telegramLoading} style={{ padding: "9px 16px", fontSize: 12 }}>
+                  {telegramLoading ? "Saving..." : "Save Alerts"}
+                </button>
+                <button className="btn-ghost" onClick={refreshTelegram} disabled={telegramLoading} style={{ padding: "9px 16px", fontSize: 12 }}>
+                  Refresh
+                </button>
+                <button className="btn-ghost" onClick={sendTelegramTest} disabled={telegramLoading || !telegramState.connected} style={{ padding: "9px 16px", fontSize: 12 }}>
+                  Send Test
+                </button>
+                {telegramState.connected && (
+                  <button className="btn-ghost" onClick={disconnectTelegram} disabled={telegramLoading} style={{ padding: "9px 16px", fontSize: 12 }}>
+                    Disconnect
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </div>
