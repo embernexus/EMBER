@@ -63,7 +63,9 @@ const parsedTreasuryWallet = parsePrivateKey(
 
 export const config = {
   port: Number(process.env.PORT || 3001),
-  databaseUrl: process.env.DATABASE_URL || "",
+  databaseUrl: String(process.env.DATABASE_URL || "")
+    .trim()
+    .replace(/^['"]+|['"]+$/g, ""),
   sessionCookieName: process.env.SESSION_COOKIE_NAME || "ember_session",
   sessionTtlDays: Number(process.env.SESSION_TTL_DAYS || 14),
   maxTokensPerAccount: Number(process.env.MAX_TOKENS_PER_ACCOUNT || 5),
