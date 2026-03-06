@@ -519,6 +519,11 @@ export default function TokenCard({
     setErr("");
     setSaving(true);
     try {
+      const currentBot = String(token.selectedBot || token.moduleType || "burn");
+      const nextBot = String(local.selectedBot || "burn");
+      if (Boolean(local.active) && nextBot !== currentBot) {
+        throw new Error("Pause the bot before switching bot mode.");
+      }
       const nextModuleConfig = {
         ...local.moduleConfig,
         tradeWalletCount: Math.max(1, Math.min(5, Math.floor(toNum(local.moduleConfig.tradeWalletCount, 1)))),
@@ -835,10 +840,20 @@ export default function TokenCard({
                     <>
                       <div>
                         <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 7, fontWeight: 600 }}>BOT MODE</label>
-                        <select className="input-f" value={local.selectedBot} onChange={(e) => setLocal((prev) => ({ ...prev, selectedBot: String(e.target.value || "burn") }))}>
+                        <select
+                          className="input-f"
+                          value={local.selectedBot}
+                          disabled={Boolean(local.active)}
+                          onChange={(e) => setLocal((prev) => ({ ...prev, selectedBot: String(e.target.value || "burn") }))}
+                        >
                           <option value="burn">Burn Bot</option>
                           <option value="volume">Volume Bot</option>
                         </select>
+                        {Boolean(local.active) && (
+                          <div style={{ fontSize: 11, color: "rgba(255,189,120,.82)", marginTop: 6 }}>
+                            Pause first to switch bot mode.
+                          </div>
+                        )}
                       </div>
 
                       {isVolumeMode ? (

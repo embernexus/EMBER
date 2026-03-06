@@ -3655,11 +3655,18 @@ export async function updateToken(userId, tokenId, payload) {
     }
     const previousBot = normalizeModuleType(current.selected_bot, current.selected_bot || MODULE_TYPES.burn);
     const previousActive = Boolean(current.active);
+    const requestedBot = normalizeModuleType(
+      payload.selectedBot === undefined ? current.selected_bot : payload.selectedBot,
+      current.selected_bot || MODULE_TYPES.burn
+    );
+    if (requestedBot !== previousBot && previousActive) {
+      throw new Error("Pause the bot before switching bot mode.");
+    }
     const claimSec = payload.claimSec === undefined ? Number(current.claim_sec) : sanitizeInterval(payload.claimSec, Number(current.claim_sec));
     const burnSec = payload.burnSec === undefined ? Number(current.burn_sec) : sanitizeInterval(payload.burnSec, Number(current.burn_sec));
     const splits = payload.splits === undefined ? Number(current.splits) : sanitizeSplits(payload.splits, Number(current.splits));
     const active = payload.active === undefined ? current.active : Boolean(payload.active);
-    const selectedBot = normalizeModuleType(payload.selectedBot || current.selected_bot, current.selected_bot || MODULE_TYPES.burn);
+    const selectedBot = requestedBot;
     const shouldStartNow = payload.active !== undefined && Boolean(active) && !previousActive;
 
     const now = Date.now();

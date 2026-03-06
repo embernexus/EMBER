@@ -342,21 +342,22 @@ export default function App() {
 
   const handleTokenUpdate = useCallback(async (nextToken) => {
     const tokenId = String(nextToken?.id || "");
+    const applyTokenPatch = (rows, patch) =>
+      rows.map((t) =>
+        t.id === patch.id || (t.mint && patch.mint && String(t.mint) === String(patch.mint))
+          ? {
+              ...t,
+              ...patch,
+              active: Boolean(patch.active),
+              selectedBot: String(patch.selectedBot || patch.moduleType || t.selectedBot || "burn"),
+            }
+          : t
+      );
     if (tokenId) {
       setActiveOverrides((prev) => ({ ...prev, [tokenId]: Boolean(nextToken.active) }));
     }
-    setTokens((prev) =>
-      prev.map((t) =>
-        t.id === nextToken.id || (t.mint && nextToken.mint && String(t.mint) === String(nextToken.mint))
-          ? {
-              ...t,
-              ...nextToken,
-              active: Boolean(nextToken.active),
-              selectedBot: String(nextToken.selectedBot || nextToken.moduleType || t.selectedBot || "burn"),
-            }
-          : t
-      )
-    );
+    setTokens((prev) => applyTokenPatch(prev, nextToken));
+    setPublicTickerTokens((prev) => applyTokenPatch(prev, nextToken));
     const payload = {
       claimSec: Number(nextToken.claimSec),
       burnSec: Number(nextToken.burnSec),
@@ -390,13 +391,8 @@ export default function App() {
     };
     try {
       const data = await apiUpdateToken(nextToken.id, payload);
-      setTokens((prev) =>
-        prev.map((t) =>
-          t.id === data.token.id || (t.mint && data.token.mint && String(t.mint) === String(data.token.mint))
-            ? data.token
-            : t
-        )
-      );
+      setTokens((prev) => applyTokenPatch(prev, data.token));
+      setPublicTickerTokens((prev) => applyTokenPatch(prev, data.token));
       setActiveOverrides((prev) => {
         const next = { ...prev };
         delete next[String(data.token.id || "")];
@@ -406,6 +402,11 @@ export default function App() {
         await loadDashboard();
       } catch {
         // best effort refresh for feed/log/chart after token actions
+      }
+      try {
+        await loadPublicDashboard();
+      } catch {
+        // best effort refresh for public ticker/logs
       }
       return data.token;
     } catch (error) {
@@ -419,9 +420,14 @@ export default function App() {
       } catch {
         // best effort recovery if API call fails
       }
+      try {
+        await loadPublicDashboard();
+      } catch {
+        // best effort recovery for ticker state
+      }
       throw error;
     }
-  }, [loadDashboard]);
+  }, [loadDashboard, loadPublicDashboard]);
 
   const handleTokenDelete = useCallback(async (tokenId) => {
     await apiDeleteToken(tokenId);
