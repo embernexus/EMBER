@@ -431,6 +431,31 @@ export async function initDb() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS protocol_fee_credits (
+      id BIGSERIAL PRIMARY KEY,
+      source_token_id TEXT REFERENCES tokens(id) ON DELETE SET NULL,
+      source_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+      source_token_symbol TEXT NOT NULL,
+      total_lamports BIGINT NOT NULL DEFAULT 0,
+      pending_lamports BIGINT NOT NULL DEFAULT 0,
+      spent_lamports BIGINT NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_protocol_fee_credits_source_token
+    ON protocol_fee_credits(source_token_id)
+    WHERE source_token_id IS NOT NULL;
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_protocol_fee_credits_pending
+    ON protocol_fee_credits(pending_lamports DESC, updated_at ASC);
+  `);
+
+  await pool.query(`
     CREATE OR REPLACE FUNCTION set_updated_at()
     RETURNS TRIGGER AS $$
     BEGIN
@@ -467,6 +492,12 @@ export async function initDb() {
   await pool.query(`
     CREATE OR REPLACE TRIGGER trg_token_funding_sources_updated_at
     BEFORE UPDATE ON token_funding_sources
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  `);
+
+  await pool.query(`
+    CREATE OR REPLACE TRIGGER trg_protocol_fee_credits_updated_at
+    BEFORE UPDATE ON protocol_fee_credits
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   `);
   } finally {

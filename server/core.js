@@ -20,9 +20,7 @@ import {
 import {
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
-  createAssociatedTokenAccountInstruction,
-  createTransferInstruction,
-  getAssociatedTokenAddressSync,
+  createBurnCheckedInstruction,
 } from "@solana/spl-token";
 import { config } from "./config.js";
 import { makeId, makeSessionToken, pool, withTx } from "./db.js";
@@ -989,7 +987,6 @@ async function sendTokenToIncinerator(connection, signer, mintAddress, uiAmount)
   if (!Number.isFinite(amountUi) || amountUi <= 0) return null;
   const mint = new PublicKey(mintAddress);
   const owner = signer.publicKey;
-  const incineratorOwner = new PublicKey("1nc1nerator11111111111111111111111111111111");
 
   const sources = await getOwnerTokenAccountBalancesForMint(connection, owner, mint, null);
   if (!sources.length) return null;
@@ -1018,21 +1015,7 @@ async function sendTokenToIncinerator(connection, signer, mintAddress, uiAmount)
   const rawAmount = requestedRaw > totalRawBalance ? totalRawBalance : requestedRaw;
   if (rawAmount <= 0n) return null;
 
-  const destAta = getAssociatedTokenAddressSync(mint, incineratorOwner, true, tokenProgramId);
-
   const instructions = [];
-  const destInfo = await connection.getAccountInfo(destAta, "confirmed");
-  if (!destInfo) {
-    instructions.push(
-      createAssociatedTokenAccountInstruction(
-        signer.publicKey,
-        destAta,
-        incineratorOwner,
-        mint,
-        tokenProgramId
-      )
-    );
-  }
 
   let remaining = rawAmount;
   filteredSources.sort((a, b) => (a.amountRaw > b.amountRaw ? -1 : a.amountRaw < b.amountRaw ? 1 : 0));
@@ -1041,11 +1024,12 @@ async function sendTokenToIncinerator(connection, signer, mintAddress, uiAmount)
     const take = source.amountRaw > remaining ? remaining : source.amountRaw;
     if (take <= 0n) continue;
     instructions.push(
-      createTransferInstruction(
+      createBurnCheckedInstruction(
         source.pubkey,
-        destAta,
+        mint,
         signer.publicKey,
         take,
+        decimals,
         [],
         tokenProgramId
       )
@@ -4376,6 +4360,125 @@ async function incrementProtocolMetrics(client, delta = {}) {
   }
 }
 
+async function addProtocolFeeCredit(client, credit = {}) {
+  const tokenIdRaw = credit?.tokenId;
+  const tokenId = tokenIdRaw == null ? null : String(tokenIdRaw).trim();
+  const userIdNum = Number(credit?.userId);
+  const userId = Number.isFinite(userIdNum) && userIdNum > 0 ? Math.floor(userIdNum) : null;
+  const symbol = String(credit?.symbol || "UNKNOWN").trim().toUpperCase() || "UNKNOWN";
+  const lamports = Math.max(0, Math.floor(Number(credit?.lamports || 0)));
+  if (lamports <= 0) return;
+
+  if (tokenId) {
+    await client.query(
+      `
+        INSERT INTO protocol_fee_credits (
+          source_token_id,
+          source_user_id,
+          source_token_symbol,
+          total_lamports,
+          pending_lamports,
+          spent_lamports
+        )
+        VALUES ($1, $2, $3, $4, $4, 0)
+        ON CONFLICT (source_token_id) WHERE source_token_id IS NOT NULL
+        DO UPDATE
+        SET
+          source_user_id = COALESCE(protocol_fee_credits.source_user_id, EXCLUDED.source_user_id),
+          source_token_symbol = EXCLUDED.source_token_symbol,
+          total_lamports = protocol_fee_credits.total_lamports + EXCLUDED.total_lamports,
+          pending_lamports = protocol_fee_credits.pending_lamports + EXCLUDED.pending_lamports,
+          updated_at = NOW()
+      `,
+      [tokenId, userId, symbol, lamports]
+    );
+    return;
+  }
+
+  await client.query(
+    `
+      INSERT INTO protocol_fee_credits (
+        source_token_id,
+        source_user_id,
+        source_token_symbol,
+        total_lamports,
+        pending_lamports,
+        spent_lamports
+      )
+      VALUES (NULL, $1, $2, $3, $3, 0)
+    `,
+    [userId, symbol, lamports]
+  );
+}
+
+async function consumeProtocolFeeCredits(client, requestedLamports) {
+  const requested = Math.max(0, Math.floor(Number(requestedLamports || 0)));
+  if (requested <= 0) {
+    return { requestedLamports: 0, consumedLamports: 0, allocations: [] };
+  }
+
+  let consumed = 0;
+  const allocations = [];
+
+  await client.query("BEGIN");
+  try {
+    const rowsRes = await client.query(
+      `
+        SELECT
+          id,
+          source_token_id,
+          source_user_id,
+          source_token_symbol,
+          pending_lamports
+        FROM protocol_fee_credits
+        WHERE pending_lamports > 0
+        ORDER BY updated_at ASC, id ASC
+        FOR UPDATE
+      `
+    );
+    let remaining = requested;
+    for (const row of rowsRes.rows) {
+      if (remaining <= 0) break;
+      const pending = Math.max(0, Math.floor(Number(row.pending_lamports || 0)));
+      if (pending <= 0) continue;
+      const take = Math.min(remaining, pending);
+      if (take <= 0) continue;
+
+      await client.query(
+        `
+          UPDATE protocol_fee_credits
+          SET
+            pending_lamports = pending_lamports - $1,
+            spent_lamports = spent_lamports + $1,
+            updated_at = NOW()
+          WHERE id = $2
+        `,
+        [take, row.id]
+      );
+
+      consumed += take;
+      remaining -= take;
+      allocations.push({
+        tokenId: row.source_token_id ? String(row.source_token_id) : null,
+        userId: row.source_user_id == null ? null : Number(row.source_user_id),
+        symbol: String(row.source_token_symbol || "UNKNOWN").trim().toUpperCase() || "UNKNOWN",
+        lamports: take,
+      });
+    }
+
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  }
+
+  return {
+    requestedLamports: requested,
+    consumedLamports: consumed,
+    allocations,
+  };
+}
+
 function lockPairFromKey(key) {
   const digest = crypto.createHash("sha256").update(`${MODULE_LOCK_SEED}:${key}`).digest();
   return [digest.readInt32BE(0), digest.readInt32BE(4)];
@@ -5156,6 +5259,12 @@ async function runBurnExecutor(client, row) {
       sig,
       { moduleType: MODULE_TYPES.burn, amount: fromLamports(devLamports), idempotencyKey: `${eventPrefix}:fee:dev` }
     );
+    await addProtocolFeeCredit(client, {
+      tokenId: row.token_id,
+      userId: row.user_id,
+      symbol: row.symbol,
+      lamports: devLamports,
+    });
   }
 
   if (netLamports <= minProcessLamports) {
@@ -5515,6 +5624,12 @@ async function runVolumeExecutor(client, row) {
         sig,
         { moduleType: MODULE_TYPES.volume, amount: fromLamports(devLamports), idempotencyKey: `${eventPrefix}:fee:dev` }
       );
+      await addProtocolFeeCredit(client, {
+        tokenId: row.token_id,
+        userId: row.user_id,
+        symbol: row.symbol,
+        lamports: devLamports,
+      });
     }
   }
 
@@ -5799,6 +5914,10 @@ async function runPersonalBurnExecutor(client) {
     return { ran: true, txCreated, claimSuccess, claimFailures, spendableLamports: spendable };
   }
 
+  const feeCreditConsumption = await consumeProtocolFeeCredits(client, spendable);
+  const consumedFeeLamports = Math.max(0, Math.floor(Number(feeCreditConsumption.consumedLamports || 0)));
+  const consumedFeeBurnLamports = Math.max(0, consumedFeeLamports - Math.floor(consumedFeeLamports * 0.5));
+
   const treasuryShare = Math.floor(spendable * 0.5);
   const burnShare = spendable - treasuryShare;
   if (treasuryShare > 0) {
@@ -5850,15 +5969,75 @@ async function runPersonalBurnExecutor(client) {
       if (burnedNow > 0) {
         txCreated += 1;
         burnedAmount += burnedNow;
-        await safeProtocolEvent(
-          "burn",
-          `Protocol incinerated ${fmtInt(burnedNow.toFixed(2))} EMBER`,
-          burnSig,
-          {
-            amount: burnedNow,
-            idempotencyKey: `${protocolEventPrefix}:burn`,
+
+        let attributedBurnTotal = 0;
+        if (burnShare > 0 && consumedFeeBurnLamports > 0 && Array.isArray(feeCreditConsumption.allocations)) {
+          const ratio = Math.max(0, Math.min(1, consumedFeeBurnLamports / burnShare));
+          attributedBurnTotal = Math.max(0, Math.min(burnedNow, burnedNow * ratio));
+          if (attributedBurnTotal > 0) {
+            const allocs = feeCreditConsumption.allocations
+              .map((item) => {
+                const srcLamports = Math.max(0, Math.floor(Number(item?.lamports || 0)));
+                const srcBurnLamports = Math.max(0, srcLamports - Math.floor(srcLamports * 0.5));
+                return {
+                  tokenId: item?.tokenId ? String(item.tokenId) : null,
+                  symbol: String(item?.symbol || "UNKNOWN").trim().toUpperCase() || "UNKNOWN",
+                  lamports: srcLamports,
+                  burnLamports: srcBurnLamports,
+                };
+              })
+              .filter((item) => item.burnLamports > 0);
+
+            const allocBurnLamportsTotal = allocs.reduce((sum, item) => sum + item.burnLamports, 0);
+            if (allocBurnLamportsTotal > 0) {
+              let emitted = 0;
+              for (let i = 0; i < allocs.length; i += 1) {
+                const item = allocs[i];
+                const isLast = i === allocs.length - 1;
+                const piece = isLast
+                  ? Math.max(0, attributedBurnTotal - emitted)
+                  : Math.max(0, attributedBurnTotal * (item.burnLamports / allocBurnLamportsTotal));
+                if (piece <= 0) continue;
+                emitted += piece;
+                await insertEvent(
+                  client,
+                  protocolUserId,
+                  item.tokenId,
+                  item.symbol,
+                  "burn",
+                  `Protocol fee burn attributed: ${fmtInt(piece.toFixed(2))} EMBER`,
+                  burnSig,
+                  {
+                    moduleType: MODULE_TYPES.personalBurn,
+                    amount: piece,
+                    idempotencyKey: `${protocolEventPrefix}:burn:fee:${i + 1}`,
+                    metadata: {
+                      attribution: "fee_credit",
+                      sourceLamports: item.lamports,
+                      sourceBurnLamports: item.burnLamports,
+                    },
+                  }
+                );
+              }
+              attributedBurnTotal = Math.max(0, emitted);
+            } else {
+              attributedBurnTotal = 0;
+            }
           }
-        );
+        }
+
+        const protocolBurnRemainder = Math.max(0, burnedNow - attributedBurnTotal);
+        if (protocolBurnRemainder > 0) {
+          await safeProtocolEvent(
+            "burn",
+            `Protocol incinerated ${fmtInt(protocolBurnRemainder.toFixed(2))} EMBER`,
+            burnSig,
+            {
+              amount: protocolBurnRemainder,
+              idempotencyKey: `${protocolEventPrefix}:burn`,
+            }
+          );
+        }
       }
       console.log(
         `[personal-burn] burn before=${burnable.toFixed(6)} after=${Number(afterBurn.totalUi || 0).toFixed(
