@@ -27,6 +27,12 @@ function fmtMarketCap(value) {
   return `$${fmt(n)}`;
 }
 
+function pumpCoinUrl(mint) {
+  const value = String(mint || "").trim();
+  if (!value) return "";
+  return `https://pump.fun/coin/${encodeURIComponent(value)}`;
+}
+
 export default function TokenTicker({ tokens }) {
   if(!tokens.length){
     return (
@@ -43,7 +49,25 @@ export default function TokenTicker({ tokens }) {
       <div className="ticker-wrap">
         <div className="ticker-track">
           {items.map((t,i)=>(
-            <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"0 28px",borderRight:"1px solid rgba(255,255,255,.05)",height:38,whiteSpace:"nowrap"}}>
+            <a
+              key={i}
+              href={pumpCoinUrl(t?.mint)}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={`View $${String(t?.symbol || "").toUpperCase()} on pump.fun`}
+              style={{
+                display:"flex",
+                alignItems:"center",
+                gap:10,
+                padding:"0 28px",
+                borderRight:"1px solid rgba(255,255,255,.05)",
+                height:38,
+                whiteSpace:"nowrap",
+                color:"inherit",
+                textDecoration:"none",
+                cursor:"pointer"
+              }}
+            >
               {(() => {
                 const bot = String(t?.selectedBot || t?.moduleType || "burn");
                 const metric = bot === "volume"
@@ -77,7 +101,7 @@ export default function TokenTicker({ tokens }) {
                   </>
                 );
               })()}
-            </div>
+            </a>
           ))}
         </div>
       </div>

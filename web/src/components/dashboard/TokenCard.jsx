@@ -503,6 +503,8 @@ export default function TokenCard({
   }, [open, showLiveLogs, fetchDetails]);
 
   const isVolumeMode = String(local.selectedBot || "burn") === "volume";
+  const currentActive =
+    optimisticActive === null ? Boolean(token.active) : Boolean(optimisticActive);
   const cycleSeconds = isVolumeMode
     ? Math.max(3, 25 - Math.round((toNum(local.moduleConfig.speed, 35) / 100) * 20))
     : local.burnSec;
@@ -521,7 +523,7 @@ export default function TokenCard({
     try {
       const currentBot = String(token.selectedBot || token.moduleType || "burn");
       const nextBot = String(local.selectedBot || "burn");
-      if (Boolean(local.active) && nextBot !== currentBot) {
+      if (currentActive && nextBot !== currentBot) {
         throw new Error("Pause the bot before switching bot mode.");
       }
       const nextModuleConfig = {
@@ -537,6 +539,7 @@ export default function TokenCard({
       }
       await onUpdate({
         ...local,
+        active: currentActive,
         claimSec: Math.max(60, Math.floor(toNum(local.claimSec, 120))),
         burnSec: Math.max(60, Math.floor(toNum(local.burnSec, 300))),
         splits: Math.max(1, Math.floor(toNum(local.splits, 1))),
@@ -843,13 +846,13 @@ export default function TokenCard({
                         <select
                           className="input-f"
                           value={local.selectedBot}
-                          disabled={Boolean(local.active)}
+                          disabled={currentActive}
                           onChange={(e) => setLocal((prev) => ({ ...prev, selectedBot: String(e.target.value || "burn") }))}
                         >
                           <option value="burn">Burn Bot</option>
                           <option value="volume">Volume Bot</option>
                         </select>
-                        {Boolean(local.active) && (
+                        {currentActive && (
                           <div style={{ fontSize: 11, color: "rgba(255,189,120,.82)", marginTop: 6 }}>
                             Pause first to switch bot mode.
                           </div>

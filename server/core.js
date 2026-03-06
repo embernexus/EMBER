@@ -1980,7 +1980,7 @@ export async function getDashboard(userId) {
 }
 
 export async function getPublicDashboard() {
-  const [tokensRes, logsRes, chartRes, burnBreakdownRes] = await Promise.all([
+  const [tokensRes, logsRes, chartRes, burnBreakdownRes, protocolAggRes] = await Promise.all([
     pool.query(
       `
         SELECT
@@ -2039,18 +2039,78 @@ export async function getPublicDashboard() {
         ORDER BY amount DESC
       `
     ),
+    pool.query(
+      `
+        SELECT
+          lifetime_incinerated,
+          ember_incinerated,
+          updated_at
+        FROM protocol_metrics
+        WHERE id = 1
+        LIMIT 1
+      `
+    ).catch(() => ({ rows: [] })),
   ]);
 
   const tokenRows = attachMarketCaps(tokensRes.rows);
-  const burnBreakdown = burnBreakdownRes.rows.map((row) => ({
+  let burnBreakdown = burnBreakdownRes.rows.map((row) => ({
     symbol: String(row.symbol || "UNKNOWN"),
     amount: Number(row.amount || 0),
   }));
+  let logRows = logsRes.rows || [];
+  let chartRows = chartRes.rows || [];
+  const protocolAgg = protocolAggRes.rows[0] || {};
+  const protocolLifetime = Math.max(0, Number(protocolAgg.lifetime_incinerated || 0));
+  const protocolEmber = Math.max(0, Number(protocolAgg.ember_incinerated || 0));
+  const protocolAtRaw = protocolAgg.updated_at;
+  const protocolAt = protocolAtRaw ? new Date(protocolAtRaw) : new Date();
+  const protocolCreatedAt = Number.isNaN(protocolAt.getTime())
+    ? new Date().toISOString()
+    : protocolAt.toISOString();
+
+  // Fallback path: if historical rows are empty but protocol aggregates are non-zero,
+  // surface a synthetic protocol burn entry so Burns page is never blank.
+  if (!logRows.length && protocolLifetime > 0) {
+    const fallbackAmount = protocolEmber > 0 ? protocolEmber : protocolLifetime;
+    logRows = [
+      {
+        id: "protocol_aggregate_burn",
+        token_id: null,
+        token_symbol: protocolEmber > 0 ? "EMBER" : "PROTOCOL",
+        module_type: MODULE_TYPES.personalBurn,
+        event_type: "burn",
+        amount: fallbackAmount,
+        message: "Historical protocol burn aggregate (metrics fallback).",
+        tx: null,
+        created_at: protocolCreatedAt,
+      },
+    ];
+  }
+
+  if (!chartRows.length && protocolLifetime > 0) {
+    chartRows = [
+      {
+        event_type: "burn",
+        amount: protocolEmber > 0 ? protocolEmber : protocolLifetime,
+        message: "Historical protocol burn aggregate (metrics fallback).",
+        created_at: protocolCreatedAt,
+      },
+    ];
+  }
+
+  if (!burnBreakdown.length && protocolLifetime > 0) {
+    burnBreakdown = [
+      {
+        symbol: protocolEmber > 0 ? "EMBER" : "PROTOCOL",
+        amount: protocolEmber > 0 ? protocolEmber : protocolLifetime,
+      },
+    ];
+  }
 
   return {
     tokens: tokenRows.map(toToken),
-    logs: logsRes.rows.map(toEvent),
-    chartData: buildChartData(chartRes.rows),
+    logs: logRows.map(toEvent),
+    chartData: buildChartData(chartRows),
     burnBreakdown,
   };
 }
@@ -3759,6 +3819,8 @@ export async function updateToken(userId, tokenId, payload) {
       [tokenId, moduleType]
     );
     let moduleId = "";
+    let effectiveModuleConfig = { ...baseConfig, ...nextConfig };
+    let volumeWalletReconcile = null;
     if (!existingModuleRes.rowCount) {
       moduleId = makeId("mod");
       await client.query(
@@ -3772,7 +3834,7 @@ export async function updateToken(userId, tokenId, payload) {
           tokenId,
           moduleType,
           active,
-          JSON.stringify({ ...baseConfig, ...nextConfig }),
+          JSON.stringify(effectiveModuleConfig),
         ]
       );
     } else {
@@ -3784,6 +3846,7 @@ export async function updateToken(userId, tokenId, payload) {
         ...baseConfig,
         ...nextConfig,
       });
+      effectiveModuleConfig = merged;
       await client.query(
         `
           UPDATE bot_modules
@@ -3794,6 +3857,37 @@ export async function updateToken(userId, tokenId, payload) {
         `,
         [active, JSON.stringify(merged), existingModuleRes.rows[0].id, shouldResetVolumeState]
       );
+    }
+
+    if (moduleType === MODULE_TYPES.volume && moduleId) {
+      const updatedToken = updatedRes.rows[0] || current;
+      volumeWalletReconcile = await reconcileVolumeTradeWalletCount(
+        client,
+        {
+          module_id: moduleId,
+          user_id: userId,
+          token_id: tokenId,
+          symbol: String(updatedToken.symbol || current.symbol || ""),
+          mint: String(updatedToken.mint || current.mint || ""),
+        },
+        effectiveModuleConfig,
+        Boolean(active)
+      );
+      const walletTxCreated = Math.max(0, Number(volumeWalletReconcile?.txCreated || 0));
+      if (walletTxCreated > 0) {
+        await client.query(
+          `
+            UPDATE tokens
+            SET tx_count = tx_count + $1
+            WHERE id = $2
+          `,
+          [walletTxCreated, tokenId]
+        );
+        if (updatedRes.rows[0]) {
+          updatedRes.rows[0].tx_count =
+            Number(updatedRes.rows[0].tx_count || 0) + walletTxCreated;
+        }
+      }
     }
 
     await client.query(
@@ -3840,6 +3934,26 @@ export async function updateToken(userId, tokenId, payload) {
         null,
         { moduleType, idempotencyKey: `status:mode:${tokenId}:${Date.now()}` }
       );
+    }
+
+    if (moduleType === MODULE_TYPES.volume && volumeWalletReconcile) {
+      const added = Math.max(0, Number(volumeWalletReconcile.added || 0));
+      const removed = Math.max(0, Number(volumeWalletReconcile.removed || 0));
+      if (added > 0 || removed > 0) {
+        const parts = [];
+        if (added > 0) parts.push(`+${added}`);
+        if (removed > 0) parts.push(`-${removed}`);
+        await insertEvent(
+          client,
+          userId,
+          tokenId,
+          String(current.symbol || ""),
+          "status",
+          `Volume trade wallets updated (${parts.join(" / ")}).`,
+          null,
+          { moduleType, idempotencyKey: `status:wallets:${tokenId}:${Date.now()}` }
+        );
+      }
     }
 
     if (previousActive !== Boolean(active)) {
@@ -4439,6 +4553,142 @@ async function ensureVolumeTradeWallets(client, moduleRow, count) {
   }
 
   return existing.concat(created);
+}
+
+async function reconcileVolumeTradeWalletCount(client, moduleRow, configJson, tokenActive) {
+  const desired = Math.max(
+    1,
+    Math.min(5, Math.floor(Number(configJson?.tradeWalletCount) || 1))
+  );
+  const existingRes = await client.query(
+    `
+      SELECT id, label, wallet_pubkey, secret_key_base58, funded_from_deposit_lamports
+      FROM volume_trade_wallets
+      WHERE module_id = $1
+      ORDER BY created_at ASC
+    `,
+    [moduleRow.module_id]
+  );
+  const existing = existingRes.rows || [];
+
+  if (existing.length < desired) {
+    const wallets = await ensureVolumeTradeWallets(client, moduleRow, desired);
+    return {
+      wallets,
+      added: Math.max(0, wallets.length - existing.length),
+      removed: 0,
+      txCreated: 0,
+    };
+  }
+
+  if (existing.length <= desired) {
+    return { wallets: existing, added: 0, removed: 0, txCreated: 0 };
+  }
+
+  if (tokenActive) {
+    throw new Error("Pause the volume bot before reducing trade wallet count.");
+  }
+
+  const keep = existing.slice(0, desired);
+  const remove = existing.slice(desired);
+  const connection = getConnection();
+  const depositSecret = await getTokenDepositSigningKey(moduleRow.user_id, moduleRow.token_id);
+  const depositSigner = keypairFromBase58(depositSecret);
+  const eventPrefix = `wallet-resize:${moduleRow.module_id}:${Date.now()}`;
+  let txCreated = 0;
+  const removableIds = [];
+
+  for (const wallet of remove) {
+    const tradeSigner = keypairFromBase58(decryptDepositSecret(wallet.secret_key_base58));
+    const label = String(wallet.label || wallet.wallet_pubkey || "trade");
+    const tokenBal = await getOwnerTokenBalanceUi(connection, tradeSigner.publicKey, moduleRow.mint);
+
+    if (tokenBal > 0.000001) {
+      const sellAmount = Number(tokenBal.toFixed(6));
+      const sellSig = await pumpPortalTrade({
+        connection,
+        signer: tradeSigner,
+        mint: moduleRow.mint,
+        action: "sell",
+        amount: sellAmount,
+        denominatedInSol: false,
+        slippage: Math.max(1, Math.floor(Number(configJson.slippageBps || 1000) / 100)),
+        pool: configJson.pool || "auto",
+      });
+      if (sellSig) txCreated += 1;
+      await insertEvent(
+        client,
+        moduleRow.user_id,
+        moduleRow.token_id,
+        moduleRow.symbol,
+        "sell",
+        `Wallet downsize sold ${sellAmount.toFixed(6)} ${moduleRow.symbol} from ${label}`,
+        sellSig,
+        {
+          moduleType: MODULE_TYPES.volume,
+          amount: sellAmount,
+          idempotencyKey: `${eventPrefix}:sell:${wallet.wallet_pubkey}`,
+        }
+      );
+    }
+
+    const sweep = await sendAllSolTransfer(
+      connection,
+      tradeSigner,
+      depositSigner.publicKey.toBase58()
+    );
+    if (sweep.signature && sweep.sentLamports > 0) {
+      txCreated += 1;
+      await insertEvent(
+        client,
+        moduleRow.user_id,
+        moduleRow.token_id,
+        moduleRow.symbol,
+        "transfer",
+        `Wallet downsize swept ${fromLamports(sweep.sentLamports).toFixed(6)} SOL from ${label} to deposit`,
+        sweep.signature,
+        {
+          moduleType: MODULE_TYPES.volume,
+          amount: fromLamports(sweep.sentLamports),
+          idempotencyKey: `${eventPrefix}:sweep:${wallet.wallet_pubkey}`,
+        }
+      );
+    }
+
+    const remainingToken = await getOwnerTokenBalanceUi(connection, tradeSigner.publicKey, moduleRow.mint);
+    if (remainingToken > 0.000001) {
+      throw new Error(`Cannot remove ${label}: token balance remains after sweep.`);
+    }
+    removableIds.push(String(wallet.id));
+  }
+
+  if (removableIds.length > 0) {
+    await client.query(
+      `
+        DELETE FROM volume_trade_wallets
+        WHERE module_id = $1
+          AND id = ANY($2::text[])
+      `,
+      [moduleRow.module_id, removableIds]
+    );
+  }
+
+  const refreshedRes = await client.query(
+    `
+      SELECT id, label, wallet_pubkey, secret_key_base58, funded_from_deposit_lamports
+      FROM volume_trade_wallets
+      WHERE module_id = $1
+      ORDER BY created_at ASC
+    `,
+    [moduleRow.module_id]
+  );
+
+  return {
+    wallets: refreshedRes.rows || keep,
+    added: 0,
+    removed: removableIds.length,
+    txCreated,
+  };
 }
 
 async function runBurnExecutor(client, row) {
