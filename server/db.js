@@ -263,6 +263,31 @@ export async function initDb() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS protocol_metrics (
+      id SMALLINT PRIMARY KEY,
+      total_bot_transactions BIGINT NOT NULL DEFAULT 0,
+      lifetime_incinerated NUMERIC NOT NULL DEFAULT 0,
+      ember_incinerated NUMERIC NOT NULL DEFAULT 0,
+      rewards_processed_sol NUMERIC NOT NULL DEFAULT 0,
+      fees_taken_sol NUMERIC NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    INSERT INTO protocol_metrics (
+      id,
+      total_bot_transactions,
+      lifetime_incinerated,
+      ember_incinerated,
+      rewards_processed_sol,
+      fees_taken_sol
+    )
+    VALUES (1, 0, 0, 0, 0, 0)
+    ON CONFLICT (id) DO NOTHING;
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS bot_modules (
       id TEXT PRIMARY KEY,
       user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

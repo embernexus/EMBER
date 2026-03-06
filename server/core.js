@@ -749,11 +749,7 @@ async function sendSolTransfer(connection, signer, toAddress, lamports) {
 async function getOwnerTokenBalanceUi(connection, owner, mint) {
   const ownerPk = owner instanceof PublicKey ? owner : new PublicKey(owner);
   const mintPk = mint instanceof PublicKey ? mint : new PublicKey(mint);
-  const mintInfo = await connection.getAccountInfo(mintPk, "confirmed");
-  const tokenProgramId = mintInfo?.owner?.equals?.(TOKEN_2022_PROGRAM_ID)
-    ? TOKEN_2022_PROGRAM_ID
-    : TOKEN_PROGRAM_ID;
-  const balances = await getOwnerTokenAccountBalancesForMint(connection, ownerPk, mintPk, tokenProgramId);
+  const balances = await getOwnerTokenAccountBalancesForMint(connection, ownerPk, mintPk, null);
   return balances.reduce((sum, item) => sum + item.uiAmount, 0);
 }
 
@@ -779,39 +775,45 @@ function getTokenAccountMintAddress(rawData) {
   }
 }
 
-async function getOwnerTokenAccountBalancesForMint(connection, owner, mint, tokenProgramId) {
+async function getOwnerTokenAccountBalancesForMint(connection, owner, mint, tokenProgramId = null) {
   const ownerPk = owner instanceof PublicKey ? owner : new PublicKey(owner);
   const mintPk = mint instanceof PublicKey ? mint : new PublicKey(mint);
   const mintText = mintPk.toBase58();
   const balances = [];
+  const programs = tokenProgramId
+    ? [tokenProgramId]
+    : [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID];
 
-  let accounts = [];
-  try {
-    const res = await connection.getTokenAccountsByOwner(ownerPk, { programId: tokenProgramId }, "confirmed");
-    accounts = Array.isArray(res?.value) ? res.value : [];
-  } catch {
-    accounts = [];
-  }
-
-  for (const item of accounts) {
-    const tokenMint = getTokenAccountMintAddress(item?.account?.data);
-    if (tokenMint !== mintText) continue;
-    const pubkey = item?.pubkey;
-    if (!pubkey) continue;
+  for (const programId of programs) {
+    let accounts = [];
     try {
-      const bal = await connection.getTokenAccountBalance(pubkey, "confirmed");
-      const amountRaw = BigInt(String(bal?.value?.amount || "0"));
-      const decimals = Number(bal?.value?.decimals || 0);
-      const uiAmount = Number(bal?.value?.uiAmountString || bal?.value?.uiAmount || 0);
-      if (amountRaw <= 0n) continue;
-      balances.push({
-        pubkey,
-        amountRaw,
-        decimals,
-        uiAmount: Number.isFinite(uiAmount) ? uiAmount : 0,
-      });
+      const res = await connection.getTokenAccountsByOwner(ownerPk, { programId }, "confirmed");
+      accounts = Array.isArray(res?.value) ? res.value : [];
     } catch {
-      // best effort
+      accounts = [];
+    }
+
+    for (const item of accounts) {
+      const tokenMint = getTokenAccountMintAddress(item?.account?.data);
+      if (tokenMint !== mintText) continue;
+      const pubkey = item?.pubkey;
+      if (!pubkey) continue;
+      try {
+        const bal = await connection.getTokenAccountBalance(pubkey, "confirmed");
+        const amountRaw = BigInt(String(bal?.value?.amount || "0"));
+        const decimals = Number(bal?.value?.decimals || 0);
+        const uiAmount = Number(bal?.value?.uiAmountString || bal?.value?.uiAmount || 0);
+        if (amountRaw <= 0n) continue;
+        balances.push({
+          pubkey,
+          amountRaw,
+          decimals,
+          uiAmount: Number.isFinite(uiAmount) ? uiAmount : 0,
+          programId,
+        });
+      } catch {
+        // best effort
+      }
     }
   }
 
@@ -873,17 +875,26 @@ async function sendTokenToIncinerator(connection, signer, mintAddress, uiAmount)
   const owner = signer.publicKey;
   const incineratorOwner = new PublicKey("1nc1nerator11111111111111111111111111111111");
 
-  const mintInfo = await connection.getAccountInfo(mint, "confirmed");
-  if (!mintInfo?.owner) return null;
-  const tokenProgramId = mintInfo.owner;
-  const isLegacy = tokenProgramId.equals(TOKEN_PROGRAM_ID);
-  const isToken2022 = tokenProgramId.equals(TOKEN_2022_PROGRAM_ID);
-  if (!isLegacy && !isToken2022) return null;
-
-  const sources = await getOwnerTokenAccountBalancesForMint(connection, owner, mint, tokenProgramId);
+  const sources = await getOwnerTokenAccountBalancesForMint(connection, owner, mint, null);
   if (!sources.length) return null;
-  const decimals = Number(sources[0]?.decimals || 0);
-  const totalRawBalance = sources.reduce((sum, item) => sum + item.amountRaw, 0n);
+  const totalsByProgram = new Map();
+  for (const item of sources) {
+    const key = item.programId?.toBase58?.() || "";
+    const prev = totalsByProgram.get(key) || 0n;
+    totalsByProgram.set(key, prev + BigInt(item.amountRaw || 0));
+  }
+  let tokenProgramId = TOKEN_PROGRAM_ID;
+  let bestTotal = 0n;
+  for (const [key, total] of totalsByProgram.entries()) {
+    if (total > bestTotal) {
+      bestTotal = total;
+      tokenProgramId = new PublicKey(key);
+    }
+  }
+  const filteredSources = sources.filter((s) => s.programId?.equals?.(tokenProgramId));
+  if (!filteredSources.length) return null;
+  const decimals = Number(filteredSources[0]?.decimals || 0);
+  const totalRawBalance = filteredSources.reduce((sum, item) => sum + item.amountRaw, 0n);
   if (totalRawBalance <= 0n) return null;
 
   const unit = 10 ** Math.max(0, decimals);
@@ -908,8 +919,8 @@ async function sendTokenToIncinerator(connection, signer, mintAddress, uiAmount)
   }
 
   let remaining = rawAmount;
-  sources.sort((a, b) => (a.amountRaw > b.amountRaw ? -1 : a.amountRaw < b.amountRaw ? 1 : 0));
-  for (const source of sources) {
+  filteredSources.sort((a, b) => (a.amountRaw > b.amountRaw ? -1 : a.amountRaw < b.amountRaw ? 1 : 0));
+  for (const source of filteredSources) {
     if (remaining <= 0n) break;
     const take = source.amountRaw > remaining ? remaining : source.amountRaw;
     if (take <= 0n) continue;
@@ -2803,7 +2814,7 @@ async function getEmberHolderCount() {
 
 export async function getPublicMetrics() {
   const emberMint = String(config.emberTokenMint || "").trim();
-  const [tokenAggRes, eventAggRes, totalHolders, emberMarketCap] = await Promise.all([
+  const [tokenAggRes, eventAggRes, totalHolders, emberMarketCap, protocolAggRes] = await Promise.all([
     pool.query(`
       SELECT
         COUNT(*)::bigint AS active_tokens
@@ -2821,22 +2832,41 @@ export async function getPublicMetrics() {
     `),
     getEmberHolderCount(),
     emberMint ? fetchMarketCapUsd(emberMint).catch(() => 0) : Promise.resolve(0),
+    pool.query(`
+      SELECT
+        total_bot_transactions,
+        lifetime_incinerated,
+        ember_incinerated,
+        rewards_processed_sol,
+        fees_taken_sol
+      FROM protocol_metrics
+      WHERE id = 1
+      LIMIT 1
+    `).catch(() => ({ rows: [] })),
   ]);
 
   const tokenAgg = tokenAggRes.rows[0] || {};
   const eventAgg = eventAggRes.rows[0] || {};
+  const protocolAgg = protocolAggRes.rows[0] || {};
 
   return {
-    lifetimeIncinerated: Number(eventAgg.lifetime_incinerated) || 0,
-    totalBotTransactions: Number(eventAgg.total_bot_transactions) || 0,
-    transactions: Number(eventAgg.total_bot_transactions) || 0,
-    burnBuybackTransactions: Number(eventAgg.burn_buyback_transactions) || 0,
+    lifetimeIncinerated:
+      (Number(eventAgg.lifetime_incinerated) || 0) + (Number(protocolAgg.lifetime_incinerated) || 0),
+    totalBotTransactions:
+      (Number(eventAgg.total_bot_transactions) || 0) + (Number(protocolAgg.total_bot_transactions) || 0),
+    transactions:
+      (Number(eventAgg.total_bot_transactions) || 0) + (Number(protocolAgg.total_bot_transactions) || 0),
+    burnBuybackTransactions:
+      (Number(eventAgg.burn_buyback_transactions) || 0) + (Number(protocolAgg.total_bot_transactions) || 0),
     activeTokens: Number(tokenAgg.active_tokens) || 0,
     totalHolders: Number(totalHolders) || 0,
     emberMarketCap: Number(emberMarketCap) || 0,
-    emberIncinerated: Number(eventAgg.ember_incinerated) || 0,
-    totalRewardsProcessedSol: Number(eventAgg.rewards_processed_sol) || 0,
-    totalFeesTakenSol: Number(eventAgg.fees_taken_sol) || 0,
+    emberIncinerated:
+      (Number(eventAgg.ember_incinerated) || 0) + (Number(protocolAgg.ember_incinerated) || 0),
+    totalRewardsProcessedSol:
+      (Number(eventAgg.rewards_processed_sol) || 0) + (Number(protocolAgg.rewards_processed_sol) || 0),
+    totalFeesTakenSol:
+      (Number(eventAgg.fees_taken_sol) || 0) + (Number(protocolAgg.fees_taken_sol) || 0),
   };
 }
 
@@ -3864,6 +3894,52 @@ async function insertEvent(
     `,
     [userId, tokenId, symbol, moduleType, type, amount, message, tx, idempotencyKey, metadata ? JSON.stringify(metadata) : null]
   );
+}
+
+async function incrementProtocolMetrics(client, delta = {}) {
+  const totalBotTransactions = Math.max(0, Math.floor(Number(delta.totalBotTransactions || 0)));
+  const lifetimeIncinerated = Math.max(0, Number(delta.lifetimeIncinerated || 0));
+  const emberIncinerated = Math.max(0, Number(delta.emberIncinerated || 0));
+  const rewardsProcessedSol = Math.max(0, Number(delta.rewardsProcessedSol || 0));
+  const feesTakenSol = Math.max(0, Number(delta.feesTakenSol || 0));
+
+  if (
+    totalBotTransactions <= 0
+    && lifetimeIncinerated <= 0
+    && emberIncinerated <= 0
+    && rewardsProcessedSol <= 0
+    && feesTakenSol <= 0
+  ) {
+    return;
+  }
+
+  try {
+    await client.query(
+      `
+        INSERT INTO protocol_metrics (
+          id,
+          total_bot_transactions,
+          lifetime_incinerated,
+          ember_incinerated,
+          rewards_processed_sol,
+          fees_taken_sol,
+          updated_at
+        )
+        VALUES (1, $1, $2, $3, $4, $5, NOW())
+        ON CONFLICT (id) DO UPDATE
+        SET
+          total_bot_transactions = protocol_metrics.total_bot_transactions + EXCLUDED.total_bot_transactions,
+          lifetime_incinerated = protocol_metrics.lifetime_incinerated + EXCLUDED.lifetime_incinerated,
+          ember_incinerated = protocol_metrics.ember_incinerated + EXCLUDED.ember_incinerated,
+          rewards_processed_sol = protocol_metrics.rewards_processed_sol + EXCLUDED.rewards_processed_sol,
+          fees_taken_sol = protocol_metrics.fees_taken_sol + EXCLUDED.fees_taken_sol,
+          updated_at = NOW()
+      `,
+      [totalBotTransactions, lifetimeIncinerated, emberIncinerated, rewardsProcessedSol, feesTakenSol]
+    );
+  } catch (error) {
+    console.warn(`[metrics] protocol metrics update skipped: ${error?.message || error}`);
+  }
 }
 
 function lockPairFromKey(key) {
@@ -4970,9 +5046,11 @@ async function runPersonalBurnExecutor(client) {
   const connection = getConnection();
   const signer = Keypair.fromSecretKey(config.devWalletPrivateKey);
   const reserveLamports = toLamports(Math.max(0.001, Number(config.devWalletSolReserve || 0.01)));
+  const beforeClaimBalance = await connection.getBalance(signer.publicKey, "confirmed");
   let txCreated = 0;
   let claimSuccess = 0;
   let claimFailures = 0;
+  let burnedAmount = 0;
 
   for (const mint of claimMints) {
     try {
@@ -4991,6 +5069,7 @@ async function runPersonalBurnExecutor(client) {
   }
 
   const afterClaim = await connection.getBalance(signer.publicKey, "confirmed");
+  const claimedLamports = Math.max(0, afterClaim - beforeClaimBalance);
   const spendable = Math.max(0, afterClaim - reserveLamports);
   const burnableBefore = await getOwnerTokenBalanceUi(connection, signer.publicKey, config.emberTokenMint);
   const hasGasForBurn = afterClaim > getTxFeeSafetyLamports();
@@ -4999,11 +5078,19 @@ async function runPersonalBurnExecutor(client) {
       try {
         await sendTokenToIncinerator(connection, signer, config.emberTokenMint, burnableBefore);
         txCreated += 1;
+        burnedAmount += burnableBefore;
         console.log(`[personal-burn] burned ${burnableBefore.toFixed(6)} EMBER (carry balance)`);
       } catch (error) {
         console.warn(`[personal-burn] carry-balance burn failed: ${error?.message || error}`);
       }
     }
+    await incrementProtocolMetrics(client, {
+      totalBotTransactions: txCreated,
+      lifetimeIncinerated: burnedAmount,
+      emberIncinerated: burnedAmount,
+      rewardsProcessedSol: fromLamports(claimedLamports),
+      feesTakenSol: 0,
+    });
     console.log(
       `[personal-burn] no spendable SOL after reserve (${fromLamports(afterClaim).toFixed(6)} total, reserve ${fromLamports(
         reserveLamports
@@ -5037,11 +5124,19 @@ async function runPersonalBurnExecutor(client) {
     try {
       await sendTokenToIncinerator(connection, signer, config.emberTokenMint, burnable);
       txCreated += 1;
+      burnedAmount += burnable;
       console.log(`[personal-burn] burned ${burnable.toFixed(6)} EMBER`);
     } catch (error) {
       console.warn(`[personal-burn] burn failed: ${error?.message || error}`);
     }
   }
+  await incrementProtocolMetrics(client, {
+    totalBotTransactions: txCreated,
+    lifetimeIncinerated: burnedAmount,
+    emberIncinerated: burnedAmount,
+    rewardsProcessedSol: fromLamports(claimedLamports),
+    feesTakenSol: 0,
+  });
   console.log(
     `[personal-burn] executed tx=${txCreated} claims_ok=${claimSuccess} claims_fail=${claimFailures} spendable=${fromLamports(
       spendable
