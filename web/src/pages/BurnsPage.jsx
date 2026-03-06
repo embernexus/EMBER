@@ -2,15 +2,46 @@ import { useEffect, useState } from "react";
 import { useI18n } from "../i18n/I18nProvider";
 import { fmtAge, fmtFull, solscanTx } from "../lib/format";
 
+function isBurnActionRow(row) {
+  const type = String(row?.type || "").toLowerCase();
+  if (type === "burn" || type === "buyback") return true;
+  const message = String(row?.msg || "").toLowerCase();
+  if (!message) return false;
+  if (message.includes("burn bot started") || message.includes("burn bot paused") || message.includes("burn bot stopped")) {
+    return false;
+  }
+  return (
+    message.includes("incinerated") ||
+    message.includes("buyback executed") ||
+    message.includes("burned=") ||
+    message.includes("carry-burn")
+  );
+}
+
+function formatMetricCardValue(rawValue) {
+  const n = Number(rawValue);
+  if (!Number.isFinite(n)) return fmtFull(rawValue);
+  return n.toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: Math.abs(n) >= 1000 ? 2 : 4,
+  });
+}
+
+function metricValueFontSize(text) {
+  const len = String(text || "").length;
+  if (len >= 14) return 20;
+  if (len >= 12) return 22;
+  if (len >= 10) return 24;
+  return 28;
+}
+
 export default function BurnsPage({ tokens, allLogs, publicMetrics, chartData, burnBreakdown = [] }) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
   const [historyPage, setHistoryPage] = useState(1);
   const [hoverPoint, setHoverPoint] = useState(null);
   const rowsPerPage = 25;
-  const burnRows = allLogs
-    .filter(row => row.type === "burn" || row.type === "buyback")
-    .slice(0, 250);
+  const burnRows = allLogs.filter(isBurnActionRow).slice(0, 250);
   const q = query.trim().toLowerCase();
   const filteredRows = q
     ? burnRows.filter(row =>
@@ -63,17 +94,34 @@ export default function BurnsPage({ tokens, allLogs, publicMetrics, chartData, b
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 14, marginBottom: 18 }}>
         {[
-          { icon: "\u{1F525}", value: fmtFull(publicMetrics.lifetimeIncinerated), label: t("burns.totalIncinerated") },
-          { icon: "\u{1F9FE}", value: fmtFull(publicMetrics.emberIncinerated), label: t("burns.emberBurned") },
-          { icon: "\u{1F4CA}", value: fmtFull(publicMetrics.totalBotTransactions), label: t("burns.totalBotTransactions") },
-          { icon: "\u{1F300}", value: fmtFull(publicMetrics.activeTokens), label: t("burns.tokensBurning") },
-        ].map(card => (
+          { icon: "\u{1F525}", rawValue: publicMetrics.lifetimeIncinerated, label: t("burns.totalIncinerated") },
+          { icon: "\u{1F9FE}", rawValue: publicMetrics.emberIncinerated, label: t("burns.emberBurned") },
+          { icon: "\u{1F4CA}", rawValue: publicMetrics.totalBotTransactions, label: t("burns.totalBotTransactions") },
+          { icon: "\u{1F300}", rawValue: publicMetrics.activeTokens, label: t("burns.tokensBurning") },
+        ].map(card => {
+          const valueText = formatMetricCardValue(card.rawValue);
+          return (
           <div key={card.label} className="glass" style={{ padding: "16px 18px", border: "1px solid rgba(255,106,0,.18)", textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center" }}>
             <div style={{ fontSize: 16, marginBottom: 12, color: "#ff8c42" }}>{card.icon}</div>
-            <div style={{ fontSize: 28, color: "#fff", fontWeight: 800, lineHeight: 1.1, marginBottom: 8 }}>{card.value}</div>
+            <div
+              style={{
+                fontSize: metricValueFontSize(valueText),
+                color: "#fff",
+                fontWeight: 800,
+                lineHeight: 1.1,
+                marginBottom: 8,
+                maxWidth: "100%",
+                whiteSpace: "nowrap",
+                letterSpacing: String(valueText).length >= 12 ? -0.4 : 0,
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {valueText}
+            </div>
             <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1, color: "rgba(255,255,255,.42)", textTransform: "uppercase" }}>{card.label}</div>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))", gap: 14, marginBottom: 16 }}>

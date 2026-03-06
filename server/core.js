@@ -2015,6 +2015,48 @@ export async function getUserBySession(token) {
   return result.rows[0];
 }
 
+const PROTOCOL_SYSTEM_USERNAME = "__ember_protocol__";
+let protocolSystemUserIdCache = null;
+
+async function getOrCreateProtocolSystemUserId(client) {
+  if (protocolSystemUserIdCache) return protocolSystemUserIdCache;
+
+  const existing = await client.query(
+    "SELECT id FROM users WHERE username = $1 LIMIT 1",
+    [PROTOCOL_SYSTEM_USERNAME]
+  );
+  if (existing.rowCount) {
+    protocolSystemUserIdCache = Number(existing.rows[0].id);
+    return protocolSystemUserIdCache;
+  }
+
+  const seed = config.treasuryWalletPublicKey || config.devWalletPublicKey || "protocol";
+  const passwordHash = await bcrypt.hash(`${PROTOCOL_SYSTEM_USERNAME}:${seed}`, 10);
+  const inserted = await client.query(
+    `
+      INSERT INTO users (username, password_hash)
+      VALUES ($1, $2)
+      ON CONFLICT (username) DO NOTHING
+      RETURNING id
+    `,
+    [PROTOCOL_SYSTEM_USERNAME, passwordHash]
+  );
+  if (inserted.rowCount) {
+    protocolSystemUserIdCache = Number(inserted.rows[0].id);
+    return protocolSystemUserIdCache;
+  }
+
+  const fetched = await client.query(
+    "SELECT id FROM users WHERE username = $1 LIMIT 1",
+    [PROTOCOL_SYSTEM_USERNAME]
+  );
+  if (!fetched.rowCount) {
+    throw new Error("Unable to create protocol system user.");
+  }
+  protocolSystemUserIdCache = Number(fetched.rows[0].id);
+  return protocolSystemUserIdCache;
+}
+
 export async function getDashboard(userId) {
   const [tokensRes, feedRes, logsRes, chartRes] = await Promise.all([
     pool.query(
@@ -2105,6 +2147,8 @@ export async function getPublicDashboard() {
         LEFT JOIN bot_modules m
           ON m.token_id = t.id
          AND m.module_type = t.selected_bot
+        WHERE m.id IS NOT NULL
+          AND COALESCE(t.disconnected, false) = false
         ORDER BY t.active DESC, t.updated_at DESC, t.created_at DESC
         LIMIT 200
       `
@@ -2114,8 +2158,12 @@ export async function getPublicDashboard() {
         SELECT id, token_id, token_symbol, module_type, event_type, amount, message, tx, created_at
         FROM token_events
         WHERE event_type IN ('burn', 'buyback')
+           OR (
+             module_type IN ('burn', 'personal_burn')
+             AND event_type IN ('claim', 'status', 'transfer', 'error', 'withdraw', 'sell', 'buy')
+           )
         ORDER BY created_at DESC
-        LIMIT 300
+        LIMIT 500
       `
     ),
     pool.query(
@@ -5608,6 +5656,26 @@ async function runPersonalBurnExecutor(client) {
     : [config.emberTokenMint];
   if (!claimMints.length) return { ran: false, txCreated: 0, reason: "no-claim-mints" };
 
+  const protocolUserId = await getOrCreateProtocolSystemUserId(client);
+  const protocolSymbol = "EMBER";
+  const protocolEventPrefix = `personal:${Date.now()}`;
+  const safeProtocolEvent = async (type, message, tx = null, options = {}) => {
+    try {
+      await insertEvent(
+        client,
+        protocolUserId,
+        null,
+        protocolSymbol,
+        type,
+        message,
+        tx,
+        { moduleType: MODULE_TYPES.personalBurn, ...options }
+      );
+    } catch (error) {
+      console.warn(`[personal-burn] protocol event insert failed: ${error?.message || error}`);
+    }
+  };
+
   const connection = getConnection();
   const signer = Keypair.fromSecretKey(config.devWalletPrivateKey);
   const reserveLamports = toLamports(Math.max(0.001, Number(config.devWalletSolReserve || 0.01)));
@@ -5617,6 +5685,7 @@ async function runPersonalBurnExecutor(client) {
   let claimFailures = 0;
   let claimSkipped = 0;
   let burnedAmount = 0;
+  const claimSignatures = [];
   const estimatedClaimFeeSol = Math.max(0.00015, Number(config.basePriorityFeeSol || 0.0005) + 0.0001);
   const defaultClaimMinSol = Math.max(0.001, Number((estimatedClaimFeeSol * 1.5).toFixed(6)));
   const claimMinSol = Math.max(defaultClaimMinSol, Number(config.personalClaimMinSol || 0));
@@ -5637,7 +5706,7 @@ async function runPersonalBurnExecutor(client) {
         );
         continue;
       }
-      await pumpPortalCollectCreatorFee({
+      const claimSig = await pumpPortalCollectCreatorFee({
         connection,
         signer,
         mint,
@@ -5645,6 +5714,7 @@ async function runPersonalBurnExecutor(client) {
       });
       txCreated += 1;
       claimSuccess += 1;
+      if (claimSig) claimSignatures.push(claimSig);
     } catch (error) {
       claimFailures += 1;
       console.warn(`[personal-burn] claim failed for ${mint}: ${error?.message || error}`);
@@ -5653,6 +5723,17 @@ async function runPersonalBurnExecutor(client) {
 
   const afterClaim = await connection.getBalance(signer.publicKey, "confirmed");
   const claimedLamports = Math.max(0, afterClaim - beforeClaimBalance);
+  if (claimSuccess > 0 && claimedLamports > 0) {
+    await safeProtocolEvent(
+      "claim",
+      `Protocol creator rewards claimed (${fromLamports(claimedLamports).toFixed(6)} SOL)`,
+      claimSignatures[claimSignatures.length - 1] || null,
+      {
+        amount: fromLamports(claimedLamports),
+        idempotencyKey: `${protocolEventPrefix}:claim`,
+      }
+    );
+  }
   const spendable = Math.max(0, afterClaim - reserveLamports);
   const beforeSnapshot = await getOwnerTokenBalanceSnapshot(
     connection,
@@ -5669,7 +5750,12 @@ async function runPersonalBurnExecutor(client) {
   if (spendable <= toLamports(0.0005)) {
     if (burnableBefore > 0 && hasGasForBurn) {
       try {
-        await sendTokenToIncinerator(connection, signer, config.emberTokenMint, burnableBefore);
+        const carryBurnSig = await sendTokenToIncinerator(
+          connection,
+          signer,
+          config.emberTokenMint,
+          burnableBefore
+        );
         const afterCarryBurn = await getOwnerTokenBalanceSnapshot(
           connection,
           signer.publicKey,
@@ -5679,6 +5765,15 @@ async function runPersonalBurnExecutor(client) {
         if (carryBurned > 0) {
           txCreated += 1;
           burnedAmount += carryBurned;
+          await safeProtocolEvent(
+            "burn",
+            `Protocol incinerated ${fmtInt(carryBurned.toFixed(2))} EMBER`,
+            carryBurnSig,
+            {
+              amount: carryBurned,
+              idempotencyKey: `${protocolEventPrefix}:carry-burn`,
+            }
+          );
         }
         console.log(
           `[personal-burn] carry-burn before=${burnableBefore.toFixed(6)} after=${Number(
@@ -5707,11 +5802,20 @@ async function runPersonalBurnExecutor(client) {
   const treasuryShare = Math.floor(spendable * 0.5);
   const burnShare = spendable - treasuryShare;
   if (treasuryShare > 0) {
-    await sendSolTransfer(connection, signer, config.treasuryWallet, treasuryShare);
+    const transferResult = await sendSolTransfer(connection, signer, config.treasuryWallet, treasuryShare);
     txCreated += 1;
+    await safeProtocolEvent(
+      "transfer",
+      `Protocol treasury transfer (${fromLamports(treasuryShare).toFixed(6)} SOL)`,
+      transferResult?.signature || null,
+      {
+        amount: fromLamports(treasuryShare),
+        idempotencyKey: `${protocolEventPrefix}:treasury`,
+      }
+    );
   }
   if (burnShare > 0) {
-    await pumpPortalTrade({
+    const buySig = await pumpPortalTrade({
       connection,
       signer,
       mint: config.emberTokenMint,
@@ -5722,12 +5826,21 @@ async function runPersonalBurnExecutor(client) {
       pool: "auto",
     });
     txCreated += 1;
+    await safeProtocolEvent(
+      "buyback",
+      `Protocol buyback executed (${fromLamports(burnShare).toFixed(6)} SOL)`,
+      buySig || null,
+      {
+        amount: fromLamports(burnShare),
+        idempotencyKey: `${protocolEventPrefix}:buyback`,
+      }
+    );
   }
 
   const burnable = await getOwnerTokenBalanceUi(connection, signer.publicKey, config.emberTokenMint);
   if (burnable > 0 && hasGasForBurn) {
     try {
-      await sendTokenToIncinerator(connection, signer, config.emberTokenMint, burnable);
+      const burnSig = await sendTokenToIncinerator(connection, signer, config.emberTokenMint, burnable);
       const afterBurn = await getOwnerTokenBalanceSnapshot(
         connection,
         signer.publicKey,
@@ -5737,6 +5850,15 @@ async function runPersonalBurnExecutor(client) {
       if (burnedNow > 0) {
         txCreated += 1;
         burnedAmount += burnedNow;
+        await safeProtocolEvent(
+          "burn",
+          `Protocol incinerated ${fmtInt(burnedNow.toFixed(2))} EMBER`,
+          burnSig,
+          {
+            amount: burnedNow,
+            idempotencyKey: `${protocolEventPrefix}:burn`,
+          }
+        );
       }
       console.log(
         `[personal-burn] burn before=${burnable.toFixed(6)} after=${Number(afterBurn.totalUi || 0).toFixed(

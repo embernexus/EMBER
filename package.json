@@ -15,7 +15,8 @@
     "db:status": "node scripts/db-portability.mjs status",
     "db:export": "node scripts/db-portability.mjs export",
     "db:import": "node scripts/db-portability.mjs import",
-    "db:reset": "node scripts/db-portability.mjs reset"
+    "db:reset": "node scripts/db-portability.mjs reset",
+    "db:backfill:personal-burn": "node scripts/backfill-personal-burn-events.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
