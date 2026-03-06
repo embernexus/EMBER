@@ -33,17 +33,31 @@ try {
     const isIpv4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
     const looksLikeSupabaseDirectHost =
       host.startsWith("db.") && host.endsWith(".supabase.co");
+    const looksLikeSupabasePoolerHost = host.endsWith(".pooler.supabase.com");
+    const fallbackPoolerHost = String(
+      process.env.SUPABASE_POOLER_HOST || "aws-0-us-west-2.pooler.supabase.com"
+    ).trim();
+    const fallbackPoolerPort = String(process.env.SUPABASE_POOLER_PORT || "6543").trim();
     if (looksLikeSupabaseDirectHost) {
-      const fallbackPoolerHost = String(
-        process.env.SUPABASE_POOLER_HOST || "aws-0-us-west-2.pooler.supabase.com"
-      ).trim();
-      const fallbackPoolerPort = String(process.env.SUPABASE_POOLER_PORT || "6543").trim();
       if (fallbackPoolerHost) {
         parsed.hostname = fallbackPoolerHost;
         if (!parsed.port || parsed.port === "5432") parsed.port = fallbackPoolerPort;
         resolvedDatabaseUrl = parsed.toString();
         console.warn(
           `[db] swapped Supabase direct host (${host}) for pooler (${parsed.hostname}:${parsed.port})`
+        );
+      }
+    }
+    if (looksLikeSupabasePoolerHost && (!parsed.port || parsed.port === "5432")) {
+      parsed.port = fallbackPoolerPort || "6543";
+      resolvedDatabaseUrl = parsed.toString();
+      console.warn(`[db] adjusted Supabase pooler port to ${parsed.port} for ${host}`);
+    }
+    if (looksLikeSupabasePoolerHost) {
+      const user = decodeURIComponent(String(parsed.username || ""));
+      if (user && user === "postgres") {
+        console.warn(
+          "[db] Supabase pooler usually requires username format 'postgres.<project-ref>' (not plain 'postgres')."
         );
       }
     }
@@ -76,10 +90,34 @@ try {
 } catch {
   // best effort
 }
+try {
+  const parsed = new URL(poolConnectionString);
+  const safeUser = decodeURIComponent(String(parsed.username || ""));
+  const safeHost = String(parsed.hostname || "");
+  const safePort = String(parsed.port || "5432");
+  console.log(`[db] target ${safeUser || "<no-user>"}@${safeHost}:${safePort}`);
+} catch {
+  // best effort
+}
+
+const poolMax = Math.max(1, Number(process.env.PG_POOL_MAX || 4));
+const poolMin = Math.max(0, Math.min(poolMax - 1, Number(process.env.PG_POOL_MIN || 0)));
+const connectTimeoutMs = Math.max(3000, Number(process.env.PG_CONNECT_TIMEOUT_MS || 10000));
+const idleTimeoutMs = Math.max(5000, Number(process.env.PG_IDLE_TIMEOUT_MS || 30000));
+const keepAliveInitialDelayMs = Math.max(
+  1000,
+  Number(process.env.PG_KEEPALIVE_INITIAL_DELAY_MS || 10000)
+);
 
 export const pool = new Pool({
   connectionString: poolConnectionString,
   ssl: process.env.PGSSLMODE === "disable" ? false : { rejectUnauthorized: false },
+  max: poolMax,
+  min: poolMin,
+  connectionTimeoutMillis: connectTimeoutMs,
+  idleTimeoutMillis: idleTimeoutMs,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: keepAliveInitialDelayMs,
   statement_timeout: 0,
   query_timeout: 0,
   idle_in_transaction_session_timeout: 0,

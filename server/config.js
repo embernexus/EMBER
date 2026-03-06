@@ -4,6 +4,14 @@ import { Keypair } from "@solana/web3.js";
 
 dotenv.config();
 
+function cleanEnvString(input) {
+  return String(input || "")
+    .trim()
+    .replace(/^['"]+|['"]+$/g, "")
+    .replace(/\\n/g, "")
+    .trim();
+}
+
 function parsePrivateKey(input, label) {
   const name = String(label || "PRIVATE_KEY");
   const raw = String(input || "").trim();
@@ -63,9 +71,7 @@ const parsedTreasuryWallet = parsePrivateKey(
 
 export const config = {
   port: Number(process.env.PORT || 3001),
-  databaseUrl: String(process.env.DATABASE_URL || "")
-    .trim()
-    .replace(/^['"]+|['"]+$/g, ""),
+  databaseUrl: cleanEnvString(process.env.DATABASE_URL || ""),
   sessionCookieName: process.env.SESSION_COOKIE_NAME || "ember_session",
   sessionTtlDays: Number(process.env.SESSION_TTL_DAYS || 14),
   maxTokensPerAccount: Number(process.env.MAX_TOKENS_PER_ACCOUNT || 5),
@@ -73,12 +79,12 @@ export const config = {
   executorTickMs: Number(process.env.EXECUTOR_TICK_MS || 250),
   schedulerBatchLimit: Number(process.env.SCHEDULER_BATCH_LIMIT || 500),
   executorBatchLimit: Number(process.env.EXECUTOR_BATCH_LIMIT || 32),
-  rpcUrl: String(
+  rpcUrl: cleanEnvString(
     process.env.SOLANA_RPC_URL ||
       process.env.HELIUS_RPC_URL ||
       process.env.VITE_SOLANA_RPC_URL ||
       ""
-  ).trim(),
+  ),
   treasuryWallet: String(process.env.TREASURY_WALLET || "EMBERDnVaS8rc3mVVRjaiciCdFVCJdu2h22bYWeAm953").trim(),
   emberTokenMint: String(
     process.env.EMBER_TOKEN_MINT ||
