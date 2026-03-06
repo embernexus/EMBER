@@ -6,6 +6,12 @@ import { config } from "./config.js";
 if (!config.databaseUrl) {
   throw new Error("DATABASE_URL is required.");
 }
+if (!/^postgres(ql)?:\/\//i.test(config.databaseUrl)) {
+  throw new Error("DATABASE_URL must be a valid postgres:// or postgresql:// URL.");
+}
+if (/[<>]/.test(config.databaseUrl)) {
+  throw new Error("DATABASE_URL still contains placeholder markers (< >). Use your real DB URL.");
+}
 
 try {
   // Prefer IPv4 first to avoid ENETUNREACH when host IPv6 egress is unavailable.
