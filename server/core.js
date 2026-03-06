@@ -2085,6 +2085,15 @@ async function pumpPortalCollectCreatorFee({ connection, signer, mint, pool = "a
 const DEPOSIT_POOL_MAX = 20;
 const DEPOSIT_POOL_LOCK_KEY = "884420002001";
 let depositPoolRefilling = false;
+let depositFallbackModeLogged = false;
+let depositFallbackFailureLoggedAt = 0;
+let depositPoolProgress = {
+  startedAt: 0,
+  lastLoggedAt: 0,
+  checked: 0,
+  found: 0,
+  currentPrefix: "",
+};
 
 function validateDepositVanityPrefix(input) {
   const prefix = String(input || "").trim().toUpperCase();
@@ -2306,6 +2315,7 @@ async function runJsVanityGrind(prefix) {
       return {
         pubkey,
         secretKeyBase58: bs58.encode(keypair.secretKey),
+        checkedCount: attempts,
       };
     }
     if (attempts % yieldEvery === 0) {
@@ -2321,6 +2331,7 @@ function generateNonVanityDeposit() {
   return {
     pubkey: keypair.publicKey.toBase58(),
     secretKeyBase58: bs58.encode(keypair.secretKey),
+    checkedCount: 1,
   };
 }
 
@@ -2334,21 +2345,29 @@ async function generateVanityDeposit(prefix) {
     return await runSolanaKeygenGrind(prefix);
   } catch (error) {
     if (isRenderRuntime && !allowRenderJsFallback) {
-      console.warn(
-        `[deposit] solana-keygen unavailable on Render; using non-vanity keypair: ${error?.message || error}`
-      );
+      if (!depositFallbackModeLogged) {
+        depositFallbackModeLogged = true;
+        console.warn("[deposit] solana-keygen unavailable on Render; using non-vanity fallback for wallet generation.");
+      }
       return generateNonVanityDeposit();
     }
     if (!config.depositVanityAllowJsFallback) {
       throw error;
     }
-    console.warn(`[deposit] solana-keygen unavailable or failed, using JS fallback: ${error?.message || error}`);
+    if (!depositFallbackModeLogged) {
+      depositFallbackModeLogged = true;
+      console.warn("[deposit] solana-keygen unavailable or failed; using JS vanity fallback for wallet generation.");
+    }
     try {
       return await runJsVanityGrind(prefix);
     } catch (jsError) {
       // Last-resort fallback for constrained hosts (e.g., Render free/shared CPU):
       // always return a valid keypair so bot setup is never blocked by vanity grind timing.
-      console.warn(`[deposit] JS vanity grind failed, using non-vanity keypair: ${jsError?.message || jsError}`);
+      const now = Date.now();
+      if (now - depositFallbackFailureLoggedAt >= 60_000) {
+        depositFallbackFailureLoggedAt = now;
+        console.warn("[deposit] JS vanity grind timed out; using non-vanity fallback for wallet generation.");
+      }
       return generateNonVanityDeposit();
     }
   }
@@ -2395,6 +2414,65 @@ function buildPoolWarmupMessage(required, available) {
   return `Address pool is warming up. Creating addresses 1 out of ${missing} needed. Approx ${minSec}-${maxSec}s remaining.`;
 }
 
+function formatDepositPoolReady(byPrefix = []) {
+  const entries = Array.isArray(byPrefix) ? byPrefix : [];
+  const read = (prefix) => {
+    const row = entries.find((item) => String(item?.prefix || "") === prefix);
+    return {
+      total: Number(row?.total || 0),
+      target: Number(row?.target || 0),
+    };
+  };
+  const ember = read("EMBER");
+  const embr = read("EMBR");
+  return `${embr.total}/${embr.target} EMBR and ${ember.total}/${ember.target} EMBER wallets ready`;
+}
+
+async function loadDepositPoolCounts(client, targets = getDepositPoolTargets()) {
+  const rows = [];
+  for (const entry of targets) {
+    const countRes = await client.query(
+      "SELECT COUNT(*)::int AS c FROM token_deposit_pool WHERE prefix = $1",
+      [entry.prefix]
+    );
+    rows.push({
+      prefix: entry.prefix,
+      target: entry.target,
+      total: Number(countRes.rows[0]?.c || 0),
+    });
+  }
+  return rows;
+}
+
+function maybeLogDepositPoolProgress(byPrefix = []) {
+  const now = Date.now();
+  if (!depositPoolProgress.startedAt) return;
+  if (now - depositPoolProgress.lastLoggedAt < 60_000) return;
+  depositPoolProgress.lastLoggedAt = now;
+  console.log(
+    `[deposit] filling pool, checked ${Math.max(0, depositPoolProgress.checked)} wallets, found ${Math.max(0, depositPoolProgress.found)}; ${formatDepositPoolReady(byPrefix)}`
+  );
+}
+
+export async function getDepositPoolStatus() {
+  const targets = getDepositPoolTargets();
+  if (!targets.length) {
+    return { byPrefix: [], summary: "0/0 EMBR and 0/0 EMBER wallets ready", total: 0, target: 0 };
+  }
+  const client = await pool.connect();
+  try {
+    const byPrefix = await loadDepositPoolCounts(client, targets);
+    return {
+      byPrefix,
+      summary: formatDepositPoolReady(byPrefix),
+      total: byPrefix.reduce((sum, row) => sum + Number(row.total || 0), 0),
+      target: byPrefix.reduce((sum, row) => sum + Number(row.target || 0), 0),
+    };
+  } finally {
+    client.release();
+  }
+}
+
 async function withDepositPoolLock(fn) {
   const client = await pool.connect();
   try {
@@ -2418,19 +2496,21 @@ export async function ensureDepositPool(targetInput = config.depositPoolTarget) 
   const totalTarget = targets.reduce((sum, item) => sum + item.target, 0);
   if (depositPoolRefilling) return { target: totalTarget, created: 0, total: null, skipped: true };
   depositPoolRefilling = true;
+  depositPoolProgress = {
+    startedAt: Date.now(),
+    lastLoggedAt: 0,
+    checked: 0,
+    found: 0,
+    currentPrefix: "",
+  };
   try {
     const lockResult = await withDepositPoolLock(async (client) => {
       let created = 0;
       while (true) {
         let missingEntry = null;
-        const byPrefix = [];
-        for (const entry of targets) {
-          const countRes = await client.query(
-            "SELECT COUNT(*)::int AS c FROM token_deposit_pool WHERE prefix = $1",
-            [entry.prefix]
-          );
-          const totalForPrefix = Number(countRes.rows[0]?.c || 0);
-          byPrefix.push({ prefix: entry.prefix, target: entry.target, total: totalForPrefix });
+        const byPrefix = await loadDepositPoolCounts(client, targets);
+        for (const entry of byPrefix) {
+          const totalForPrefix = Number(entry.total || 0);
           if (!missingEntry && totalForPrefix < entry.target) {
             missingEntry = entry;
           }
@@ -2440,7 +2520,9 @@ export async function ensureDepositPool(targetInput = config.depositPoolTarget) 
           const target = byPrefix.reduce((sum, item) => sum + item.target, 0);
           return { target, created, total, byPrefix };
         }
+        depositPoolProgress.currentPrefix = String(missingEntry.prefix || "");
         const generated = await generateVanityDeposit(missingEntry.prefix);
+        depositPoolProgress.checked += Math.max(1, Number(generated?.checkedCount || 1));
         const storedSecret = encryptDepositSecret(generated.secretKeyBase58);
         try {
           await client.query(
@@ -2451,9 +2533,12 @@ export async function ensureDepositPool(targetInput = config.depositPoolTarget) 
             [missingEntry.prefix, generated.pubkey, storedSecret]
           );
           created += 1;
+          depositPoolProgress.found += 1;
         } catch {
           // Duplicate key collisions are very unlikely; just retry loop.
         }
+        const nextByPrefix = await loadDepositPoolCounts(client, targets);
+        maybeLogDepositPoolProgress(nextByPrefix);
       }
     });
 
@@ -2478,6 +2563,13 @@ export async function ensureDepositPool(targetInput = config.depositPoolTarget) 
     return lockResult.result;
   } finally {
     depositPoolRefilling = false;
+    depositPoolProgress = {
+      startedAt: 0,
+      lastLoggedAt: 0,
+      checked: 0,
+      found: 0,
+      currentPrefix: "",
+    };
   }
 }
 

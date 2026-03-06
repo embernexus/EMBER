@@ -12,6 +12,7 @@ import {
   getPublicDashboard,
   deployToken,
   ensureDepositPool,
+  getDepositPoolStatus,
   generatePendingDepositAddress,
   getTelegramAlertSettings,
   getOperatorAccess,
@@ -51,6 +52,7 @@ let dbEverReady = false;
 let lastDbRetryTriggerAt = 0;
 let lastDbAuthErrorLogAt = 0;
 let dbAuthErrorSuppressed = 0;
+let depositPoolStatusInterval = null;
 
 const trustProxy = String(process.env.TRUST_PROXY || "true").toLowerCase() !== "false";
 if (trustProxy) app.set("trust proxy", 1);
@@ -772,12 +774,31 @@ async function initDbWithRetry() {
         void ensureDepositPool().catch((error) => {
           console.warn("[api] deposit pool warmup failed:", error?.message || error);
         });
+        void getDepositPoolStatus()
+          .then((status) => {
+            console.log(`[deposit] ${status.summary}`);
+          })
+          .catch((error) => {
+            console.warn("[api] deposit pool status failed:", error?.message || error);
+          });
         const refillMs = Math.max(5000, Number(config.depositPoolRefillIntervalMs || 15000));
         setInterval(() => {
           void ensureDepositPool().catch((error) => {
             console.warn("[api] deposit pool refill failed:", error?.message || error);
           });
         }, refillMs);
+        if (!depositPoolStatusInterval) {
+          const statusMs = Math.max(60_000, Number(process.env.DEPOSIT_POOL_STATUS_LOG_MS || 300_000));
+          depositPoolStatusInterval = setInterval(() => {
+            void getDepositPoolStatus()
+              .then((status) => {
+                console.log(`[deposit] ${status.summary}`);
+              })
+              .catch((error) => {
+                console.warn("[api] deposit pool status failed:", error?.message || error);
+              });
+          }, statusMs);
+        }
         return;
       } catch (error) {
         attempts += 1;
