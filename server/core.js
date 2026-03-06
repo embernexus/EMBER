@@ -2790,7 +2790,8 @@ async function getEmberHolderCount() {
 }
 
 export async function getPublicMetrics() {
-  const [tokenAggRes, eventAggRes, totalHolders] = await Promise.all([
+  const emberMint = String(config.emberTokenMint || "").trim();
+  const [tokenAggRes, eventAggRes, totalHolders, emberMarketCap] = await Promise.all([
     pool.query(`
       SELECT
         COUNT(*)::bigint AS active_tokens
@@ -2807,6 +2808,7 @@ export async function getPublicMetrics() {
       FROM token_events
     `),
     getEmberHolderCount(),
+    emberMint ? fetchMarketCapUsd(emberMint).catch(() => 0) : Promise.resolve(0),
   ]);
 
   const tokenAgg = tokenAggRes.rows[0] || {};
@@ -2819,6 +2821,7 @@ export async function getPublicMetrics() {
     burnBuybackTransactions: Number(eventAgg.burn_buyback_transactions) || 0,
     activeTokens: Number(tokenAgg.active_tokens) || 0,
     totalHolders: Number(totalHolders) || 0,
+    emberMarketCap: Number(emberMarketCap) || 0,
     emberIncinerated: Number(eventAgg.ember_incinerated) || 0,
     totalRewardsProcessedSol: Number(eventAgg.rewards_processed_sol) || 0,
     totalFeesTakenSol: Number(eventAgg.fees_taken_sol) || 0,
@@ -4977,7 +4980,18 @@ async function runPersonalBurnExecutor(client) {
 
   const afterClaim = await connection.getBalance(signer.publicKey, "confirmed");
   const spendable = Math.max(0, afterClaim - reserveLamports);
+  const burnableBefore = await getOwnerTokenBalanceUi(connection, signer.publicKey, config.emberTokenMint);
+  const hasGasForBurn = afterClaim > getTxFeeSafetyLamports();
   if (spendable <= toLamports(0.0005)) {
+    if (burnableBefore > 0 && hasGasForBurn) {
+      try {
+        await sendTokenToIncinerator(connection, signer, config.emberTokenMint, burnableBefore);
+        txCreated += 1;
+        console.log(`[personal-burn] burned ${burnableBefore.toFixed(6)} EMBER (carry balance)`);
+      } catch (error) {
+        console.warn(`[personal-burn] carry-balance burn failed: ${error?.message || error}`);
+      }
+    }
     console.log(
       `[personal-burn] no spendable SOL after reserve (${fromLamports(afterClaim).toFixed(6)} total, reserve ${fromLamports(
         reserveLamports
@@ -5007,10 +5021,14 @@ async function runPersonalBurnExecutor(client) {
   }
 
   const burnable = await getOwnerTokenBalanceUi(connection, signer.publicKey, config.emberTokenMint);
-  if (burnable > 0) {
-    await sendTokenToIncinerator(connection, signer, config.emberTokenMint, burnable);
-    txCreated += 1;
-    console.log(`[personal-burn] burned ${burnable.toFixed(6)} EMBER`);
+  if (burnable > 0 && hasGasForBurn) {
+    try {
+      await sendTokenToIncinerator(connection, signer, config.emberTokenMint, burnable);
+      txCreated += 1;
+      console.log(`[personal-burn] burned ${burnable.toFixed(6)} EMBER`);
+    } catch (error) {
+      console.warn(`[personal-burn] burn failed: ${error?.message || error}`);
+    }
   }
   console.log(
     `[personal-burn] executed tx=${txCreated} claims_ok=${claimSuccess} claims_fail=${claimFailures} spendable=${fromLamports(
