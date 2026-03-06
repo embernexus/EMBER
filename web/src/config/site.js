@@ -32,7 +32,7 @@ export const SOCIAL_LINKS = {
     import.meta.env.VITE_COMMUNITY_X_URL
       || import.meta.env.VITE_CREATOR_X_URL
       || import.meta.env.VITE_X_URL,
-    "https://x.com/ember_nexus"
+    "https://x.com/i/communities/2029665598809198626"
   ),
   telegram: envOr(import.meta.env.VITE_TELEGRAM_URL, "https://t.me/ember_nexus"),
   github: envOr(import.meta.env.VITE_GITHUB_URL, "https://github.com/embernexus"),
