@@ -98,7 +98,7 @@ export default function HomePage({ heroWord, publicMetrics, onShowLogin }) {
             "Vanity Deploy Wallets",
             "Telegram Alerts",
             "Creator Rewards / External Funding / Hybrid",
-            "Manager Access",
+            "Team Access",
           ].map((item) => (
             <div
               key={item}

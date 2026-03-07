@@ -112,6 +112,19 @@ function isDbAuthFailureMessage(input) {
   );
 }
 
+function isDbConnectFailureMessage(input) {
+  const msg = String(input || "").toLowerCase();
+  return (
+    msg.includes("timeout exceeded when trying to connect") ||
+    msg.includes("connection terminated unexpectedly") ||
+    msg.includes("connection failure during authentication") ||
+    msg.includes("connect etimedout") ||
+    msg.includes("failed to connect to server") ||
+    msg.includes("sorry, too many clients already") ||
+    msg.includes("the database system is starting up")
+  );
+}
+
 function isDbInitTimeout(error) {
   const code = String(error?.code || "").trim();
   const msg = String(error?.message || "").toLowerCase();
@@ -309,12 +322,17 @@ async function authRequired(req, res, next) {
 }
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true });
+  res.json({ ok: true, dbReady, dbEverReady });
+});
+
+app.get("/api/ready", (_req, res) => {
+  if (dbReady) return res.json({ ok: true });
+  return res.status(503).json({ ok: false, error: "Database not ready" });
 });
 
 app.use("/api", (req, res, next) => {
-  if (req.path === "/health") return next();
-  if (dbReady || dbEverReady) return next();
+  if (req.path === "/health" || req.path === "/ready") return next();
+  if (dbReady) return next();
   return res.status(503).json({ error: "Service warming up. Database reconnecting." });
 });
 
@@ -790,11 +808,13 @@ app.get(/^\/(?!api).*/, (_req, res) => {
 app.use((error, _req, res, _next) => {
   const message = String(error?.message || "Internal server error");
   const dbAuthFailure = isDbAuthFailureMessage(message);
-  if (dbAuthFailure) {
+  const dbConnectFailure = isDbConnectFailureMessage(message);
+  const dbFailure = dbAuthFailure || dbConnectFailure;
+  if (dbFailure) {
     const now = Date.now();
     const cooldownMs = Math.max(10_000, Number(process.env.DB_RETRY_TRIGGER_COOLDOWN_MS || 30_000));
-    // Keep API online after initial boot. The pg pool can recover on its own from transient auth/network flaps.
-    if (!dbEverReady && !dbReady && !dbInitRunning && now - lastDbRetryTriggerAt >= cooldownMs) {
+    dbReady = false;
+    if (!dbInitRunning && now - lastDbRetryTriggerAt >= cooldownMs) {
       lastDbRetryTriggerAt = now;
       void initDbWithRetry();
     }
@@ -810,16 +830,18 @@ app.use((error, _req, res, _next) => {
 
   const status = Number.isInteger(error?.status)
     ? Number(error.status)
-    : dbAuthFailure
+    : dbFailure
       ? 503
       : isClient
         ? 400
         : 500;
-  const safeMessage = status >= 500 && process.env.NODE_ENV === "production"
+  const safeMessage = dbFailure
+    ? "Service warming up. Database reconnecting."
+    : status >= 500 && process.env.NODE_ENV === "production"
     ? "Internal server error"
     : message;
   if (status >= 500) {
-    if (dbAuthFailure) {
+    if (dbFailure) {
       const now = Date.now();
       const logWindowMs = Math.max(5_000, Number(process.env.DB_AUTH_LOG_WINDOW_MS || 30_000));
       if (now - lastDbAuthErrorLogAt >= logWindowMs) {

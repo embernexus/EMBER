@@ -482,7 +482,7 @@ export default function DashboardPage({
                 Telegram Alerts
               </button>
               <button className="btn-ghost" onClick={() => setShowManagerModal(true)} style={{ padding: "9px 14px", fontSize: 12 }}>
-                {canManageAccess ? "Manager Access" : "Access Level"}
+                {canManageAccess ? "Team Access" : "Access Level"}
               </button>
               {isAdmin && (
                 <button className="btn-ghost" onClick={() => setShowAdminModal(true)} style={{ padding: "9px 14px", fontSize: 12 }}>
@@ -966,7 +966,7 @@ export default function DashboardPage({
       )}
 
       {showManagerModal && (
-        <ActionModal title={canManageAccess ? "Manager Access" : "Access Level"} onClose={() => setShowManagerModal(false)}>
+        <ActionModal title={canManageAccess ? "Team Access" : "Access Level"} onClose={() => setShowManagerModal(false)}>
           {canManageAccess ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <div style={{ fontSize: 12, color: "rgba(255,255,255,.45)", lineHeight: 1.6 }}>

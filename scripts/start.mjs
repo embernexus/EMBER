@@ -3,11 +3,14 @@ import process from "node:process";
 
 const isWindows = process.platform === "win32";
 const npmBin = isWindows ? "npm.cmd" : "npm";
+const apiPort = Math.max(1, Number(process.env.PORT || 3002));
+const apiReadyUrl = `http://127.0.0.1:${apiPort}/api/ready`;
 
 let shuttingDown = false;
 let apiChild = null;
 let workerChild = null;
 let workerRestartTimer = null;
+let workerStarted = false;
 
 function pipeWithPrefix(stream, tag) {
   if (!stream) return;
@@ -53,8 +56,23 @@ function shutdown(exitCode = 0) {
   setTimeout(() => process.exit(exitCode), 800);
 }
 
+async function waitForApiReady(timeoutMs = 180_000) {
+  const startedAt = Date.now();
+  while (!shuttingDown && Date.now() - startedAt < timeoutMs) {
+    try {
+      const res = await fetch(apiReadyUrl, { method: "GET" });
+      if (res.ok) return true;
+    } catch {
+      // keep polling
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  return false;
+}
+
 function startWorker() {
   if (shuttingDown) return;
+  workerStarted = true;
   workerChild = spawnNpm("start:worker", "worker");
   workerChild.on("exit", (code, signal) => {
     if (shuttingDown) return;
@@ -78,4 +96,14 @@ apiChild.on("exit", (code, signal) => {
   shutdown(code === 0 ? 1 : code || 1);
 });
 
-startWorker();
+void (async () => {
+  const ready = await waitForApiReady();
+  if (shuttingDown) return;
+  if (!ready) {
+    console.error(`[start] api was not ready at ${apiReadyUrl} within 180000ms. Shutting down.`);
+    shutdown(1);
+    return;
+  }
+  console.log(`[start] api ready at ${apiReadyUrl}. Starting worker...`);
+  if (!workerStarted) startWorker();
+})();
