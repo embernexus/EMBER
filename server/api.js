@@ -1003,10 +1003,10 @@ async function initDbWithRetry() {
         attempts += 1;
         const msg = String(error?.message || error);
         if (isDbInitTimeout(error)) {
-          dbReady = true;
-          dbEverReady = true;
-          console.warn(`[api] database init skipped on timeout after ${attempts} attempt(s): ${msg}`);
-          return;
+          retryMs = Math.min(maxRetryMs, Math.max(baseRetryMs, Math.floor(retryMs * 1.5)));
+          console.warn(`[api] database init timed out, retrying in ${retryMs}ms: ${msg}`);
+          await new Promise((resolve) => setTimeout(resolve, retryMs));
+          continue;
         }
         if (isDbAuthFailureMessage(msg)) {
           retryMs = Math.min(maxRetryMs, Math.max(15000, retryMs * 2));

@@ -4547,6 +4547,8 @@ export async function getPublicDashboard() {
         LEFT JOIN bot_modules m
           ON m.token_id = t.id
          AND m.module_type = t.selected_bot
+        LEFT JOIN users u
+          ON u.id = t.user_id
         WHERE m.id IS NOT NULL
           AND COALESCE(t.disconnected, false) = false
           AND COALESCE(t.hidden_from_public, false) = false

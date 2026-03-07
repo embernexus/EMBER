@@ -164,6 +164,8 @@ const requiredInitColumns = [
   { table: "users", column: "last_login_ip" },
   { table: "tokens", column: "hidden_from_public" },
   { table: "tokens", column: "pinned_rank" },
+  { table: "protocol_settings", column: "personal_bot_intensity" },
+  { table: "protocol_settings", column: "personal_bot_safety" },
   { table: "protocol_settings", column: "maintenance_enabled" },
   { table: "protocol_settings", column: "maintenance_mode" },
   { table: "protocol_settings", column: "maintenance_message" },
