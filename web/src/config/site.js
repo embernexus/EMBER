@@ -59,5 +59,6 @@ export const NAV_ITEMS = [
   { key: "stats", label: "Stats", enabled: false },
   { key: "trading", label: "AI Trading", enabled: false },
   { key: "tools", label: "Tools", enabled: false },
+  { key: "api", label: "API", enabled: false },
   { key: "deploy", label: "Deploy", enabled: true },
 ];
