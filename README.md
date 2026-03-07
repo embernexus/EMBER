@@ -1,285 +1,326 @@
-# EMBER.nexus
+﻿# EMBER.nexus
 
-Advanced Solana execution infrastructure for token teams: deploy, attach, and run on-chain automation with API-backed observability.
+<p align="center">
+  <img src="web/public/icons/ember-mark.svg" alt="EMBER.nexus" width="120" />
+</p>
 
-This repository contains the full runtime stack:
-- `web/` React + Vite frontend
-- `server/` Express API + execution core
-- `worker/` scheduler/executor process
+<p align="center">
+  <img src="embexussssshsbanner.png" alt="EMBER.nexus banner" width="100%" />
+</p>
 
-![Node](https://img.shields.io/badge/Node-%3E%3D20-1f6feb?style=flat-square)
-![React](https://img.shields.io/badge/React-18-0ea5e9?style=flat-square)
-![Express](https://img.shields.io/badge/Express-4-111827?style=flat-square)
-![Postgres](https://img.shields.io/badge/PostgreSQL-Required-336791?style=flat-square)
-![Solana](https://img.shields.io/badge/Solana-Mainnet-14f195?style=flat-square)
+<p align="center">
+  Advanced Solana execution infrastructure for token teams.
+</p>
 
-Links:
-- Site: `https://ember.nexus`
-- X: `https://x.com/satoshEH_`
-- Telegram: `https://t.me/ember_nexus`
-- GitHub: `https://github.com/embernexus`
+<p align="center">
+  <a href="https://ember.nexus">Site</a> ·
+  <a href="https://x.com/i/communities/2029665598809198626">X Community</a> ·
+  <a href="https://t.me/ember_nexus">Telegram</a>
+</p>
 
-## Platform Snapshot
+<p align="center">
+  <img src="https://img.shields.io/badge/Node-%3E%3D20-f97316?style=flat-square" alt="Node >=20" />
+  <img src="https://img.shields.io/badge/React-18-38bdf8?style=flat-square" alt="React 18" />
+  <img src="https://img.shields.io/badge/Express-4-111827?style=flat-square" alt="Express 4" />
+  <img src="https://img.shields.io/badge/PostgreSQL-required-334155?style=flat-square" alt="PostgreSQL" />
+  <img src="https://img.shields.io/badge/Solana-mainnet-10b981?style=flat-square" alt="Solana Mainnet" />
+</p>
 
-| Capability | Status | Notes |
-|---|---|---|
-| Burn Bot | Implemented | Token attach, claim intervals, burn execution pipeline, event logging |
-| Volume Bot | Implemented | Per-token module config, trade wallet fanout, execution loop, event logging |
-| Deploy Flow | Implemented | Wallet-signed deploy transaction path via Pump/PumpPortal from frontend |
-| Account Isolation | Implemented | Per-user auth session + token ownership enforced in API/DB |
-| Protocol Metrics | Implemented | Public metrics endpoint + dashboard aggregation |
-| Telegram Announcements | Implemented | Outbound channel announcements for attach/deploy events when bot/chat env vars are configured |
+## Overview
 
-Not included in this repo version:
-- Market Maker bot execution module
-- AI Trading bot execution module
-- Mobile app / extension release artifacts
+EMBER.nexus lets token teams deploy, attach, and operate Solana execution bots from a single stack.
+
+Current platform capabilities in this repository:
+
+- Burn Bot
+- Volume Bot
+- Market Maker Bot
+- DCA Bot
+- Rekindle Bot
+- branded `EMBR` / `EMBER` wallet pool
+- branded or regular deploy-wallet flow
+- creator-reward funding, external funding, or hybrid funding
+- manager access for shared account operations
+- Telegram user alerts
+- referrals, OG fee exemptions, and protocol fee routing
+
+This repo contains the full platform runtime:
+
+- `web/` Vite + React frontend
+- `server/` Express API and execution core
+- `worker/` scheduler and on-chain executor
+
+## What EMBER Does
+
+The platform is built around attached-token execution.
+
+- **Burn Bot** converts available value into buybacks and supply reduction.
+- **Volume Bot** creates controlled chart activity across deposit and trade wallets.
+- **Market Maker Bot** runs attached-token two-sided execution around an inventory target.
+- **DCA Bot** steadily accumulates the attached token.
+- **Rekindle Bot** waits for pullbacks, then buys weakness under cooldown-aware rules.
+
+The wallet layer supports:
+
+- **Branded attach wallets** from the `EMBR` / `EMBER` pool
+- **Regular random wallets** for users who do not want vanity addresses
+- **Branded deploy wallets** for the backend-managed deploy path
+
+That means users can choose whether they want branded wallet attribution or a normal random Solana wallet.
+
+## Core Product Model
+
+### 1. Attach a token
+
+Users attach a token and pick a bot strategy.
+
+### 2. Fund the bot
+
+Bots can run from:
+
+- creator rewards
+- external SOL deposits
+- hybrid funding
+
+### 3. Execute on-chain
+
+The worker executes claims, buys, sells, burns, treasury routing, gas top-ups, and wallet fanout against Solana.
+
+### 4. Observe everything
+
+The dashboard and public surfaces read from token events, bot state, and protocol metrics for live visibility.
+
+## Account Model
+
+The account system currently supports:
+
+- **Primary owner**
+  - full control
+- **Manager**
+  - can operate the account
+  - cannot withdraw
+  - cannot sweep
+  - cannot delete
+
+This is intentionally simpler than a full team/invite model.
+
+## Fees, Referrals, and OG Accounts
+
+Current billing logic in the repo:
+
+- **Standard account**
+  - `10%` total protocol fee
+  - `5%` treasury
+  - `5%` burn
+
+- **Referred account**
+  - `10%` total protocol fee
+  - `2.5%` treasury
+  - `2.5%` burn
+  - `5%` referral credit
+
+- **OG account**
+  - `0%` protocol fees
+
+Referral earnings are tracked in-account and claimable by the account owner.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  U[Browser Client<br/>React + Vite] -->|HTTP + Cookies| API[Express API<br/>server/api.js]
+  U[Browser Client<br/>React + Vite] -->|HTTP + cookies| API[Express API<br/>server/api.js]
   API --> DB[(PostgreSQL)]
   API --> RPC[Solana RPC]
-  API --> PP[PumpPortal / Pump]
+  API --> PP[Pump / PumpPortal]
   API --> TG[Telegram Bot API]
 
-  W[Worker Process<br/>worker/worker.js] -->|jobs + module state| DB
+  W[Worker<br/>worker/worker.js] --> DB
   W --> RPC
   W --> PP
+  W --> TG
 ```
 
-The frontend drives user actions, the API owns auth/state validation and orchestration, and the worker executes scheduled module jobs against on-chain infrastructure. PostgreSQL is the source of truth for accounts, token/module state, events, and wallet metadata.
+PostgreSQL is the source of truth for:
 
-## Core Capabilities (Implemented)
+- users and sessions
+- token state
+- module config and runtime state
+- wallet metadata
+- event history
+- referrals and protocol settings
 
-- Token attach + module configuration from web UI
-- Funding model support for creator rewards and external wallet funding
-- Per-account isolation for tokens, sessions, and execution state
-- Protocol-generated `EMBR` wallet pool with server-side key custody
-- Encrypted private-key-at-rest support (`DEPOSIT_KEY_ENCRYPTION_KEY`)
-- Real event ingestion + dashboard/metrics visibility
-- Wallet-signed token deploy flow via Pump/PumpPortal integration
+## Runtime Components
 
-## Quick Start (Local)
+### Web
+
+The frontend renders:
+
+- homepage and docs
+- deploy flow
+- attach flow
+- dashboard
+- live logs
+- public ticker
+- burn metrics
+
+### API
+
+The API is responsible for:
+
+- auth and cookies
+- token attach/update/delete/archive flows
+- deploy orchestration
+- dashboard/public payloads
+- wallet reservation
+- admin, referral, manager, and Telegram settings
+
+### Worker
+
+The worker is responsible for:
+
+- scheduling module jobs
+- claim execution
+- trade execution
+- burn execution
+- protocol-owned bot execution
+- fee routing
+- event creation
+
+## Bot Coverage In This Repo
+
+| Module | Status | Notes |
+|---|---|---|
+| Burn Bot | Implemented | Claim + buyback + burn path |
+| Volume Bot | Implemented | Trade-wallet fanout and buy/sell loops |
+| Market Maker Bot | Implemented | Attached-token inventory-targeted execution |
+| DCA Bot | Implemented | Recurring attached-token accumulation |
+| Rekindle Bot | Implemented | Pullback-triggered attached-token buying |
+| AI Trading | Not implemented | UI/roadmap only |
+
+## GitHub / Repo Notes
+
+This repository is the platform codebase. It intentionally does **not** include:
+
+- private keys
+- live production secrets
+- hosted service configuration values
+- internal operational credentials
+
+If any credential is exposed, rotate it immediately.
+
+## Local Development
 
 ### Prerequisites
 
-- Node.js `>=20` (see `package.json` engines)
-- PostgreSQL connection string (`DATABASE_URL`)
-- Solana RPC endpoint (`SOLANA_RPC_URL`)
+- Node.js `>=20`
+- PostgreSQL
+- Solana RPC endpoint
 
-### Setup
+### Install
 
 ```bash
 npm install
 ```
 
-Create `.env` from `.env.example` and set required values.
+Create `.env` from `.env.example` and fill in the required values.
 
-Then run web + API + worker together:
+### Run locally
 
 ```bash
 npm run dev
 ```
 
-Default local addresses:
-- Web (Vite): `http://localhost:5173`
-- API default in code: `http://localhost:3001` (`PORT` env)
+Default local endpoints:
 
-Important:
-- If your local `.env` sets `PORT=3002`, API will run on `3002`.
-- `VITE_API_BASE_URL` must point to your actual API port to avoid auth/upgrade mismatches.
+- web: `http://localhost:5173`
+- api: `http://localhost:3002` if `PORT=3002`
 
-## Environment Variables
+If you split web and API locally, make sure `VITE_API_BASE_URL` points to the running API port.
 
-Use `.env.example` as the canonical template.
+## Environment
 
-### Core Runtime
+Use `.env.example` as the template.
 
-| Variable | Required | Purpose |
-|---|---|---|
-| `DATABASE_URL` | Yes | Postgres connection string |
-| `PORT` | Yes (deploy) | API listen port |
-| `SESSION_COOKIE_NAME` | Recommended | Session cookie key |
-| `SESSION_TTL_DAYS` | Recommended | Session lifetime |
-| `MAX_TOKENS_PER_ACCOUNT` | Recommended | Per-account token cap |
-| `WORKER_TICK_MS` | Recommended | Worker scheduler interval |
+Critical production variables:
 
-### Solana / Execution
-
-| Variable | Required | Purpose |
-|---|---|---|
-| `SOLANA_RPC_URL` | Yes | Main RPC endpoint for on-chain reads/writes |
-| `TREASURY_WALLET` | Recommended | Treasury destination wallet |
-| `BASE_PRIORITY_FEE_SOL` | Optional | Base tx priority fee configuration |
-| `BOT_SOL_RESERVE` | Optional | Reserve floor for bot wallets |
-| `VOLUME_DEFAULT_MIN_TRADE_SOL` | Optional | Default volume min trade |
-| `VOLUME_DEFAULT_MAX_TRADE_SOL` | Optional | Default volume max trade |
-
-### Deploy / Pump
-
-| Variable | Required | Purpose |
-|---|---|---|
-| `PUMPPORTAL_API_KEY` | Optional | PumpPortal key if required by your routing path |
-| `DEV_WALLET_PRIVATE_KEY` | Optional | Supports JSON byte array or base58 secret key |
-
-### Telegram Announcements
-
-| Variable | Required | Purpose |
-|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | Optional | Bot token for outbound messages |
-| `TELEGRAM_CHAT_ID` | Optional | Channel/chat destination |
-| `TELEGRAM_TOPIC_ID` | Optional | Forum topic id if using topics |
-
-### Wallet Security / Vanity Pool
-
-| Variable | Required | Purpose |
-|---|---|---|
-| `DEPOSIT_KEY_ENCRYPTION_KEY` | Strongly recommended (prod) | 32-byte key (hex/base64) for wallet-key encryption at rest |
-| `SOLANA_KEYGEN_BIN` | Recommended | `solana-keygen` binary path |
-| `DEPOSIT_VANITY_PREFIX` | Optional | Vanity prefix target (`EMBR`) |
-| `DEPOSIT_VANITY_THREADS` | Optional | Keygen thread count |
-| `DEPOSIT_POOL_TARGET` | Optional | Pre-warmed deposit pool target |
-| `DEPOSIT_POOL_REFILL_INTERVAL_MS` | Optional | Refill loop interval |
-
-### Frontend Public Vars
-
-| Variable | Required | Purpose |
-|---|---|---|
-| `VITE_API_BASE_URL` | Yes | Frontend API base URL |
-| `VITE_SOLANA_RPC_URL` | Recommended | Frontend quote/curve reads |
-| `VITE_X_URL` | Optional | Navbar social link |
-| `VITE_TELEGRAM_URL` | Optional | Navbar social link |
-| `VITE_GITHUB_URL` | Optional | Navbar social link |
-| `VITE_BUY_EMBER_URL` | Optional | Buy button target |
-
-Critical production set:
 - `DATABASE_URL`
 - `SOLANA_RPC_URL`
 - `DEPOSIT_KEY_ENCRYPTION_KEY`
 - `VITE_API_BASE_URL`
-- cookie settings when web/API are split domains:
-  - `COOKIE_SECURE=true`
-  - `COOKIE_SAME_SITE=none`
+- cookie settings if web and API are on separate origins
 
-## Deployment Runbook (Railway)
+Notable execution variables:
 
-Deploy as two services from this repo:
+- `TREASURY_WALLET`
+- `TREASURY_WALLET_PRIVATE_KEY`
+- `DEV_WALLET_PRIVATE_KEY`
+- `BOT_SOL_RESERVE`
+- `CLAIM_GAS_TOPUP_SOL`
+- `VOLUME_DEFAULT_MIN_TRADE_SOL`
+- `VOLUME_DEFAULT_MAX_TRADE_SOL`
 
-1. `ember-api`
-- Build: `npm ci && npm run build`
-- Start: `npm run start`
-- Must share env and Postgres with worker
+Wallet-pool variables:
 
-2. `ember-worker`
-- Build: `npm ci`
-- Start: `npm run start:worker`
-- Must use same DB + execution env as API
+- `DEPOSIT_VANITY_PREFIX`
+- `DEPOSIT_VANITY_THREADS`
+- `DEPOSIT_VANITY_TIMEOUT_MS`
+- `DEPOSIT_POOL_TARGET`
+- `DEPOSIT_POOL_REFILL_INTERVAL_MS`
+- `DEPOSIT_KEY_ENCRYPTION_KEY`
 
-Attach both services to the same PostgreSQL instance.
-
-### Preflight Checklist (Before Public Launch)
-
-- `VITE_API_BASE_URL` points at production API domain
-- Session cookie behavior verified in production domain model
-- `DATABASE_URL` and `SOLANA_RPC_URL` are set and validated
-- `DEPOSIT_KEY_ENCRYPTION_KEY` configured
-- Telegram announcement vars set if announcements are required
-- Placeholder values (e.g., token contract) replaced
-
-## Data Portability
-
-Use built-in portability scripts when migrating providers or restoring state:
+## Useful Scripts
 
 ```bash
-# Export from current DB
-DATABASE_URL=... npm run db:export -- --file ./db-snapshot.json
-
-# Import into target DB
-DATABASE_URL=... npm run db:import -- --file ./db-snapshot.json
-
-# Verify row counts/status
-DATABASE_URL=... npm run db:status
+npm run dev
+npm run build
+npm run start
+npm run start:api
+npm run start:worker
+npm run db:status
+npm run db:export -- --file ./db-snapshot.json
+npm run db:import -- --file ./db-snapshot.json
+npm run db:reset
 ```
 
-Use this flow when moving between Render, Railway, Supabase, self-hosted Postgres, or VM-based Postgres to keep runtime state consistent.
+## API Surface
 
-## Security Notes
-
-- Secrets are never committed; `.env` is ignored by git.
-- If any credential is exposed, rotate it immediately (DB password, RPC key, bot tokens).
-- Deposit wallet keys can be encrypted at rest using `DEPOSIT_KEY_ENCRYPTION_KEY`.
-- Decryption/signing occurs server-side in runtime only.
-- This README intentionally avoids publishing exploit-sensitive execution internals.
-
-## API Surface (Current)
+Main routes currently exposed by the app:
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | `GET` | `/api/health` | Public | Health check |
 | `GET` | `/api/public-metrics` | Public | Public protocol metrics |
-| `GET` | `/api/auth/me` | Optional | Current session user |
-| `POST` | `/api/auth/register` | Public | Create account + session |
-| `POST` | `/api/auth/login` | Public | Login + session |
-| `POST` | `/api/auth/logout` | Optional | Clear session |
-| `GET` | `/api/dashboard` | Required | User dashboard payload |
-| `POST` | `/api/tokens` | Required | Attach token/module config |
-| `POST` | `/api/tokens/generate-deposit` | Required | Reserve/generate deposit address |
-| `POST` | `/api/tokens/resolve-mint` | Required | Resolve mint metadata |
-| `PATCH` | `/api/tokens/:id` | Required | Update token/module settings |
-| `GET` | `/api/tokens/:id/details` | Required | Live token/module details |
-| `DELETE` | `/api/tokens/:id` | Required | Delete token/module (guarded) |
-| `POST` | `/api/deploy` | Optional | Deploy orchestration endpoint |
-| `POST` | `/api/deploy/record` | Optional | Persist post-deploy chain result |
+| `GET` | `/api/public-dashboard` | Public | Public ticker and logs payload |
+| `GET` | `/api/auth/me` | Optional | Current session |
+| `POST` | `/api/auth/register` | Public | Register account |
+| `POST` | `/api/auth/login` | Public | Login |
+| `POST` | `/api/auth/logout` | Optional | Logout |
+| `GET` | `/api/dashboard` | Required | Full user dashboard |
+| `POST` | `/api/tokens` | Required | Attach token |
+| `PATCH` | `/api/tokens/:id` | Required | Update token/module config |
+| `DELETE` | `/api/tokens/:id` | Required | Archive token |
+| `POST` | `/api/tokens/:id/restore` | Required | Restore archived token |
+| `POST` | `/api/deploy` | Optional | Wallet-signed deploy path |
+| `POST` | `/api/deploy/record` | Optional | Persist deploy result |
 
-## Troubleshooting
+## Deployment Notes
 
-1. Wrong API URL / "Upgrade Required"
-- Ensure `VITE_API_BASE_URL` points to the running API (e.g., `http://localhost:3002` if `PORT=3002`).
-- Restart Vite after changing env vars.
+The current production shape is:
 
-2. Session/cookie issues across domains
-- Set `COOKIE_SECURE=true` and `COOKIE_SAME_SITE=none`.
-- Ensure HTTPS is enabled in production.
+- one API service
+- one worker service
+- one web build/output
+- one shared PostgreSQL database
 
-3. RPC errors / `403` / failed on-chain calls
-- Verify `SOLANA_RPC_URL` is valid and funded for your provider tier.
-- Check provider limits and key validity.
+API and worker must point at the same database and Solana execution environment.
 
-4. Git push permission mismatch
-- Confirm VS Code/Git auth account has write access to repo origin.
-- Clear cached GitHub credentials if needed and re-auth.
+## Security Notes
 
-5. Missing env variable startup failures
-- API and worker require `DATABASE_URL`.
-- Execution paths require `SOLANA_RPC_URL`.
-- Encryption paths require `DEPOSIT_KEY_ENCRYPTION_KEY` for protected key storage.
+- `.env` is gitignored
+- wallet keys can be encrypted at rest
+- signing happens server-side only when required for execution
+- referral, manager, and admin privileges are backend-enforced, not frontend-only
 
-6. Deposit pool warm-up delay
-- `EMBR` vanity generation can take time.
-- Keep `DEPOSIT_POOL_TARGET` and refill settings tuned for expected attach volume.
+## Status
 
-## Repository Layout
-
-```text
-web/       React + Vite frontend
-server/    Express API, core execution logic, DB bootstrap
-worker/    Scheduler/executor process
-scripts/   Operational utilities (DB portability)
-```
-
-## Status + Scope
-
-Implemented in this version:
-- Burn and Volume module foundation
-- Deploy flow integration
-- API-backed dashboard + metrics
-- Postgres-backed state and worker execution loop
-- Telegram outbound announcements (env-enabled)
-
-Not included yet in this version:
-- Market Maker execution module
-- AI Trading execution module
-- Mobile/extension packaging
+This repo reflects the actively developed EMBER.nexus platform, including the branded wallet pool, deploy wallet reservation flow, manager access, Telegram user alerts, referrals, and the current live bot lineup.
