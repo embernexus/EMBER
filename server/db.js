@@ -599,27 +599,6 @@ export async function initDb() {
   `);
 
   await pool.query(`
-    INSERT INTO protocol_settings (
-      id,
-      default_fee_bps,
-      default_treasury_bps,
-      default_burn_bps,
-      referred_treasury_bps,
-      referred_burn_bps,
-      referred_referral_bps,
-      personal_bot_mode,
-      personal_bot_enabled,
-      personal_bot_intensity,
-      personal_bot_safety,
-      maintenance_enabled,
-      maintenance_mode,
-      maintenance_message
-    )
-    VALUES (1, 1000, 500, 500, 250, 250, 500, 'burn', TRUE, 45, 65, FALSE, 'soft', '')
-    ON CONFLICT (id) DO NOTHING;
-  `);
-
-  await pool.query(`
     ALTER TABLE protocol_settings
     ADD COLUMN IF NOT EXISTS personal_bot_intensity INTEGER NOT NULL DEFAULT 45;
   `);
@@ -642,6 +621,27 @@ export async function initDb() {
   await pool.query(`
     ALTER TABLE protocol_settings
     ADD COLUMN IF NOT EXISTS maintenance_message TEXT NOT NULL DEFAULT '';
+  `);
+
+  await pool.query(`
+    INSERT INTO protocol_settings (
+      id,
+      default_fee_bps,
+      default_treasury_bps,
+      default_burn_bps,
+      referred_treasury_bps,
+      referred_burn_bps,
+      referred_referral_bps,
+      personal_bot_mode,
+      personal_bot_enabled,
+      personal_bot_intensity,
+      personal_bot_safety,
+      maintenance_enabled,
+      maintenance_mode,
+      maintenance_message
+    )
+    VALUES (1, 1000, 500, 500, 250, 250, 500, 'burn', TRUE, 45, 65, FALSE, 'soft', '')
+    ON CONFLICT (id) DO NOTHING;
   `);
 
   await pool.query(`
