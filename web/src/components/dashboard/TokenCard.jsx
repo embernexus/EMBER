@@ -413,11 +413,73 @@ function DeleteConfirmModal({ onClose, onConfirm, deleting, disableConfirm, reas
   );
 }
 
+function PermanentDeleteConfirmModal({
+  onClose,
+  onConfirm,
+  deleting,
+  disabled,
+  warnings,
+  checks,
+  setChecks,
+}) {
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 1320, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={onClose}>
+      <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.78)", backdropFilter: "blur(8px)" }} />
+      <div className="glass" style={{ position: "relative", zIndex: 1, width: "min(560px,92vw)", padding: "20px 22px" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ fontSize: 18, fontWeight: 800, color: "#fff", marginBottom: 10 }}>Permanently Delete Archived Token</div>
+        <div style={{ fontSize: 13, color: "rgba(255,255,255,.72)", lineHeight: 1.6, marginBottom: 14 }}>
+          This permanently removes the archived token from your account, dashboard, ticker, and token-linked database records. This action cannot be undone.
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+          {warnings.map((warning, index) => (
+            <label
+              key={warning}
+              style={{
+                display: "flex",
+                gap: 10,
+                alignItems: "flex-start",
+                padding: "10px 12px",
+                borderRadius: 10,
+                border: "1px solid rgba(255,90,90,.22)",
+                background: "rgba(255,80,80,.06)",
+                color: "rgba(255,240,240,.92)",
+                fontSize: 12,
+                lineHeight: 1.5,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={Boolean(checks[index])}
+                onChange={(e) => setChecks((prev) => prev.map((value, i) => (i === index ? e.target.checked : value)))}
+                disabled={deleting}
+                style={{ marginTop: 2 }}
+              />
+              <span>{warning}</span>
+            </label>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+          <button className="btn-ghost" onClick={onClose} disabled={deleting} style={{ padding: "8px 14px", fontSize: 12 }}>Cancel</button>
+          <button
+            className="btn-ghost"
+            onClick={onConfirm}
+            disabled={deleting || disabled}
+            style={{ padding: "8px 14px", fontSize: 12, borderColor: "rgba(255,90,90,.42)", color: disabled ? "rgba(255,255,255,.28)" : "#ff9f9f" }}
+          >
+            {deleting ? "Deleting..." : "Permanently Delete"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function TokenCard({
   token,
   onUpdate,
   allLogs,
   onDelete,
+  onPermanentDelete,
   onRestore,
   onFetchDetails,
   onFetchDeployWallet,
@@ -440,7 +502,10 @@ export default function TokenCard({
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsErr, setDetailsErr] = useState("");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showPermanentDeleteConfirm, setShowPermanentDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [permanentDeleting, setPermanentDeleting] = useState(false);
+  const [permanentDeleteChecks, setPermanentDeleteChecks] = useState([false, false, false]);
   const [showCardImage, setShowCardImage] = useState(Boolean(normalizeImageUrl(token.pictureUrl)));
   const [sweeping, setSweeping] = useState(false);
   const [withdrawLoading, setWithdrawLoading] = useState(false);
@@ -684,6 +749,30 @@ export default function TokenCard({
       setErr(error?.message || "Unable to restore token.");
     } finally {
       setRestoring(false);
+    }
+  };
+
+  const handlePermanentDelete = async (e) => {
+    e?.stopPropagation?.();
+    if (!canDelete) {
+      setErr("Managers cannot permanently delete archived bots.");
+      return;
+    }
+    if (!isDisconnected) {
+      setErr("Only archived tokens can be permanently deleted.");
+      return;
+    }
+    if (typeof onPermanentDelete !== "function") return;
+    setErr("");
+    setActionMsg("");
+    setPermanentDeleting(true);
+    try {
+      await onPermanentDelete(token.id);
+      setShowPermanentDeleteConfirm(false);
+    } catch (error) {
+      setErr(error?.message || "Unable to permanently delete archived token.");
+    } finally {
+      setPermanentDeleting(false);
     }
   };
 
@@ -1309,6 +1398,29 @@ export default function TokenCard({
                             {restoring ? "Restoring..." : "Re-enable"}
                           </button>
                         )}
+                        {isDisconnected && (
+                          <button
+                            className="btn-ghost"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setPermanentDeleteChecks([false, false, false]);
+                              setShowPermanentDeleteConfirm(true);
+                            }}
+                            disabled={!canDelete}
+                            style={{
+                              padding: "8px 18px",
+                              fontSize: 12,
+                              width: "fit-content",
+                              borderColor: "rgba(255,90,90,.3)",
+                              color: "#ff9f9f",
+                              opacity: !canDelete ? 0.55 : 1,
+                              cursor: !canDelete ? "not-allowed" : "pointer",
+                            }}
+                            title={!canDelete ? "Manager access cannot permanently delete archived bots." : "Permanently remove this archived token from the site and your account."}
+                          >
+                            Permanently Delete
+                          </button>
+                        )}
                         <button
                           className="btn-ghost"
                           onClick={() => { void fetchDetails(false); setShowDeleteConfirm(true); }}
@@ -1358,6 +1470,25 @@ export default function TokenCard({
           deleting={deleting}
           disableConfirm={hasKnownFunds}
           reason={deleteReason}
+        />
+      )}
+
+      {showPermanentDeleteConfirm && (
+        <PermanentDeleteConfirmModal
+          onClose={() => {
+            if (permanentDeleting) return;
+            setShowPermanentDeleteConfirm(false);
+          }}
+          onConfirm={handlePermanentDelete}
+          deleting={permanentDeleting}
+          disabled={permanentDeleteChecks.some((value) => !value)}
+          warnings={[
+            "I understand this permanently removes the archived token from my account and it cannot be restored.",
+            "I understand this removes the token from the dashboard, ticker, and token-linked history on the site.",
+            "I confirm all SOL and token balances have already been withdrawn, sold, or burned from every wallet.",
+          ]}
+          checks={permanentDeleteChecks}
+          setChecks={setPermanentDeleteChecks}
         />
       )}
     </>

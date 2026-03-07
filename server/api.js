@@ -4,17 +4,24 @@ import express from "express";
 import path from "node:path";
 import {
   adminArchiveToken,
+  adminForcePauseToken,
+  adminSetUserBan,
+  adminPermanentlyDeleteArchivedToken,
   adminRestoreArchivedToken,
+  adminUpdateTokenPublicState,
   adminSetUserOg,
   adminSetUserReferrer,
   attachToken,
   buildDeployLocalTx,
   claimReferralEarnings,
+  updateOwnReferralCode,
   clearSession,
   cookieMaxAgeMs,
   deleteToken,
+  permanentlyDeleteArchivedToken,
   getDashboard,
   getAdminOverview,
+  getProtocolSettings,
   getReferralAccountSummary,
   getPublicDashboard,
   deployToken,
@@ -321,6 +328,38 @@ async function authRequired(req, res, next) {
   }
 }
 
+async function maintenanceWriteGuard(req, res, next) {
+  try {
+    if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return next();
+    const path = String(req.path || "");
+    if (
+      path === "/auth/register" ||
+      path === "/auth/login" ||
+      path === "/auth/logout" ||
+      path === "/health" ||
+      path === "/ready"
+    ) {
+      return next();
+    }
+    const settings = await getProtocolSettings();
+    if (!settings?.maintenanceEnabled) return next();
+    const token = readToken(req);
+    const user = token ? await getUserBySession(token) : null;
+    if (user?.isAdmin) return next();
+    return res.status(503).json({
+      error:
+        String(settings.maintenanceMessage || "").trim() ||
+        `Maintenance mode is active (${String(settings.maintenanceMode || "soft")}). Please try again shortly.`,
+      maintenance: {
+        enabled: true,
+        mode: String(settings.maintenanceMode || "soft"),
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, dbReady, dbEverReady });
 });
@@ -335,6 +374,8 @@ app.use("/api", (req, res, next) => {
   if (dbReady) return next();
   return res.status(503).json({ error: "Service warming up. Database reconnecting." });
 });
+
+app.use("/api", maintenanceWriteGuard);
 
 app.get("/api/public-metrics", async (_req, res, next) => {
   try {
@@ -361,7 +402,7 @@ app.get("/api/auth/me", authOptional, (req, res) => {
 app.post("/api/auth/register", authLimiter, async (req, res, next) => {
   try {
     const { username, password, referralCode } = req.body || {};
-    const result = await registerUser(username, password, referralCode);
+    const result = await registerUser(username, password, referralCode, { requestIp: requestIp(req) });
     setSessionCookie(res, result.sessionToken);
     res.json({ user: result.user });
   } catch (error) {
@@ -372,7 +413,7 @@ app.post("/api/auth/register", authLimiter, async (req, res, next) => {
 app.post("/api/auth/login", authLimiter, async (req, res, next) => {
   try {
     const { username, password } = req.body || {};
-    const result = await loginUser(username, password);
+    const result = await loginUser(username, password, { requestIp: requestIp(req) });
     setSessionCookie(res, result.sessionToken);
     res.json({ user: result.user });
   } catch (error) {
@@ -570,6 +611,15 @@ app.post("/api/referrals/claim", authRequired, writeLimiter, async (req, res, ne
   }
 });
 
+app.post("/api/referrals/code", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await updateOwnReferralCode(req.user.id, req.body?.referralCode || "");
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/admin/overview", authRequired, async (req, res, next) => {
   try {
     const data = await getAdminOverview(req.user.id);
@@ -606,6 +656,15 @@ app.post("/api/admin/users/:id/referrer", authRequired, writeLimiter, async (req
   }
 });
 
+app.post("/api/admin/users/:id/ban", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await adminSetUserBan(req.user.id, req.params.id, req.body || {});
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/admin/tokens/:id/archive", authRequired, writeLimiter, async (req, res, next) => {
   try {
     const data = await adminArchiveToken(req.user.id, req.params.id);
@@ -624,6 +683,33 @@ app.post("/api/admin/tokens/:id/restore", authRequired, writeLimiter, async (req
   }
 });
 
+app.delete("/api/admin/tokens/:id/permanent", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await adminPermanentlyDeleteArchivedToken(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/tokens/:id/public", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await adminUpdateTokenPublicState(req.user.id, req.params.id, req.body || {});
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/tokens/:id/pause", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await adminForcePauseToken(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/tokens/:id/burn/withdraw", authRequired, async (req, res, next) => {
   try {
     const data = await withdrawBurnFunds(req.user.id, req.params.id, req.body || {});
@@ -636,6 +722,15 @@ app.post("/api/tokens/:id/burn/withdraw", authRequired, async (req, res, next) =
 app.delete("/api/tokens/:id", authRequired, async (req, res, next) => {
   try {
     const data = await deleteToken(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/tokens/:id/permanent", authRequired, async (req, res, next) => {
+  try {
+    const data = await permanentlyDeleteArchivedToken(req.user.id, req.params.id);
     res.json(data);
   } catch (error) {
     next(error);

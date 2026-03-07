@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   apiAdminArchiveToken,
+  apiAdminForcePauseToken,
   apiAdminOverview,
+  apiAdminPermanentlyDeleteToken,
   apiAdminRestoreToken,
+  apiAdminSetUserBan,
   apiAdminSetUserOg,
   apiAdminSetUserReferrer,
+  apiAdminUpdateTokenPublicState,
   apiAdminUpdateSettings,
   apiAuthLogout,
   apiAuthMe,
@@ -17,6 +21,7 @@ import {
   apiTelegramTestAlert,
   apiCreateToken,
   apiDeleteToken,
+  apiPermanentlyDeleteToken,
   apiDashboard,
   apiBurnWithdraw,
   apiGenerateDepositAddress,
@@ -31,10 +36,11 @@ import {
   apiPublicDashboard,
   apiUpdateToken,
   apiUpdateTelegramAlerts,
+  apiUpdateOwnReferralCode,
   apiUpsertManagerAccess,
   isApiError,
 } from "./api/client";
-import { EMBER_TOKEN_CONTRACT } from "./config/site";
+import { EMBER_TOKEN_CONTRACT, SUPPORT_TELEGRAM_URL } from "./config/site";
 import { Embers, FireBg } from "./components/BackgroundFX";
 import TokenTicker from "./components/dashboard/TokenTicker";
 import Footer from "./components/layout/Footer";
@@ -61,6 +67,9 @@ const DEFAULT_PUBLIC_METRICS = {
   emberIncinerated: 0,
   totalRewardsProcessedSol: 0,
   totalFeesTakenSol: 0,
+  maintenanceEnabled: false,
+  maintenanceMode: "soft",
+  maintenanceMessage: "",
 };
 const DASHBOARD_POLL_MS = 5000;
 const DEFAULT_EMBER_MINT = "xxxxx";
@@ -87,6 +96,7 @@ export default function App() {
   const [publicBurnChartData, setPublicBurnChartData] = useState([]);
   const [publicBurnBreakdown, setPublicBurnBreakdown] = useState([]);
   const [activeOverrides, setActiveOverrides] = useState({});
+  const [supportOpen, setSupportOpen] = useState(false);
   const [emberTickerMeta, setEmberTickerMeta] = useState({
     mint: "",
     symbol: "",
@@ -398,17 +408,31 @@ export default function App() {
     return result;
   }, [loadDashboard]);
 
+  const handleReferralCodeUpdate = useCallback(async (referralCode) => {
+    const result = await apiUpdateOwnReferralCode(referralCode);
+    await loadDashboard();
+    return result;
+  }, [loadDashboard]);
+
   const handleAdminOverviewLoad = useCallback(async () => {
     return apiAdminOverview();
   }, []);
 
   const handleAdminSettingsSave = useCallback(async (payload) => {
-    return apiAdminUpdateSettings(payload || {});
-  }, []);
+    const result = await apiAdminUpdateSettings(payload || {});
+    await loadPublicMetrics();
+    return result;
+  }, [loadPublicMetrics]);
 
   const handleAdminSetUserOg = useCallback(async (targetUserId, enabled) => {
     const result = await apiAdminSetUserOg(targetUserId, enabled);
     await loadDashboard();
+    try {
+      const auth = await apiAuthMe();
+      setAuthUser(auth.user);
+    } catch {
+      // best effort auth refresh for badge state
+    }
     return result;
   }, [loadDashboard]);
 
@@ -417,6 +441,13 @@ export default function App() {
     await loadDashboard();
     return result;
   }, [loadDashboard]);
+
+  const handleAdminSetUserBan = useCallback(async (targetUserId, enabled, reason) => {
+    const result = await apiAdminSetUserBan(targetUserId, enabled, reason);
+    await loadDashboard();
+    await loadPublicDashboard();
+    return result;
+  }, [loadDashboard, loadPublicDashboard]);
 
   const handleAdminArchiveToken = useCallback(async (tokenId) => {
     const result = await apiAdminArchiveToken(tokenId);
@@ -427,6 +458,27 @@ export default function App() {
 
   const handleAdminRestoreToken = useCallback(async (tokenId) => {
     const result = await apiAdminRestoreToken(tokenId);
+    await loadDashboard();
+    await loadPublicDashboard();
+    return result;
+  }, [loadDashboard, loadPublicDashboard]);
+
+  const handleAdminPermanentDeleteToken = useCallback(async (tokenId) => {
+    const result = await apiAdminPermanentlyDeleteToken(tokenId);
+    await loadDashboard();
+    await loadPublicDashboard();
+    return result;
+  }, [loadDashboard, loadPublicDashboard]);
+
+  const handleAdminUpdateTokenPublicState = useCallback(async (tokenId, payload) => {
+    const result = await apiAdminUpdateTokenPublicState(tokenId, payload || {});
+    await loadDashboard();
+    await loadPublicDashboard();
+    return result;
+  }, [loadDashboard, loadPublicDashboard]);
+
+  const handleAdminForcePauseToken = useCallback(async (tokenId) => {
+    const result = await apiAdminForcePauseToken(tokenId);
     await loadDashboard();
     await loadPublicDashboard();
     return result;
@@ -533,6 +585,17 @@ export default function App() {
 
   const handleTokenDelete = useCallback(async (tokenId) => {
     await apiDeleteToken(tokenId);
+    await loadDashboard();
+    try {
+      await loadPublicDashboard();
+    } catch {
+      // best effort refresh for ticker/archive state
+    }
+    return true;
+  }, [loadDashboard, loadPublicDashboard]);
+
+  const handlePermanentTokenDelete = useCallback(async (tokenId) => {
+    await apiPermanentlyDeleteToken(tokenId);
     await loadDashboard();
     try {
       await loadPublicDashboard();
@@ -656,6 +719,29 @@ export default function App() {
 
       <TokenTicker tokens={tickerTokens} />
       <div style={{ height: 102 }} />
+      {publicMetrics?.maintenanceEnabled && (
+        <div style={{ position: "relative", zIndex: 3, maxWidth: 1300, margin: "0 auto", padding: "0 24px 16px" }}>
+          <div
+            className="glass"
+            style={{
+              padding: "12px 16px",
+              border: "1px solid rgba(255,106,0,.28)",
+              display: "flex",
+              justifyContent: "space-between",
+              gap: 12,
+              alignItems: "center",
+              flexWrap: "wrap",
+            }}
+          >
+            <div style={{ color: "#fff", fontSize: 13, fontWeight: 800 }}>
+              Maintenance Mode {String(publicMetrics.maintenanceMode || "soft").toUpperCase()}
+            </div>
+            <div style={{ color: "rgba(255,255,255,.72)", fontSize: 12, lineHeight: 1.5 }}>
+              {String(publicMetrics.maintenanceMessage || "").trim() || "Writes are temporarily restricted while maintenance is active."}
+            </div>
+          </div>
+        </div>
+      )}
 
       {page === "home" && (
         <HomePage
@@ -695,6 +781,7 @@ export default function App() {
           onShowAttach={() => setShowAttach(true)}
           onUpdateToken={handleTokenUpdate}
           onDeleteToken={handleTokenDelete}
+          onPermanentDeleteToken={handlePermanentTokenDelete}
           onRestoreToken={handleRestoreToken}
           onFetchTokenDetails={apiTokenLiveDetails}
           onFetchDeployWallet={handleFetchDeployWallet}
@@ -711,13 +798,82 @@ export default function App() {
           onSendTelegramTestAlert={handleTelegramAlertsTest}
           onLoadReferralSummary={handleReferralSummaryLoad}
           onClaimReferralEarnings={handleReferralClaim}
+          onUpdateReferralCode={handleReferralCodeUpdate}
           onLoadAdminOverview={handleAdminOverviewLoad}
           onSaveAdminSettings={handleAdminSettingsSave}
           onAdminSetUserOg={handleAdminSetUserOg}
           onAdminSetUserReferrer={handleAdminSetUserReferrer}
+          onAdminSetUserBan={handleAdminSetUserBan}
           onAdminArchiveToken={handleAdminArchiveToken}
           onAdminRestoreToken={handleAdminRestoreToken}
+          onAdminPermanentDeleteToken={handleAdminPermanentDeleteToken}
+          onAdminUpdateTokenPublicState={handleAdminUpdateTokenPublicState}
+          onAdminForcePauseToken={handleAdminForcePauseToken}
         />
+      )}
+
+      {SUPPORT_TELEGRAM_URL && (
+        <div style={{ position: "fixed", right: 20, bottom: 22, zIndex: 55, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 10 }}>
+          {supportOpen && (
+            <div
+              className="glass"
+              style={{
+                width: 320,
+                maxWidth: "calc(100vw - 28px)",
+                border: "1px solid rgba(91,191,255,.24)",
+                overflow: "hidden",
+                boxShadow: "0 20px 60px rgba(0,0,0,.36)",
+              }}
+            >
+              <div style={{ padding: "14px 16px", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+                <div>
+                  <div style={{ color: "#fff", fontSize: 15, fontWeight: 800 }}>Chat with satosheh</div>
+                  <div style={{ color: "rgba(255,255,255,.5)", fontSize: 12, marginTop: 4 }}>Direct Telegram contact</div>
+                </div>
+                <button
+                  className="btn-ghost"
+                  onClick={() => setSupportOpen(false)}
+                  style={{ width: 30, height: 30, padding: 0, minWidth: 30, borderRadius: 999 }}
+                  aria-label="Close Telegram contact"
+                >
+                  ×
+                </button>
+              </div>
+              <div style={{ padding: "0 16px 16px", color: "rgba(255,255,255,.68)", fontSize: 13, lineHeight: 1.6 }}>
+                Need help with EMBER.nexus? Open a direct Telegram chat.
+              </div>
+              <div style={{ padding: "0 16px 16px" }}>
+                <a
+                  href={SUPPORT_TELEGRAM_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="btn-fire"
+                  style={{ width: "100%", justifyContent: "center", display: "inline-flex", textDecoration: "none" }}
+                >
+                  Chat on Telegram
+                </a>
+              </div>
+            </div>
+          )}
+          <button
+            className="btn-fire"
+            onClick={() => setSupportOpen((value) => !value)}
+            style={{
+              width: 58,
+              height: 58,
+              borderRadius: 999,
+              padding: 0,
+              minWidth: 58,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              boxShadow: "0 16px 40px rgba(255,106,0,.28)",
+            }}
+            aria-label="Open Telegram contact"
+          >
+            <span style={{ fontSize: 24, lineHeight: 1 }}>✈</span>
+          </button>
+        </div>
       )}
 
       <Footer />

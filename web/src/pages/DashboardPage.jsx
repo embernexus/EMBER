@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import BurnChart from "../components/BurnChart";
 import LiveFeed from "../components/dashboard/LiveFeed";
 import TokenCard from "../components/dashboard/TokenCard";
 import { useI18n } from "../i18n/I18nProvider";
 import { fmt, fmtFull } from "../lib/format";
 
-function ActionModal({ title, onClose, children }) {
+function ActionModal({ title, onClose, children, topOffset = 112 }) {
   return (
     <div
       style={{
@@ -13,8 +13,10 @@ function ActionModal({ title, onClose, children }) {
         inset: 0,
         zIndex: 1400,
         display: "flex",
-        alignItems: "center",
+        alignItems: "flex-start",
         justifyContent: "center",
+        paddingTop: topOffset,
+        paddingBottom: 24,
       }}
       onClick={onClose}
     >
@@ -53,6 +55,7 @@ export default function DashboardPage({
   onShowAttach,
   onUpdateToken,
   onDeleteToken,
+  onPermanentDeleteToken,
   onRestoreToken,
   onFetchTokenDetails,
   onFetchDeployWallet,
@@ -69,12 +72,17 @@ export default function DashboardPage({
   onSendTelegramTestAlert,
   onLoadReferralSummary,
   onClaimReferralEarnings,
+  onUpdateReferralCode,
   onLoadAdminOverview,
   onSaveAdminSettings,
   onAdminSetUserOg,
   onAdminSetUserReferrer,
+  onAdminSetUserBan,
   onAdminArchiveToken,
   onAdminRestoreToken,
+  onAdminPermanentDeleteToken,
+  onAdminUpdateTokenPublicState,
+  onAdminForcePauseToken,
 }) {
   const { t } = useI18n();
   const username = typeof user === "string" ? user : String(user?.username || "");
@@ -136,25 +144,31 @@ export default function DashboardPage({
   const [showAdminModal, setShowAdminModal] = useState(false);
   const [referralState, setReferralState] = useState({
     referralCode: "",
+    defaultReferralCode: "",
+    canCustomizeReferralCode: false,
     totals: { totalEarnedSol: 0, pendingSol: 0, claimedSol: 0 },
-    depositWalletOptions: [],
     referredUsers: [],
     events: [],
     canClaim: true,
   });
   const [referralClaimDestination, setReferralClaimDestination] = useState("");
+  const [referralCodeDraft, setReferralCodeDraft] = useState("");
   const [referralLoading, setReferralLoading] = useState(false);
   const [referralError, setReferralError] = useState("");
   const [referralMessage, setReferralMessage] = useState("");
   const [adminState, setAdminState] = useState({
     settings: null,
+    health: null,
     users: [],
     tokens: [],
     referralLeaders: [],
+    auditTrail: [],
   });
   const [adminLoading, setAdminLoading] = useState(false);
   const [adminError, setAdminError] = useState("");
   const [adminMessage, setAdminMessage] = useState("");
+  const [adminUserSearch, setAdminUserSearch] = useState("");
+  const [adminTokenSearch, setAdminTokenSearch] = useState("");
 
   useEffect(() => {
     if (!canManageAccess || typeof onLoadManagerAccess !== "function") return;
@@ -216,14 +230,10 @@ export default function DashboardPage({
           ...prev,
           ...data,
           totals: { ...prev.totals, ...(data?.totals || {}) },
-          depositWalletOptions: Array.isArray(data?.depositWalletOptions) ? data.depositWalletOptions : [],
           referredUsers: Array.isArray(data?.referredUsers) ? data.referredUsers : [],
           events: Array.isArray(data?.events) ? data.events : [],
         }));
-        const firstWallet = Array.isArray(data?.depositWalletOptions) && data.depositWalletOptions[0]?.deposit
-          ? String(data.depositWalletOptions[0].deposit)
-          : "";
-        setReferralClaimDestination((prev) => prev || firstWallet);
+        setReferralCodeDraft((prev) => prev || String(data?.referralCode || ""));
       } catch (error) {
         if (!alive) return;
         setReferralError(error?.message || "Unable to load referrals.");
@@ -247,9 +257,11 @@ export default function DashboardPage({
         if (!alive) return;
         setAdminState({
           settings: data?.settings || null,
+          health: data?.health || null,
           users: Array.isArray(data?.users) ? data.users : [],
           tokens: Array.isArray(data?.tokens) ? data.tokens : [],
           referralLeaders: Array.isArray(data?.referralLeaders) ? data.referralLeaders : [],
+          auditTrail: Array.isArray(data?.auditTrail) ? data.auditTrail : [],
         });
       } catch (error) {
         if (!alive) return;
@@ -394,13 +406,36 @@ export default function DashboardPage({
         ...prev,
         ...data,
         totals: { ...prev.totals, ...(data?.totals || {}) },
-        depositWalletOptions: Array.isArray(data?.depositWalletOptions) ? data.depositWalletOptions : [],
         referredUsers: Array.isArray(data?.referredUsers) ? data.referredUsers : [],
         events: Array.isArray(data?.events) ? data.events : [],
       }));
-      setReferralMessage(`Claimed ${Number(result?.claimedSol || 0).toFixed(6)} SOL to ${result?.destinationSymbol || "wallet"}.`);
+      setReferralMessage(`Claimed ${Number(result?.claimedSol || 0).toFixed(6)} SOL to ${result?.destinationWallet || "wallet"}.`);
     } catch (error) {
       setReferralError(error?.message || "Unable to claim referral earnings.");
+    } finally {
+      setReferralLoading(false);
+    }
+  };
+
+  const saveReferralCode = async () => {
+    if (typeof onUpdateReferralCode !== "function") return;
+    setReferralError("");
+    setReferralMessage("");
+    setReferralLoading(true);
+    try {
+      const result = await onUpdateReferralCode(referralCodeDraft);
+      const data = await onLoadReferralSummary();
+      setReferralState((prev) => ({
+        ...prev,
+        ...data,
+        totals: { ...prev.totals, ...(data?.totals || {}) },
+        referredUsers: Array.isArray(data?.referredUsers) ? data.referredUsers : [],
+        events: Array.isArray(data?.events) ? data.events : [],
+      }));
+      setReferralCodeDraft(String(result?.referralCode || referralCodeDraft || ""));
+      setReferralMessage(`Referral code updated to ${String(result?.referralCode || referralCodeDraft || "").trim()}.`);
+    } catch (error) {
+      setReferralError(error?.message || "Unable to update referral code.");
     } finally {
       setReferralLoading(false);
     }
@@ -411,11 +446,59 @@ export default function DashboardPage({
     const data = await onLoadAdminOverview();
     setAdminState({
       settings: data?.settings || null,
+      health: data?.health || null,
       users: Array.isArray(data?.users) ? data.users : [],
       tokens: Array.isArray(data?.tokens) ? data.tokens : [],
       referralLeaders: Array.isArray(data?.referralLeaders) ? data.referralLeaders : [],
+      auditTrail: Array.isArray(data?.auditTrail) ? data.auditTrail : [],
     });
   };
+
+  const filteredAdminUsers = useMemo(() => {
+    const query = String(adminUserSearch || "").trim().toLowerCase();
+    if (!query) return adminState.users;
+    return adminState.users.filter((row) =>
+      [
+        row.username,
+        row.referralCode,
+        row.referrerCode,
+        row.referrerUsername,
+        row.bannedReason,
+      ]
+        .map((value) => String(value || "").toLowerCase())
+        .some((value) => value.includes(query))
+    );
+  }, [adminState.users, adminUserSearch]);
+
+  const filteredAdminTokens = useMemo(() => {
+    const query = String(adminTokenSearch || "").trim().toLowerCase();
+    if (!query) return adminState.tokens;
+    return adminState.tokens.filter((row) =>
+      [
+        row.symbol,
+        row.mint,
+        row.username,
+        row.selectedBot,
+        row.deposit,
+      ]
+        .map((value) => String(value || "").toLowerCase())
+        .some((value) => value.includes(query))
+    );
+  }, [adminState.tokens, adminTokenSearch]);
+
+  const personalBotIntensity = Math.max(0, Math.min(100, Number(adminState.settings?.personalBotIntensity ?? 45)));
+  const personalBotSafety = Math.max(0, Math.min(100, Number(adminState.settings?.personalBotSafety ?? 65)));
+  const personalBotModeLabel = {
+    burn: "Burn",
+    volume: "Volume",
+    market_maker: "Market Maker",
+    dca: "DCA",
+    rekindle: "Rekindle",
+  }[String(adminState.settings?.personalBotMode || "burn")] || "Burn";
+  const intensityLabel =
+    personalBotIntensity >= 75 ? "high" : personalBotIntensity >= 40 ? "medium" : "low";
+  const safetyLabel =
+    personalBotSafety >= 75 ? "very conservative" : personalBotSafety >= 45 ? "balanced" : "aggressive";
 
   return (
     <div style={{ position: "relative", zIndex: 2, maxWidth: 1300, margin: "0 auto", padding: "32px 24px" }}>
@@ -502,6 +585,7 @@ export default function DashboardPage({
               allLogs={allLogs}
               onUpdate={onUpdateToken}
               onDelete={onDeleteToken}
+              onPermanentDelete={onPermanentDeleteToken}
               onRestore={onRestoreToken}
               onFetchDetails={onFetchTokenDetails}
               onFetchDeployWallet={onFetchDeployWallet}
@@ -534,6 +618,7 @@ export default function DashboardPage({
                   allLogs={allLogs}
                   onUpdate={onUpdateToken}
                   onDelete={onDeleteToken}
+                  onPermanentDelete={onPermanentDeleteToken}
                   onRestore={onRestoreToken}
                   onFetchDetails={onFetchTokenDetails}
                   onFetchDeployWallet={onFetchDeployWallet}
@@ -657,7 +742,7 @@ export default function DashboardPage({
       </div>
 
       {showReferralModal && (
-        <ActionModal title="Referrals" onClose={() => setShowReferralModal(false)}>
+        <ActionModal title="Referrals" onClose={() => setShowReferralModal(false)} topOffset={112}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <div style={{ fontSize: 12, color: "rgba(255,255,255,.46)", lineHeight: 1.6 }}>
               Standard accounts pay 10% protocol fees. Referred accounts keep the same total fee, but part of it accrues to the referrer. OG accounts pay 0%.
@@ -678,20 +763,61 @@ export default function DashboardPage({
               <div style={{ fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 6, fontWeight: 700 }}>YOUR REFERRAL CODE</div>
               <div className="input-f" style={{ display: "flex", alignItems: "center", minHeight: 42 }}>{referralState.referralCode || "Loading..."}</div>
             </div>
+            <div className="glass" style={{ padding: "12px 14px", border: "1px solid rgba(255,255,255,.06)" }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#fff", marginBottom: 8 }}>Customize Referral Code</div>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,.48)", lineHeight: 1.55, marginBottom: 10 }}>
+                You can replace the default referral code once. After that, it is locked. Pick carefully.
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <input
+                  className="input-f"
+                  value={referralCodeDraft}
+                  onChange={(e) => setReferralCodeDraft(String(e.target.value || "").toUpperCase())}
+                  placeholder="Enter a custom referral code"
+                  spellCheck={false}
+                  disabled={!referralState.canCustomizeReferralCode || !referralState.canClaim}
+                  style={{ flex: 1, minWidth: 220 }}
+                />
+                <button
+                  className="btn-ghost"
+                  onClick={saveReferralCode}
+                  disabled={
+                    referralLoading ||
+                    !referralState.canCustomizeReferralCode ||
+                    !referralState.canClaim ||
+                    !String(referralCodeDraft || "").trim()
+                  }
+                  style={{ padding: "9px 16px", fontSize: 12 }}
+                >
+                  {referralLoading ? "Saving..." : "Set Code"}
+                </button>
+              </div>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,.38)", marginTop: 8 }}>
+                Allowed: A-Z, 0-9, underscore. Length 4-40.
+              </div>
+              {!referralState.canClaim && (
+                <div style={{ fontSize: 11, color: "rgba(255,178,107,.86)", marginTop: 8 }}>
+                  Manager logins cannot change the owner referral code.
+                </div>
+              )}
+              {referralState.canClaim && !referralState.canCustomizeReferralCode && (
+                <div style={{ fontSize: 11, color: "rgba(255,178,107,.86)", marginTop: 8 }}>
+                  This referral code has already been customized and is now locked.
+                </div>
+              )}
+            </div>
             <div>
               <div style={{ fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 6, fontWeight: 700 }}>CLAIM DESTINATION</div>
-              <select
+              <input
                 className="input-f"
                 value={referralClaimDestination}
                 onChange={(e) => setReferralClaimDestination(e.target.value)}
-              >
-                <option value="">Select a deposit wallet</option>
-                {referralState.depositWalletOptions.map((item) => (
-                  <option key={`${item.tokenId}:${item.deposit}`} value={item.deposit}>
-                    {item.symbol} {item.disconnected ? "(archived)" : ""} - {item.deposit}
-                  </option>
-                ))}
-              </select>
+                placeholder="Enter a Solana wallet address"
+                spellCheck={false}
+              />
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,.42)", marginTop: 6 }}>
+                Referral payouts can be sent to any valid Solana wallet address you control.
+              </div>
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button
@@ -718,8 +844,17 @@ export default function DashboardPage({
                 <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", marginBottom: 10 }}>Referred Users</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 220, overflowY: "auto" }}>
                   {referralState.referredUsers.length ? referralState.referredUsers.map((row) => (
-                    <div key={row.userId} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12 }}>
-                      <span style={{ color: "#fff", fontWeight: 700 }}>{row.username}</span>
+                    <div key={row.userId} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12, alignItems: "flex-start" }}>
+                      <div>
+                        <div style={{ color: "#fff", fontWeight: 700 }}>{row.username}</div>
+                        <div style={{ color: "rgba(255,255,255,.45)", fontSize: 11, marginTop: 4 }}>{row.referralStatus || "Eligible"}</div>
+                        {(row.hasWalletOverlap || row.hasIpOverlap) && (
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                            {row.hasWalletOverlap && <span style={{ fontSize: 10, fontWeight: 800, color: "#ffd3a7", background: "rgba(255,127,62,.18)", borderRadius: 999, padding: "3px 8px" }}>WALLET OVERLAP</span>}
+                            {row.hasIpOverlap && <span style={{ fontSize: 10, fontWeight: 800, color: "#ffd3a7", background: "rgba(255,127,62,.18)", borderRadius: 999, padding: "3px 8px" }}>IP OVERLAP</span>}
+                          </div>
+                        )}
+                      </div>
                       <span style={{ color: "rgba(255,255,255,.52)" }}>{Number(row.earnedSol || 0).toFixed(6)} SOL</span>
                     </div>
                   )) : (
@@ -753,13 +888,92 @@ export default function DashboardPage({
       )}
 
       {showAdminModal && isAdmin && (
-        <ActionModal title="Admin Panel" onClose={() => setShowAdminModal(false)}>
+        <ActionModal title="Admin Panel" onClose={() => setShowAdminModal(false)} topOffset={148}>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <div style={{ fontSize: 12, color: "rgba(255,255,255,.46)", lineHeight: 1.6 }}>
               Admin controls are bound to the primary `satoshEH_` account. Manager access does not inherit admin rights.
             </div>
+
+            {adminState.health && (
+              <div className="glass" style={{ padding: "14px 16px" }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", marginBottom: 10 }}>Protocol Health</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0,1fr))", gap: 10 }}>
+                  {[
+                    ["Users", adminState.health.userCount],
+                    ["Banned", adminState.health.bannedUserCount],
+                    ["Tokens", adminState.health.tokenCount],
+                    ["Hidden", adminState.health.hiddenTokenCount],
+                    ["Archived", adminState.health.archivedTokenCount],
+                    ["Active", adminState.health.activeTokenCount],
+                    ["Live Bots", adminState.health.enabledModuleCount],
+                    ["Errors 24h", adminState.health.errorCount24h],
+                  ].map(([label, value]) => (
+                    <div key={label} style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,.06)", background: "rgba(255,255,255,.02)" }}>
+                      <div style={{ fontSize: 10, fontWeight: 800, color: "rgba(255,255,255,.35)", letterSpacing: 0.8 }}>{label}</div>
+                      <div style={{ fontSize: 16, fontWeight: 800, color: "#fff", marginTop: 6 }}>{fmtFull(value)}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: 10, marginTop: 10 }}>
+                  <div style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,.06)", background: "rgba(255,255,255,.02)" }}>
+                    <div style={{ fontSize: 10, fontWeight: 800, color: "rgba(255,255,255,.35)", letterSpacing: 0.8 }}>DEPOSIT POOL</div>
+                    <div style={{ fontSize: 12, color: "#fff", marginTop: 6 }}>{adminState.health.depositPoolSummary || "No pool data."}</div>
+                  </div>
+                  <div style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,.06)", background: "rgba(255,255,255,.02)" }}>
+                    <div style={{ fontSize: 10, fontWeight: 800, color: "rgba(255,255,255,.35)", letterSpacing: 0.8 }}>TREASURY SOL</div>
+                    <div style={{ fontSize: 16, fontWeight: 800, color: "#fff", marginTop: 6 }}>{Number(adminState.health.treasurySol || 0).toFixed(4)}</div>
+                  </div>
+                  <div style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,.06)", background: "rgba(255,255,255,.02)" }}>
+                    <div style={{ fontSize: 10, fontWeight: 800, color: "rgba(255,255,255,.35)", letterSpacing: 0.8 }}>DEV WALLET SOL</div>
+                    <div style={{ fontSize: 16, fontWeight: 800, color: "#fff", marginTop: 6 }}>{Number(adminState.health.devWalletSol || 0).toFixed(4)}</div>
+                  </div>
+                </div>
+              </div>
+            )}
             <div className="glass" style={{ padding: "14px 16px" }}>
-              <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", marginBottom: 10 }}>Protocol Settings</div>
+              <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", marginBottom: 10 }}>Protocol Bot</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>BOT MODE</label>
+                  <select className="input-f" value={adminState.settings?.personalBotMode || "burn"} onChange={(e) => setAdminState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), personalBotMode: e.target.value } }))}>
+                    <option value="burn">Burn</option>
+                    <option value="volume">Volume</option>
+                    <option value="market_maker">Market Maker</option>
+                    <option value="dca">DCA</option>
+                    <option value="rekindle">Rekindle</option>
+                  </select>
+                </div>
+                <div style={{ display: "flex", alignItems: "flex-end" }}>
+                  <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, color: "#fff", fontWeight: 700 }}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(adminState.settings?.personalBotEnabled)}
+                      onChange={(e) => setAdminState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), personalBotEnabled: e.target.checked } }))}
+                    />
+                    Protocol bot enabled
+                  </label>
+                </div>
+              </div>
+              <div style={{ marginTop: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11, color: "rgba(255,255,255,.62)", marginBottom: 6 }}>
+                  <span>Intensity</span>
+                  <span>{personalBotIntensity}%</span>
+                </div>
+                <input type="range" min="0" max="100" value={personalBotIntensity} onChange={(e) => setAdminState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), personalBotIntensity: Math.max(0, Number(e.target.value) || 0) } }))} style={{ width: "100%" }} />
+              </div>
+              <div style={{ marginTop: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11, color: "rgba(255,255,255,.62)", marginBottom: 6 }}>
+                  <span>Funding Safety</span>
+                  <span>{personalBotSafety}%</span>
+                </div>
+                <input type="range" min="0" max="100" value={personalBotSafety} onChange={(e) => setAdminState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), personalBotSafety: Math.max(0, Number(e.target.value) || 0) } }))} style={{ width: "100%" }} />
+              </div>
+              <div style={{ fontSize: 12, color: "rgba(255,255,255,.52)", lineHeight: 1.6, marginTop: 10 }}>
+                {personalBotModeLabel} is set to <span style={{ color: "#fff", fontWeight: 700 }}>{intensityLabel}</span> intensity with a <span style={{ color: "#fff", fontWeight: 700 }}>{safetyLabel}</span> reserve posture.
+              </div>
+            </div>
+            <div className="glass" style={{ padding: "14px 16px" }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", marginBottom: 10 }}>Protocol Fees</div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: 10 }}>
                 <div>
                   <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>TOTAL FEE BPS</label>
@@ -774,7 +988,7 @@ export default function DashboardPage({
                   <input className="input-f" type="number" value={adminState.settings?.defaultBurnBps || 500} onChange={(e) => setAdminState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), defaultBurnBps: Math.max(0, Number(e.target.value) || 0) } }))} />
                 </div>
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0,1fr))", gap: 10, marginTop: 10 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: 10, marginTop: 10 }}>
                 <div>
                   <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>REFERRED TREASURY</label>
                   <input className="input-f" type="number" value={adminState.settings?.referredTreasuryBps || 250} onChange={(e) => setAdminState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), referredTreasuryBps: Math.max(0, Number(e.target.value) || 0) } }))} />
@@ -786,16 +1000,6 @@ export default function DashboardPage({
                 <div>
                   <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>REFERRED REFERRAL</label>
                   <input className="input-f" type="number" value={adminState.settings?.referredReferralBps || 500} onChange={(e) => setAdminState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), referredReferralBps: Math.max(0, Number(e.target.value) || 0) } }))} />
-                </div>
-                <div>
-                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>PERSONAL BOT MODE</label>
-                  <select className="input-f" value={adminState.settings?.personalBotMode || "burn"} onChange={(e) => setAdminState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), personalBotMode: e.target.value } }))}>
-                    <option value="burn">Burn</option>
-                    <option value="volume">Volume</option>
-                    <option value="market_maker">Market Maker</option>
-                    <option value="dca">DCA</option>
-                    <option value="rekindle">Rekindle</option>
-                  </select>
                 </div>
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
@@ -817,8 +1021,7 @@ export default function DashboardPage({
                       setAdminLoading(false);
                     }
                   }}
-                  style={{ padding: "9px 16px", fontSize: 12 }}
-                >
+                  style={{ padding: "9px 16px", fontSize: 12 }}>
                   {adminLoading ? "Saving..." : "Save Settings"}
                 </button>
                 <button className="btn-ghost" disabled={adminLoading} onClick={refreshAdmin} style={{ padding: "9px 16px", fontSize: 12 }}>
@@ -827,18 +1030,91 @@ export default function DashboardPage({
               </div>
             </div>
             <div className="glass" style={{ padding: "14px 16px" }}>
-              <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", marginBottom: 10 }}>Users</div>
+              <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", marginBottom: 10 }}>Platform Control</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <div style={{ display: "flex", alignItems: "flex-end" }}>
+                  <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, color: "#fff", fontWeight: 700 }}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(adminState.settings?.maintenanceEnabled)}
+                      onChange={(e) =>
+                        setAdminState((prev) => ({
+                          ...prev,
+                          settings: { ...(prev.settings || {}), maintenanceEnabled: e.target.checked },
+                        }))
+                      }
+                    />
+                    Maintenance mode enabled
+                  </label>
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>MODE</label>
+                  <select
+                    className="input-f"
+                    value={adminState.settings?.maintenanceMode || "soft"}
+                    onChange={(e) =>
+                      setAdminState((prev) => ({
+                        ...prev,
+                        settings: { ...(prev.settings || {}), maintenanceMode: e.target.value },
+                      }))
+                    }
+                  >
+                    <option value="soft">Soft</option>
+                    <option value="hard">Hard</option>
+                  </select>
+                </div>
+              </div>
+              <div style={{ marginTop: 10 }}>
+                <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>BANNER MESSAGE</label>
+                <input
+                  className="input-f"
+                  value={adminState.settings?.maintenanceMessage || ""}
+                  placeholder="Optional public maintenance message"
+                  onChange={(e) =>
+                    setAdminState((prev) => ({
+                      ...prev,
+                      settings: { ...(prev.settings || {}), maintenanceMessage: e.target.value },
+                    }))
+                  }
+                />
+              </div>
+              <div style={{ fontSize: 12, color: "rgba(255,255,255,.52)", lineHeight: 1.6, marginTop: 10 }}>
+                Soft mode blocks new user write actions but keeps reads live. Hard mode also stops worker execution until maintenance is turned off.
+              </div>
+            </div>
+            <div className="glass" style={{ padding: "14px 16px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", marginBottom: 10 }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: "#fff" }}>Users</div>
+                <input className="input-f" value={adminUserSearch} onChange={(e) => setAdminUserSearch(e.target.value)} placeholder="Search users" style={{ width: 220 }} />
+              </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 260, overflowY: "auto" }}>
-                {adminState.users.map((row) => (
+                {filteredAdminUsers.map((row) => (
                   <div key={row.id} style={{ borderBottom: "1px solid rgba(255,255,255,.05)", paddingBottom: 10 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
                       <div>
-                        <div style={{ color: "#fff", fontWeight: 700, fontSize: 13 }}>{row.username}</div>
-                        <div style={{ color: "rgba(255,255,255,.4)", fontSize: 11 }}>
-                          {row.referralCode} · {row.tokenCount} token(s) · {Number(row.pendingReferralSol || 0).toFixed(6)} SOL pending
+                        <div style={{ color: "#fff", fontWeight: 700, fontSize: 13, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <span>{row.username}</span>
+                          {row.isAdmin && <span style={{ fontSize: 10, fontWeight: 800, color: "#d8ecff", background: "rgba(55,132,255,.25)", borderRadius: 999, padding: "3px 8px" }}>ADMIN</span>}
+                          {row.isOg && <span style={{ fontSize: 10, fontWeight: 800, color: "#fff2bd", background: "rgba(255,177,0,.22)", borderRadius: 999, padding: "3px 8px" }}>OG</span>}
+                          {row.isBanned && <span style={{ fontSize: 10, fontWeight: 800, color: "#ffb3b3", background: "rgba(255,64,64,.2)", borderRadius: 999, padding: "3px 8px" }}>SUSPENDED</span>}
                         </div>
+                        <div style={{ color: "rgba(255,255,255,.4)", fontSize: 11 }}>
+                          {row.referralCode} / {row.tokenCount} token(s) / {Number(row.pendingReferralSol || 0).toFixed(6)} SOL pending
+                        </div>
+                        {!!row.referralStatus && (
+                          <div style={{ color: "rgba(255,255,255,.45)", fontSize: 11, marginTop: 4 }}>
+                            Referral status: {row.referralStatus}
+                          </div>
+                        )}
+                        {(row.hasWalletOverlap || row.hasIpOverlap) && (
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                            {row.hasWalletOverlap && <span style={{ fontSize: 10, fontWeight: 800, color: "#ffd3a7", background: "rgba(255,127,62,.18)", borderRadius: 999, padding: "3px 8px" }}>WALLET OVERLAP</span>}
+                            {row.hasIpOverlap && <span style={{ fontSize: 10, fontWeight: 800, color: "#ffd3a7", background: "rgba(255,127,62,.18)", borderRadius: 999, padding: "3px 8px" }}>IP OVERLAP</span>}
+                          </div>
+                        )}
+                        {!!row.bannedReason && <div style={{ color: "rgba(255,160,160,.82)", fontSize: 11, marginTop: 4 }}>Reason: {row.bannedReason}</div>}
                       </div>
-                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", justifyContent: "flex-end" }}>
                         <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "rgba(255,255,255,.72)" }}>
                           <input
                             type="checkbox"
@@ -859,33 +1135,74 @@ export default function DashboardPage({
                           />
                           OG
                         </label>
-                        <input
-                          className="input-f"
-                          style={{ width: 140 }}
-                          value={row.referrerCode || ""}
-                          placeholder="Referral code"
-                          onChange={(e) =>
-                            setAdminState((prev) => ({
-                              ...prev,
-                              users: prev.users.map((item) =>
-                                item.id === row.id ? { ...item, referrerCode: e.target.value } : item
-                              ),
-                            }))
-                          }
-                          onBlur={async (e) => {
-                            if (!onAdminSetUserReferrer) return;
-                            const value = String(e.target.value || "").trim();
-                            try {
-                              setAdminLoading(true);
-                              await onAdminSetUserReferrer(row.id, value);
-                              await refreshAdmin();
-                            } catch (error) {
-                              setAdminError(error?.message || "Unable to update referrer.");
-                            } finally {
-                              setAdminLoading(false);
+                        <div>
+                          <div style={{ fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 4, fontWeight: 700, letterSpacing: 0.5 }}>SUSPEND REASON</div>
+                          <input
+                            className="input-f"
+                            style={{ width: 180 }}
+                            value={row.bannedReason || ""}
+                            placeholder="Reason"
+                            onChange={(e) =>
+                              setAdminState((prev) => ({
+                                ...prev,
+                                users: prev.users.map((item) => (item.id === row.id ? { ...item, bannedReason: e.target.value } : item)),
+                              }))
                             }
-                          }}
-                        />
+                          />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 4, fontWeight: 700, letterSpacing: 0.5 }}>REFERRED BY CODE</div>
+                          <input
+                            className="input-f"
+                            style={{ width: 140 }}
+                            value={row.referrerCode || ""}
+                            placeholder="Referral code"
+                            onChange={(e) =>
+                              setAdminState((prev) => ({
+                                ...prev,
+                                users: prev.users.map((item) => (item.id === row.id ? { ...item, referrerCode: e.target.value } : item)),
+                              }))
+                            }
+                            onBlur={async (e) => {
+                              if (!onAdminSetUserReferrer) return;
+                              const value = String(e.target.value || "").trim();
+                              try {
+                                setAdminLoading(true);
+                                await onAdminSetUserReferrer(row.id, value);
+                                await refreshAdmin();
+                              } catch (error) {
+                                setAdminError(error?.message || "Unable to update referrer.");
+                              } finally {
+                                setAdminLoading(false);
+                              }
+                            }}
+                          />
+                        </div>
+                        {!row.isAdmin && (
+                          <button
+                            className="btn-ghost"
+                            style={{ padding: "8px 12px", fontSize: 12, borderColor: row.isBanned ? "rgba(122,231,171,.24)" : "rgba(255,90,90,.24)", color: row.isBanned ? "#a7f3c4" : "#ffb0b0" }}
+                            onClick={async () => {
+                              if (!onAdminSetUserBan) return;
+                              const reason = String(adminState.users.find((item) => item.id === row.id)?.bannedReason || row.bannedReason || "").trim();
+                              if (!row.isBanned && !reason) {
+                                setAdminError("A suspension reason is required.");
+                                return;
+                              }
+                              setAdminLoading(true);
+                              setAdminError("");
+                              try {
+                                await onAdminSetUserBan(row.id, !row.isBanned, reason);
+                                await refreshAdmin();
+                              } catch (error) {
+                                setAdminError(error?.message || "Unable to update suspension.");
+                              } finally {
+                                setAdminLoading(false);
+                              }
+                            }}>
+                            {row.isBanned ? "Unsuspend" : "Suspend"}
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -893,53 +1210,166 @@ export default function DashboardPage({
               </div>
             </div>
             <div className="glass" style={{ padding: "14px 16px" }}>
-              <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", marginBottom: 10 }}>Tokens</div>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", marginBottom: 10 }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: "#fff" }}>Tokens</div>
+                <input className="input-f" value={adminTokenSearch} onChange={(e) => setAdminTokenSearch(e.target.value)} placeholder="Search tokens" style={{ width: 220 }} />
+              </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 240, overflowY: "auto" }}>
-                {adminState.tokens.map((row) => (
+                {filteredAdminTokens.map((row) => (
                   <div key={row.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", borderBottom: "1px solid rgba(255,255,255,.05)", paddingBottom: 10 }}>
                     <div>
-                      <div style={{ color: "#fff", fontWeight: 700, fontSize: 13 }}>{row.symbol} <span style={{ color: "rgba(255,255,255,.45)", fontWeight: 500 }}>· {row.username}</span></div>
-                      <div style={{ color: "rgba(255,255,255,.4)", fontSize: 11 }}>{row.selectedBot} · {row.disconnected ? "archived" : row.active ? "active" : "paused"}</div>
+                      <div style={{ color: "#fff", fontWeight: 700, fontSize: 13, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        <span>{row.symbol}</span>
+                        <span style={{ color: "rgba(255,255,255,.45)", fontWeight: 500 }}>/ {row.username}</span>
+                        {row.hiddenFromPublic && <span style={{ fontSize: 10, fontWeight: 800, color: "#ffd4a7", background: "rgba(255,127,62,.18)", borderRadius: 999, padding: "3px 8px" }}>HIDDEN</span>}
+                        {Number(row.pinnedRank || 0) > 0 && <span style={{ fontSize: 10, fontWeight: 800, color: "#d8ecff", background: "rgba(55,132,255,.2)", borderRadius: 999, padding: "3px 8px" }}>PIN {row.pinnedRank}</span>}
+                      </div>
+                      <div style={{ color: "rgba(255,255,255,.4)", fontSize: 11 }}>{row.selectedBot} / {row.disconnected ? "archived" : row.active ? "active" : "paused"}</div>
+                      <div style={{ color: "rgba(255,255,255,.28)", fontSize: 10, marginTop: 4 }}>{row.mint}</div>
                     </div>
-                    <div style={{ display: "flex", gap: 8 }}>
+                    <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                      <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "rgba(255,255,255,.72)" }}>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(row.hiddenFromPublic)}
+                          onChange={async (e) => {
+                            if (!onAdminUpdateTokenPublicState) return;
+                            setAdminLoading(true);
+                            setAdminError("");
+                            try {
+                              await onAdminUpdateTokenPublicState(row.id, {
+                                hiddenFromPublic: e.target.checked,
+                                pinnedRank: Number(row.pinnedRank || 0),
+                              });
+                              await refreshAdmin();
+                            } catch (error) {
+                              setAdminError(error?.message || "Unable to update token visibility.");
+                            } finally {
+                              setAdminLoading(false);
+                            }
+                          }}
+                        />
+                        Hidden
+                      </label>
+                      <div>
+                        <div style={{ fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 4, fontWeight: 700, letterSpacing: 0.5 }}>PIN RANK</div>
+                        <input
+                          className="input-f"
+                          type="number"
+                          min="0"
+                          max="999"
+                          style={{ width: 90 }}
+                          value={row.pinnedRank || 0}
+                          onChange={(e) =>
+                            setAdminState((prev) => ({
+                              ...prev,
+                              tokens: prev.tokens.map((item) => (item.id === row.id ? { ...item, pinnedRank: Math.max(0, Number(e.target.value) || 0) } : item)),
+                            }))
+                          }
+                          onBlur={async (e) => {
+                            if (!onAdminUpdateTokenPublicState) return;
+                            setAdminLoading(true);
+                            setAdminError("");
+                            try {
+                              await onAdminUpdateTokenPublicState(row.id, {
+                                hiddenFromPublic: Boolean(adminState.tokens.find((item) => item.id === row.id)?.hiddenFromPublic ?? row.hiddenFromPublic),
+                                pinnedRank: Math.max(0, Number(e.target.value) || 0),
+                              });
+                              await refreshAdmin();
+                            } catch (error) {
+                              setAdminError(error?.message || "Unable to update pin rank.");
+                            } finally {
+                              setAdminLoading(false);
+                            }
+                          }}
+                        />
+                      </div>
                       {row.disconnected ? (
-                        <button
-                          className="btn-ghost"
-                          style={{ padding: "8px 12px", fontSize: 12 }}
-                          onClick={async () => {
-                            if (!onAdminRestoreToken) return;
-                            setAdminLoading(true);
-                            try {
-                              await onAdminRestoreToken(row.id);
-                              await refreshAdmin();
-                            } catch (error) {
-                              setAdminError(error?.message || "Unable to restore token.");
-                            } finally {
-                              setAdminLoading(false);
-                            }
-                          }}
-                        >
-                          Restore
-                        </button>
+                        <>
+                          <button
+                            className="btn-ghost"
+                            style={{ padding: "8px 12px", fontSize: 12 }}
+                            onClick={async () => {
+                              if (!onAdminRestoreToken) return;
+                              setAdminLoading(true);
+                              try {
+                                await onAdminRestoreToken(row.id);
+                                await refreshAdmin();
+                              } catch (error) {
+                                setAdminError(error?.message || "Unable to restore token.");
+                              } finally {
+                                setAdminLoading(false);
+                              }
+                            }}>
+                            Restore
+                          </button>
+                          <button
+                            className="btn-ghost"
+                            style={{ padding: "8px 12px", fontSize: 12, borderColor: "rgba(255,90,90,.3)", color: "#ff9f9f" }}
+                            onClick={async () => {
+                              if (!onAdminPermanentDeleteToken) return;
+                              const warnings = [
+                                "This will permanently remove the archived token from the site and database.",
+                                "This cannot be undone and the token will disappear from ticker/dashboard history.",
+                                "This should only be used after confirming all token wallets are empty.",
+                              ];
+                              for (const warning of warnings) {
+                                if (!window.confirm(warning)) return;
+                              }
+                              setAdminLoading(true);
+                              setAdminError("");
+                              try {
+                                await onAdminPermanentDeleteToken(row.id);
+                                await refreshAdmin();
+                              } catch (error) {
+                                setAdminError(error?.message || "Unable to permanently delete token.");
+                              } finally {
+                                setAdminLoading(false);
+                              }
+                            }}>
+                            Permanent Delete
+                          </button>
+                        </>
                       ) : (
-                        <button
-                          className="btn-ghost"
-                          style={{ padding: "8px 12px", fontSize: 12 }}
-                          onClick={async () => {
-                            if (!onAdminArchiveToken) return;
-                            setAdminLoading(true);
-                            try {
-                              await onAdminArchiveToken(row.id);
-                              await refreshAdmin();
-                            } catch (error) {
-                              setAdminError(error?.message || "Unable to archive token.");
-                            } finally {
-                              setAdminLoading(false);
-                            }
-                          }}
-                        >
-                          Archive
-                        </button>
+                        <>
+                          {row.active && (
+                            <button
+                              className="btn-ghost"
+                              style={{ padding: "8px 12px", fontSize: 12, borderColor: "rgba(255,177,107,.24)", color: "#ffd3a7" }}
+                              onClick={async () => {
+                                if (!onAdminForcePauseToken) return;
+                                setAdminLoading(true);
+                                setAdminError("");
+                                try {
+                                  await onAdminForcePauseToken(row.id);
+                                  await refreshAdmin();
+                                } catch (error) {
+                                  setAdminError(error?.message || "Unable to force pause token.");
+                                } finally {
+                                  setAdminLoading(false);
+                                }
+                              }}>
+                              Force Pause
+                            </button>
+                          )}
+                          <button
+                            className="btn-ghost"
+                            style={{ padding: "8px 12px", fontSize: 12 }}
+                            onClick={async () => {
+                              if (!onAdminArchiveToken) return;
+                              setAdminLoading(true);
+                              try {
+                                await onAdminArchiveToken(row.id);
+                                await refreshAdmin();
+                              } catch (error) {
+                                setAdminError(error?.message || "Unable to archive token.");
+                              } finally {
+                                setAdminLoading(false);
+                              }
+                            }}>
+                            Archive
+                          </button>
+                        </>
                       )}
                     </div>
                   </div>
@@ -954,6 +1384,31 @@ export default function DashboardPage({
                     <div key={row.userId} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12 }}>
                       <span style={{ color: "#fff", fontWeight: 700 }}>{row.username}</span>
                       <span style={{ color: "rgba(255,255,255,.52)" }}>{Number(row.earnedSol || 0).toFixed(6)} SOL</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {!!adminState.auditTrail?.length && (
+              <div className="glass" style={{ padding: "14px 16px" }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", marginBottom: 10 }}>Audit Trail</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 220, overflowY: "auto" }}>
+                  {adminState.auditTrail.slice(0, 25).map((row) => (
+                    <div key={row.id} style={{ borderBottom: "1px solid rgba(255,255,255,.05)", paddingBottom: 8 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                        <span style={{ color: "#fff", fontSize: 12, fontWeight: 700 }}>{String(row.action || "").replaceAll("_", " ")}</span>
+                        <span style={{ color: "rgba(255,255,255,.38)", fontSize: 11 }}>{new Date(row.createdAt).toLocaleString()}</span>
+                      </div>
+                      <div style={{ fontSize: 11, color: "rgba(255,255,255,.52)", marginTop: 4 }}>
+                        {row.actorUsername || "admin"}
+                        {row.targetUsername ? ` -> ${row.targetUsername}` : ""}
+                        {row.targetTokenId ? ` / token ${row.targetTokenId}` : ""}
+                      </div>
+                      {!!row.details?.reason && (
+                        <div style={{ fontSize: 11, color: "rgba(255,176,176,.82)", marginTop: 4 }}>
+                          Reason: {String(row.details.reason)}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>

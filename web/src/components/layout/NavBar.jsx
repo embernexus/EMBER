@@ -35,6 +35,8 @@ export default function NavBar({
   const [statsHoverPos, setStatsHoverPos] = useState(null);
   const [showComingSoonHover, setShowComingSoonHover] = useState(false);
   const [comingSoonPos, setComingSoonPos] = useState(null);
+  const [showToolsHover, setShowToolsHover] = useState(false);
+  const [toolsHoverPos, setToolsHoverPos] = useState(null);
 
   const navLabelByKey = {
     dashboard: t("nav.dashboard"),
@@ -46,6 +48,7 @@ export default function NavBar({
     docs: t("nav.docs"),
     stats: t("nav.stats"),
     trading: t("nav.trading"),
+    tools: "Tools",
     deploy: t("nav.deploy"),
   };
 
@@ -219,6 +222,77 @@ export default function NavBar({
                     }}
                   >
                     {t("nav.comingSoon")}
+                  </div>
+                )}
+              </div>
+            );
+          }
+
+          if (item.key === "tools") {
+            return (
+              <div
+                key={item.key}
+                style={{ position: "relative" }}
+                onMouseEnter={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setToolsHoverPos({ left: rect.left + rect.width / 2, top: rect.bottom + 10 });
+                  setShowToolsHover(true);
+                }}
+                onMouseLeave={() => setShowToolsHover(false)}
+              >
+                <button
+                  type="button"
+                  className={`nav-link-btn ${item.enabled ? "" : "disabled"} ${active ? "active" : ""}`}
+                  onClick={(e) => e.preventDefault()}
+                  aria-label="Tools coming soon"
+                >
+                  {navLabelByKey[item.key] || item.label}
+                </button>
+                {showToolsHover && toolsHoverPos && (
+                  <div
+                    style={{
+                      position: "fixed",
+                      top: toolsHoverPos.top,
+                      left: toolsHoverPos.left,
+                      transform: "translateX(-50%)",
+                      width: 250,
+                      background: "rgba(10,4,18,.96)",
+                      border: "1px solid rgba(255,255,255,.12)",
+                      borderRadius: 12,
+                      padding: "10px 12px",
+                      boxShadow: "0 14px 36px rgba(0,0,0,.45)",
+                      zIndex: 300,
+                      pointerEvents: "none",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 800,
+                        letterSpacing: 0.8,
+                        color: "#ff9f5a",
+                        textTransform: "uppercase",
+                        marginBottom: 8,
+                        textAlign: "center",
+                      }}
+                    >
+                      Coming Soon
+                    </div>
+                    {["DexScreener Reaction Bot", "Holder Booster", "Smart Sell", "and more"].map((line) => (
+                      <div
+                        key={line}
+                        style={{
+                          fontSize: 11,
+                          fontWeight: 700,
+                          color: "#fff",
+                          padding: "4px 0",
+                          textAlign: "center",
+                          borderBottom: line === "and more" ? "none" : "1px solid rgba(255,255,255,.05)",
+                        }}
+                      >
+                        {line}
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>

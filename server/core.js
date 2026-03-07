@@ -223,6 +223,12 @@ function normalizeReferralCode(value) {
   return code;
 }
 
+function defaultReferralCodeForUserId(userId) {
+  const id = Math.max(0, Math.floor(Number(userId || 0)));
+  if (!id) return "";
+  return `EMBER${id.toString(16).toUpperCase()}`;
+}
+
 function sanitizeInterval(value, fallback) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
@@ -320,6 +326,9 @@ function fromLamports(lamports) {
   if (!Number.isFinite(n) || n <= 0) return 0;
   return n / LAMPORTS_PER_SOL;
 }
+
+const REFERRAL_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const REFERRAL_MIN_GROSS_FEE_LAMPORTS = toLamports(0.001);
 
 function getDeployVanityBufferLamports() {
   return toLamports(Math.max(0.005, Number(config.deployVanityBufferSol || 0.03)));
@@ -771,7 +780,18 @@ function attachMarketCaps(rows) {
   for (const row of rows) {
     const mint = String(row?.mint || "").trim();
     if (!mint || byMint.has(mint)) continue;
-    byMint.set(mint, readCachedMarketCapUsd(mint));
+    const cachedCap = Math.max(0, Number(readCachedMarketCapUsd(mint) || 0));
+    const rowCap = Math.max(0, Number(row?.market_cap || 0));
+    const marketCap = cachedCap > 0 ? cachedCap : rowCap;
+    byMint.set(mint, marketCap);
+    if (marketCap > 0) {
+      const entry = getMarketCapEntry(mint);
+      entry.value = marketCap;
+      entry.at = Date.now();
+      if (!Number(entry.nextRefreshAt || 0)) {
+        entry.nextRefreshAt = Date.now() + MARKET_CAP_CACHE_MS;
+      }
+    }
   }
   return rows.map((row) => {
     const mint = String(row?.mint || "").trim();
@@ -2936,11 +2956,12 @@ export async function getTokenDeployWallet(userId, tokenId) {
   });
 }
 
-export async function registerUser(usernameInput, passwordInput, referralCodeInput = "") {
+export async function registerUser(usernameInput, passwordInput, referralCodeInput = "", meta = {}) {
   const username = normalizeUsername(usernameInput);
   const password = normalizePassword(passwordInput);
   const referralCode = normalizeReferralCode(referralCodeInput);
   const passwordHash = await bcrypt.hash(password, 10);
+  const signupIp = String(meta?.requestIp || "").trim().slice(0, 255) || null;
 
   const user = await withTx(async (client) => {
     const existing = await client.query("SELECT id FROM users WHERE username = $1", [username]);
@@ -2951,28 +2972,31 @@ export async function registerUser(usernameInput, passwordInput, referralCodeInp
     let referrerUserId = null;
     if (referralCode) {
       const referrerRes = await client.query(
-        "SELECT id FROM users WHERE referral_code = $1 LIMIT 1",
+        "SELECT id, COALESCE(is_og, FALSE) AS is_og FROM users WHERE referral_code = $1 LIMIT 1",
         [referralCode]
       );
       if (!referrerRes.rowCount) {
         throw new Error("Referral code was not found.");
+      }
+      if (Boolean(referrerRes.rows[0].is_og)) {
+        throw new Error("OG accounts cannot be used as referrers.");
       }
       referrerUserId = Number(referrerRes.rows[0].id || 0) || null;
     }
 
     const inserted = await client.query(
       `
-        INSERT INTO users (username, password_hash, referrer_user_id)
-        VALUES ($1, $2, $3)
+        INSERT INTO users (username, password_hash, referrer_user_id, signup_ip, last_login_ip)
+        VALUES ($1, $2, $3, $4, $4)
         RETURNING id, username
       `,
-      [username, passwordHash, referrerUserId]
+      [username, passwordHash, referrerUserId, signupIp]
     );
 
     const insertedId = Number(inserted.rows[0].id || 0);
     await client.query(
       `UPDATE users SET referral_code = COALESCE(NULLIF(referral_code, ''), $1) WHERE id = $2`,
-      [`EMBER${insertedId.toString(16).toUpperCase()}`, insertedId]
+      [defaultReferralCodeForUserId(insertedId), insertedId]
     );
 
     return inserted.rows[0];
@@ -2985,12 +3009,12 @@ export async function registerUser(usernameInput, passwordInput, referralCodeInp
   };
 }
 
-export async function loginUser(usernameInput, passwordInput) {
+export async function loginUser(usernameInput, passwordInput, meta = {}) {
   const username = normalizeUsername(usernameInput);
   const password = normalizePassword(passwordInput);
 
   const result = await pool.query(
-    "SELECT id, username, password_hash FROM users WHERE username = $1",
+    "SELECT id, username, password_hash, COALESCE(is_banned, FALSE) AS is_banned, COALESCE(banned_reason, '') AS banned_reason FROM users WHERE username = $1",
     [username]
   );
 
@@ -2999,9 +3023,17 @@ export async function loginUser(usernameInput, passwordInput) {
   }
 
   const user = result.rows[0];
+  if (Boolean(user.is_banned)) {
+    throw new Error(`Account suspended${user.banned_reason ? `: ${user.banned_reason}` : "."}`);
+  }
   const ok = await bcrypt.compare(password, user.password_hash);
   if (!ok) {
     throw new Error("Invalid username or password.");
+  }
+
+  const loginIp = String(meta?.requestIp || "").trim().slice(0, 255) || null;
+  if (loginIp) {
+    await pool.query("UPDATE users SET last_login_ip = $2 WHERE id = $1", [Number(user.id || 0), loginIp]);
   }
 
   const sessionToken = await createSession(user.id);
@@ -3031,7 +3063,7 @@ export async function getUserBySession(token) {
 
   const result = await pool.query(
     `
-      SELECT u.id, u.username
+      SELECT u.id, u.username, COALESCE(u.is_banned, FALSE) AS is_banned
       FROM sessions s
       JOIN users u ON u.id = s.user_id
       WHERE s.token = $1 AND s.expires_at > NOW()
@@ -3041,6 +3073,7 @@ export async function getUserBySession(token) {
   );
 
   if (!result.rowCount) return null;
+  if (Boolean(result.rows[0].is_banned)) return null;
   return getUserAuthProfile(Number(result.rows[0].id));
 }
 
@@ -3057,6 +3090,8 @@ async function resolveUserAccessScope(client, actorUserId) {
         username,
         COALESCE(is_admin, FALSE) AS is_admin,
         COALESCE(is_og, FALSE) AS is_og,
+        COALESCE(is_banned, FALSE) AS is_banned,
+        COALESCE(banned_reason, '') AS banned_reason,
         COALESCE(referral_code, '') AS referral_code,
         fee_bps_override,
         referrer_user_id
@@ -3077,6 +3112,7 @@ async function resolveUserAccessScope(client, actorUserId) {
         g.owner_user_id,
         owner.username AS owner_username,
         COALESCE(owner.is_og, FALSE) AS owner_is_og,
+        COALESCE(owner.is_banned, FALSE) AS owner_is_banned,
         COALESCE(owner.referral_code, '') AS owner_referral_code,
         owner.fee_bps_override AS owner_fee_bps_override,
         owner.referrer_user_id AS owner_referrer_user_id
@@ -3092,6 +3128,7 @@ async function resolveUserAccessScope(client, actorUserId) {
   const ownerUserId = isOperator ? Number(grantRes.rows[0].owner_user_id) : actorId;
   const ownerUsername = isOperator ? String(grantRes.rows[0].owner_username || "") : String(actor.username || "");
   const ownerIsOg = isOperator ? Boolean(grantRes.rows[0].owner_is_og) : Boolean(actor.is_og);
+  const ownerIsBanned = isOperator ? Boolean(grantRes.rows[0].owner_is_banned) : Boolean(actor.is_banned);
   const ownerReferralCode = isOperator ? String(grantRes.rows[0].owner_referral_code || "") : String(actor.referral_code || "");
   const ownerFeeBpsOverride = isOperator
     ? (grantRes.rows[0].owner_fee_bps_override == null
@@ -3109,6 +3146,8 @@ async function resolveUserAccessScope(client, actorUserId) {
     actorUsername: String(actor.username || ""),
     actorIsAdmin: Boolean(actor.is_admin),
     actorIsOg: Boolean(actor.is_og),
+    actorIsBanned: Boolean(actor.is_banned),
+    actorBannedReason: String(actor.banned_reason || ""),
     actorReferralCode: String(actor.referral_code || ""),
     actorFeeBpsOverride:
       actor.fee_bps_override == null ? null : Math.max(0, Math.floor(Number(actor.fee_bps_override || 0))),
@@ -3117,6 +3156,7 @@ async function resolveUserAccessScope(client, actorUserId) {
     ownerUserId,
     ownerUsername,
     ownerIsOg,
+    ownerIsBanned,
     ownerReferralCode,
     ownerFeeBpsOverride,
     ownerReferrerUserId,
@@ -3125,6 +3165,7 @@ async function resolveUserAccessScope(client, actorUserId) {
     isOwner: !isOperator,
     isAdmin: Boolean(actor.is_admin) && !isOperator,
     isOg: ownerIsOg,
+    isBanned: ownerIsBanned || Boolean(actor.is_banned),
     canManageFunds: !isOperator,
     canDelete: !isOperator,
     canManageAccess: !isOperator,
@@ -3147,6 +3188,22 @@ function assertAdminPermission(scope, message = "Admin access is required.") {
   }
 }
 
+async function recordAdminAudit(client, payload = {}) {
+  const actorUserId = payload.actorUserId == null ? null : Math.max(0, Math.floor(Number(payload.actorUserId || 0))) || null;
+  const targetUserId = payload.targetUserId == null ? null : Math.max(0, Math.floor(Number(payload.targetUserId || 0))) || null;
+  const targetTokenId = payload.targetTokenId == null ? null : String(payload.targetTokenId || "").trim() || null;
+  const action = String(payload.action || "").trim();
+  if (!action) return;
+  const details = payload.details && typeof payload.details === "object" ? payload.details : {};
+  await client.query(
+    `
+      INSERT INTO admin_audit_log (actor_user_id, target_user_id, target_token_id, action, details_json)
+      VALUES ($1, $2, $3, $4, $5::jsonb)
+    `,
+    [actorUserId, targetUserId, targetTokenId, action, JSON.stringify(details)]
+  );
+}
+
 export async function getUserAuthProfile(userId) {
   const scope = await resolveUserAccessScopeFromPool(userId);
   return {
@@ -3158,6 +3215,8 @@ export async function getUserAuthProfile(userId) {
     isOperator: scope.isOperator,
     isAdmin: scope.isAdmin,
     isOg: scope.isOg,
+    isBanned: scope.isBanned,
+    bannedReason: scope.actorBannedReason,
     referralCode: scope.ownerReferralCode,
     feeBpsOverride: scope.ownerFeeBpsOverride,
     canManageFunds: scope.canManageFunds,
@@ -3530,6 +3589,7 @@ export async function getDashboard(userId) {
           m.state_json AS module_state,
           m.last_error AS module_last_error
         FROM tokens t
+        JOIN users u ON u.id = t.user_id
         LEFT JOIN (
           SELECT
             token_id,
@@ -3579,7 +3639,7 @@ export async function getDashboard(userId) {
 
 export async function getReferralAccountSummary(userId) {
   const scope = await resolveUserAccessScopeFromPool(userId);
-  const [profileRes, referredRes, eventsRes, balanceRes, tokensRes] = await Promise.all([
+  const [profileRes, referredRes, eventsRes, balanceRes] = await Promise.all([
     pool.query(
       `
         SELECT
@@ -3647,26 +3707,28 @@ export async function getReferralAccountSummary(userId) {
       `,
       [scope.ownerUserId]
     ),
-    pool.query(
-      `
-        SELECT id, symbol, name, deposit, disconnected
-        FROM tokens
-        WHERE user_id = $1
-        ORDER BY disconnected ASC, created_at DESC
-      `,
-      [scope.ownerUserId]
-    ),
   ]);
+  const referralSignalMap = await getReferralSignalMap(
+    pool,
+    referredRes.rows.map((row) => ({
+      userId: Number(row.id || 0),
+      referrerUserId: scope.ownerUserId,
+    }))
+  );
 
   const profile = profileRes.rows[0] || {};
   const balance = balanceRes.rows[0] || {};
+  const currentReferralCode = String(profile.referral_code || "");
+  const defaultReferralCode = defaultReferralCodeForUserId(scope.ownerUserId);
   return {
     ownerUserId: scope.ownerUserId,
     ownerUsername: scope.ownerUsername,
     role: scope.role,
     canClaim: Boolean(scope.canManageFunds),
     isOg: Boolean(profile.is_og),
-    referralCode: String(profile.referral_code || ""),
+    referralCode: currentReferralCode,
+    defaultReferralCode,
+    canCustomizeReferralCode: Boolean(scope.canManageFunds) && currentReferralCode === defaultReferralCode,
     referredByUserId:
       profile.referrer_user_id == null ? null : Math.max(0, Math.floor(Number(profile.referrer_user_id || 0))),
     totals: {
@@ -3674,14 +3736,19 @@ export async function getReferralAccountSummary(userId) {
       pendingSol: fromLamports(balance.pending_lamports),
       claimedSol: fromLamports(balance.claimed_lamports),
     },
-    depositWalletOptions: tokensRes.rows.map((row) => ({
-      tokenId: String(row.id || ""),
-      symbol: String(row.symbol || ""),
-      name: String(row.name || ""),
-      deposit: String(row.deposit || ""),
-      disconnected: Boolean(row.disconnected),
-    })),
     referredUsers: referredRes.rows.map((row) => ({
+      ...(function () {
+        const signals =
+          referralSignalMap.get(`${Number(row.id || 0)}:${scope.ownerUserId}`) || {};
+        const risk = describeReferralRisk(signals, REFERRAL_MIN_GROSS_FEE_LAMPORTS);
+        return {
+          referralStatus: risk.statusLabel,
+          referralFlags: risk.flags,
+          cooldownEndsAt: signals.cooldownEndsAt || null,
+          hasWalletOverlap: Boolean(signals.walletOverlap),
+          hasIpOverlap: Boolean(signals.ipOverlap),
+        };
+      })(),
       userId: Number(row.id || 0),
       username: String(row.username || ""),
       createdAt: row.created_at,
@@ -3709,20 +3776,7 @@ export async function claimReferralEarnings(userId, payload = {}) {
 
     const destination = normalizePubkeyString(payload.destinationWallet || payload.destination || "");
     if (!destination) {
-      throw new Error("A destination deposit wallet is required.");
-    }
-
-    const ownedDepositRes = await client.query(
-      `
-        SELECT id, symbol
-        FROM tokens
-        WHERE user_id = $1 AND deposit = $2
-        LIMIT 1
-      `,
-      [scope.ownerUserId, destination]
-    );
-    if (!ownedDepositRes.rowCount) {
-      throw new Error("Destination must be one of your own token deposit wallets.");
+      throw new Error("A valid Solana wallet address is required.");
     }
 
     const balanceRes = await client.query(
@@ -3784,8 +3838,66 @@ export async function claimReferralEarnings(userId, payload = {}) {
       signature: sig,
       claimedSol: fromLamports(pendingLamports),
       destinationWallet: destination,
-      destinationTokenId: String(ownedDepositRes.rows[0].id || ""),
-      destinationSymbol: String(ownedDepositRes.rows[0].symbol || ""),
+    };
+  });
+}
+
+export async function updateOwnReferralCode(userId, nextReferralCodeInput = "") {
+  return withTx(async (client) => {
+    const scope = await resolveUserAccessScope(client, userId);
+    assertOwnerPermission(scope, "Managers cannot change referral codes.");
+    const nextReferralCode = normalizeReferralCode(nextReferralCodeInput);
+    if (!nextReferralCode) {
+      throw new Error("A referral code is required.");
+    }
+
+    const profileRes = await client.query(
+      `
+        SELECT id, COALESCE(referral_code, '') AS referral_code
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+        FOR UPDATE
+      `,
+      [scope.ownerUserId]
+    );
+    if (!profileRes.rowCount) throw new Error("User not found.");
+    const row = profileRes.rows[0];
+    const currentReferralCode = String(row.referral_code || "");
+    const defaultReferralCode = defaultReferralCodeForUserId(scope.ownerUserId);
+    if (currentReferralCode !== defaultReferralCode) {
+      throw new Error("Referral code can only be customized once.");
+    }
+    if (nextReferralCode === currentReferralCode) {
+      return {
+        ok: true,
+        referralCode: currentReferralCode,
+        canCustomizeReferralCode: false,
+      };
+    }
+
+    const existingRes = await client.query(
+      `
+        SELECT id
+        FROM users
+        WHERE referral_code = $1 AND id <> $2
+        LIMIT 1
+      `,
+      [nextReferralCode, scope.ownerUserId]
+    );
+    if (existingRes.rowCount) {
+      throw new Error("Referral code is already taken.");
+    }
+
+    await client.query(
+      `UPDATE users SET referral_code = $2 WHERE id = $1`,
+      [scope.ownerUserId, nextReferralCode]
+    );
+
+    return {
+      ok: true,
+      referralCode: nextReferralCode,
+      canCustomizeReferralCode: false,
     };
   });
 }
@@ -3794,7 +3906,7 @@ export async function getAdminOverview(userId) {
   const scope = await resolveUserAccessScopeFromPool(userId);
   assertAdminPermission(scope, "Only the admin account can access admin controls.");
 
-  const [settings, usersRes, tokensRes, referralsRes] = await Promise.all([
+  const [settings, usersRes, tokensRes, referralsRes, countsRes, errorRes, auditRes, depositPool, treasuryBalanceLamports, devBalanceLamports] = await Promise.all([
     getProtocolSettings(pool),
     pool.query(
       `
@@ -3803,7 +3915,10 @@ export async function getAdminOverview(userId) {
           u.username,
           COALESCE(u.is_admin, FALSE) AS is_admin,
           COALESCE(u.is_og, FALSE) AS is_og,
+          COALESCE(u.is_banned, FALSE) AS is_banned,
+          COALESCE(u.banned_reason, '') AS banned_reason,
           COALESCE(u.referral_code, '') AS referral_code,
+          u.referrer_user_id,
           ref.username AS referrer_username,
           COALESCE(ref.referral_code, '') AS referrer_code,
           COALESCE(rb.total_earned_lamports, 0) AS total_earned_lamports,
@@ -3815,7 +3930,7 @@ export async function getAdminOverview(userId) {
         LEFT JOIN referral_balances rb ON rb.referrer_user_id = u.id
         LEFT JOIN tokens t ON t.user_id = u.id
         WHERE u.username <> $1
-        GROUP BY u.id, u.username, u.is_admin, u.is_og, u.referral_code, ref.username, ref.referral_code, rb.total_earned_lamports, rb.pending_lamports
+        GROUP BY u.id, u.username, u.is_admin, u.is_og, u.banned_reason, u.referral_code, u.referrer_user_id, ref.username, ref.referral_code, rb.total_earned_lamports, rb.pending_lamports
         ORDER BY u.created_at DESC, u.id DESC
         LIMIT 250
       `,
@@ -3832,6 +3947,8 @@ export async function getAdminOverview(userId) {
           t.selected_bot,
           t.active,
           t.disconnected,
+          COALESCE(t.hidden_from_public, FALSE) AS hidden_from_public,
+          COALESCE(t.pinned_rank, 0) AS pinned_rank,
           t.deposit,
           t.created_at
         FROM tokens t
@@ -3854,15 +3971,109 @@ export async function getAdminOverview(userId) {
         LIMIT 100
       `
     ),
+    pool.query(
+      `
+        SELECT
+          (SELECT COUNT(*)::bigint FROM users WHERE username <> $1) AS user_count,
+          (SELECT COUNT(*)::bigint FROM users WHERE username <> $1 AND COALESCE(is_banned, FALSE) = TRUE) AS banned_user_count,
+          (SELECT COUNT(*)::bigint FROM tokens) AS token_count,
+          (SELECT COUNT(*)::bigint FROM tokens WHERE COALESCE(disconnected, FALSE) = TRUE) AS archived_token_count,
+          (SELECT COUNT(*)::bigint FROM tokens WHERE COALESCE(hidden_from_public, FALSE) = TRUE) AS hidden_token_count,
+          (SELECT COUNT(*)::bigint FROM tokens WHERE COALESCE(active, FALSE) = TRUE AND COALESCE(disconnected, FALSE) = FALSE) AS active_token_count,
+          (SELECT COUNT(*)::bigint FROM bot_modules WHERE COALESCE(enabled, FALSE) = TRUE) AS enabled_module_count
+      `,
+      [PROTOCOL_SYSTEM_USERNAME]
+    ),
+    pool.query(
+      `
+        SELECT COUNT(*)::bigint AS error_count_24h
+        FROM token_events
+        WHERE event_type = 'error'
+          AND created_at >= NOW() - INTERVAL '24 hours'
+      `
+    ),
+    pool.query(
+      `
+        SELECT
+          aal.id,
+          aal.action,
+          aal.target_token_id,
+          aal.details_json,
+          aal.created_at,
+          actor.username AS actor_username,
+          target.username AS target_username
+        FROM admin_audit_log aal
+        LEFT JOIN users actor ON actor.id = aal.actor_user_id
+        LEFT JOIN users target ON target.id = aal.target_user_id
+        ORDER BY aal.created_at DESC
+        LIMIT 80
+      `
+    ).catch(() => ({ rows: [] })),
+    getDepositPoolStatus().catch(() => ({ byPrefix: [], summary: "Pool status unavailable", total: 0, target: 0 })),
+    (async () => {
+      if (!config.treasuryWalletPublicKey) return 0;
+      try {
+        return await getConnection().getBalance(new PublicKey(config.treasuryWalletPublicKey), "confirmed");
+      } catch {
+        return 0;
+      }
+    })(),
+    (async () => {
+      if (!config.devWalletPublicKey) return 0;
+      try {
+        return await getConnection().getBalance(new PublicKey(config.devWalletPublicKey), "confirmed");
+      } catch {
+        return 0;
+      }
+    })(),
   ]);
 
+  const counts = countsRes.rows[0] || {};
+  const errors24h = errorRes.rows[0] || {};
+  const adminReferralSignalMap = await getReferralSignalMap(
+    pool,
+    usersRes.rows.map((row) => ({
+      userId: Number(row.id || 0),
+      referrerUserId: Math.max(0, Math.floor(Number(row.referrer_user_id || 0))),
+    }))
+  );
   return {
     settings,
+    health: {
+      depositPoolSummary: String(depositPool?.summary || ""),
+      depositPoolByPrefix: Array.isArray(depositPool?.byPrefix) ? depositPool.byPrefix : [],
+      userCount: Number(counts.user_count || 0),
+      bannedUserCount: Number(counts.banned_user_count || 0),
+      tokenCount: Number(counts.token_count || 0),
+      archivedTokenCount: Number(counts.archived_token_count || 0),
+      hiddenTokenCount: Number(counts.hidden_token_count || 0),
+      activeTokenCount: Number(counts.active_token_count || 0),
+      enabledModuleCount: Number(counts.enabled_module_count || 0),
+      errorCount24h: Number(errors24h.error_count_24h || 0),
+      treasurySol: fromLamports(treasuryBalanceLamports),
+      devWalletSol: fromLamports(devBalanceLamports),
+    },
     users: usersRes.rows.map((row) => ({
+      ...(function () {
+        const referrerUserId = Math.max(0, Math.floor(Number(row.referrer_user_id || 0)));
+        const signals = referrerUserId
+          ? adminReferralSignalMap.get(`${Number(row.id || 0)}:${referrerUserId}`) || {}
+          : {};
+        const risk = describeReferralRisk(signals, REFERRAL_MIN_GROSS_FEE_LAMPORTS);
+        return {
+          referralStatus: referrerUserId ? risk.statusLabel : "",
+          referralFlags: referrerUserId ? risk.flags : [],
+          hasWalletOverlap: Boolean(signals.walletOverlap),
+          hasIpOverlap: Boolean(signals.ipOverlap),
+          cooldownEndsAt: signals.cooldownEndsAt || null,
+        };
+      })(),
       id: Number(row.id || 0),
       username: String(row.username || ""),
       isAdmin: Boolean(row.is_admin),
       isOg: Boolean(row.is_og),
+      isBanned: Boolean(row.is_banned),
+      bannedReason: String(row.banned_reason || ""),
       referralCode: String(row.referral_code || ""),
       referrerUsername: String(row.referrer_username || ""),
       referrerCode: String(row.referrer_code || ""),
@@ -3880,6 +4091,8 @@ export async function getAdminOverview(userId) {
       selectedBot: String(row.selected_bot || "burn"),
       active: Boolean(row.active),
       disconnected: Boolean(row.disconnected),
+      hiddenFromPublic: Boolean(row.hidden_from_public),
+      pinnedRank: Number(row.pinned_rank || 0),
       deposit: String(row.deposit || ""),
       createdAt: row.created_at,
     })),
@@ -3888,6 +4101,15 @@ export async function getAdminOverview(userId) {
       username: String(row.username || ""),
       earnedSol: fromLamports(row.earned_lamports),
       eventCount: Number(row.event_count || 0),
+    })),
+    auditTrail: auditRes.rows.map((row) => ({
+      id: Number(row.id || 0),
+      action: String(row.action || ""),
+      actorUsername: String(row.actor_username || ""),
+      targetUsername: String(row.target_username || ""),
+      targetTokenId: row.target_token_id ? String(row.target_token_id) : null,
+      details: row.details_json && typeof row.details_json === "object" ? row.details_json : {},
+      createdAt: row.created_at,
     })),
   };
 }
@@ -3914,6 +4136,22 @@ export async function updateAdminProtocolSettings(userId, payload = {}) {
         payload.personalBotMode === undefined ? current.personalBotMode : normalizeModuleType(payload.personalBotMode, current.personalBotMode),
       personalBotEnabled:
         payload.personalBotEnabled === undefined ? current.personalBotEnabled : Boolean(payload.personalBotEnabled),
+      personalBotIntensity:
+        payload.personalBotIntensity === undefined ? current.personalBotIntensity : Math.max(0, Math.min(100, Math.floor(Number(payload.personalBotIntensity ?? current.personalBotIntensity)))),
+      personalBotSafety:
+        payload.personalBotSafety === undefined ? current.personalBotSafety : Math.max(0, Math.min(100, Math.floor(Number(payload.personalBotSafety ?? current.personalBotSafety)))),
+      maintenanceEnabled:
+        payload.maintenanceEnabled === undefined ? current.maintenanceEnabled : Boolean(payload.maintenanceEnabled),
+      maintenanceMode:
+        payload.maintenanceMode === undefined
+          ? current.maintenanceMode
+          : ["soft", "hard"].includes(String(payload.maintenanceMode || "").trim().toLowerCase())
+            ? String(payload.maintenanceMode).trim().toLowerCase()
+            : current.maintenanceMode,
+      maintenanceMessage:
+        payload.maintenanceMessage === undefined
+          ? current.maintenanceMessage
+          : String(payload.maintenanceMessage || "").trim().slice(0, 240),
     };
 
     await client.query(
@@ -3928,6 +4166,11 @@ export async function updateAdminProtocolSettings(userId, payload = {}) {
           referred_referral_bps = $7,
           personal_bot_mode = $8,
           personal_bot_enabled = $9,
+          personal_bot_intensity = $10,
+          personal_bot_safety = $11,
+          maintenance_enabled = $12,
+          maintenance_mode = $13,
+          maintenance_message = $14,
           updated_at = NOW()
         WHERE id = $1
       `,
@@ -3941,8 +4184,19 @@ export async function updateAdminProtocolSettings(userId, payload = {}) {
         next.referredReferralBps,
         next.personalBotMode,
         next.personalBotEnabled,
+        next.personalBotIntensity,
+        next.personalBotSafety,
+        next.maintenanceEnabled,
+        next.maintenanceMode,
+        next.maintenanceMessage,
       ]
     );
+
+    await recordAdminAudit(client, {
+      actorUserId: scope.actorUserId,
+      action: "protocol_settings_updated",
+      details: next,
+    });
 
     return getProtocolSettings(client);
   });
@@ -3958,6 +4212,12 @@ export async function adminSetUserOg(userId, targetUserId, enabled) {
       `UPDATE users SET is_og = $2 WHERE id = $1`,
       [targetId, Boolean(enabled)]
     );
+    await recordAdminAudit(client, {
+      actorUserId: scope.actorUserId,
+      targetUserId: targetId,
+      action: Boolean(enabled) ? "user_marked_og" : "user_removed_og",
+      details: { enabled: Boolean(enabled) },
+    });
     return { ok: true };
   });
 }
@@ -3973,10 +4233,13 @@ export async function adminSetUserReferrer(userId, targetUserId, referralCodeInp
     let referrerId = null;
     if (referralCode) {
       const refRes = await client.query(
-        `SELECT id FROM users WHERE referral_code = $1 LIMIT 1`,
+        `SELECT id, COALESCE(is_og, FALSE) AS is_og FROM users WHERE referral_code = $1 LIMIT 1`,
         [referralCode]
       );
       if (!refRes.rowCount) throw new Error("Referral code not found.");
+      if (Boolean(refRes.rows[0].is_og)) {
+        throw new Error("OG accounts cannot be used as referrers.");
+      }
       referrerId = Math.max(0, Math.floor(Number(refRes.rows[0].id || 0))) || null;
       if (referrerId === targetId) {
         throw new Error("Users cannot refer themselves.");
@@ -3987,6 +4250,154 @@ export async function adminSetUserReferrer(userId, targetUserId, referralCodeInp
       `UPDATE users SET referrer_user_id = $2 WHERE id = $1`,
       [targetId, referrerId]
     );
+    await recordAdminAudit(client, {
+      actorUserId: scope.actorUserId,
+      targetUserId: targetId,
+      action: "user_referrer_updated",
+      details: { referralCode, referrerUserId: referrerId },
+    });
+    return { ok: true };
+  });
+}
+
+export async function adminSetUserBan(userId, targetUserId, payload = {}) {
+  return withTx(async (client) => {
+    const scope = await resolveUserAccessScope(client, userId);
+    assertAdminPermission(scope, "Only the admin account can manage suspensions.");
+    const targetId = Math.max(0, Math.floor(Number(targetUserId || 0)));
+    if (!targetId) throw new Error("User id is required.");
+    if (targetId === scope.actorUserId) {
+      throw new Error("Admin cannot suspend the active admin account.");
+    }
+    const enabled = Boolean(payload?.enabled);
+    const reason = String(payload?.reason || "").trim().slice(0, 300);
+    if (enabled && !reason) {
+      throw new Error("A suspension reason is required.");
+    }
+    await client.query(
+      `
+        UPDATE users
+        SET
+          is_banned = $2,
+          banned_reason = CASE WHEN $2 THEN $3 ELSE NULL END,
+          banned_at = CASE WHEN $2 THEN NOW() ELSE NULL END,
+          banned_by_user_id = CASE WHEN $2 THEN $4 ELSE NULL END
+        WHERE id = $1
+      `,
+      [targetId, enabled, reason, scope.actorUserId]
+    );
+    if (enabled) {
+      await client.query(
+        `
+          UPDATE tokens
+          SET active = FALSE
+          WHERE user_id = $1
+        `,
+        [targetId]
+      );
+      await client.query(
+        `
+          UPDATE bot_modules
+          SET enabled = FALSE
+          WHERE user_id = $1
+        `,
+        [targetId]
+      );
+      await client.query(`DELETE FROM sessions WHERE user_id = $1`, [targetId]);
+      await client.query(
+        `
+          DELETE FROM sessions
+          WHERE user_id IN (
+            SELECT grantee_user_id
+            FROM user_access_grants
+            WHERE owner_user_id = $1
+          )
+        `,
+        [targetId]
+      );
+    }
+    await recordAdminAudit(client, {
+      actorUserId: scope.actorUserId,
+      targetUserId: targetId,
+      action: enabled ? "user_suspended" : "user_unsuspended",
+      details: { enabled, reason },
+    });
+    return { ok: true };
+  });
+}
+
+export async function adminUpdateTokenPublicState(userId, tokenId, payload = {}) {
+  return withTx(async (client) => {
+    const scope = await resolveUserAccessScope(client, userId);
+    assertAdminPermission(scope, "Only the admin account can update public token controls.");
+    const tokenIdText = String(tokenId || "").trim();
+    if (!tokenIdText) throw new Error("Token id is required.");
+    const hiddenFromPublic = Boolean(payload.hiddenFromPublic);
+    const pinnedRank = Math.max(0, Math.min(999, Math.floor(Number(payload.pinnedRank || 0))));
+    await client.query(
+      `
+        UPDATE tokens
+        SET
+          hidden_from_public = $2,
+          pinned_rank = $3
+        WHERE id = $1
+      `,
+      [tokenIdText, hiddenFromPublic, pinnedRank]
+    );
+    await recordAdminAudit(client, {
+      actorUserId: scope.actorUserId,
+      targetTokenId: tokenIdText,
+      action: "token_public_state_updated",
+      details: { hiddenFromPublic, pinnedRank },
+    });
+    return { ok: true };
+  });
+}
+
+export async function adminForcePauseToken(userId, tokenId) {
+  return withTx(async (client) => {
+    const scope = await resolveUserAccessScope(client, userId);
+    assertAdminPermission(scope, "Only the admin account can force pause bots.");
+    const tokenIdText = String(tokenId || "").trim();
+    if (!tokenIdText) throw new Error("Token id is required.");
+
+    const tokenRes = await client.query(
+      `
+        SELECT id, user_id, symbol, selected_bot, COALESCE(active, FALSE) AS active
+        FROM tokens
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [tokenIdText]
+    );
+    if (!tokenRes.rowCount) throw new Error("Token not found.");
+    const row = tokenRes.rows[0];
+
+    await client.query(`UPDATE tokens SET active = FALSE, updated_at = NOW() WHERE id = $1`, [tokenIdText]);
+    await client.query(
+      `UPDATE bot_modules SET enabled = FALSE, next_run_at = NOW() + INTERVAL '60 seconds', updated_at = NOW() WHERE token_id = $1`,
+      [tokenIdText]
+    );
+    await insertEvent(
+      client,
+      Number(row.user_id || 0),
+      tokenIdText,
+      String(row.symbol || ""),
+      "status",
+      `Bot force-paused by admin.`,
+      null,
+      {
+        moduleType: String(row.selected_bot || "burn"),
+        idempotencyKey: `admin:force-pause:${tokenIdText}:${Date.now()}`,
+      }
+    );
+    await recordAdminAudit(client, {
+      actorUserId: scope.actorUserId,
+      targetUserId: Number(row.user_id || 0),
+      targetTokenId: tokenIdText,
+      action: "token_force_paused",
+      details: { symbol: String(row.symbol || ""), moduleType: String(row.selected_bot || "burn"), wasActive: Boolean(row.active) },
+    });
     return { ok: true };
   });
 }
@@ -3997,6 +4408,8 @@ export async function adminArchiveToken(userId, tokenId) {
     assertAdminPermission(scope, "Only the admin account can archive tokens.");
     const tokenIdText = String(tokenId || "").trim();
     if (!tokenIdText) throw new Error("Token id is required.");
+    const tokenRes = await client.query(`SELECT user_id, symbol FROM tokens WHERE id = $1 LIMIT 1`, [tokenIdText]);
+    if (!tokenRes.rowCount) throw new Error("Token not found.");
     await client.query(
       `UPDATE tokens SET active = FALSE, disconnected = TRUE WHERE id = $1`,
       [tokenIdText]
@@ -4005,6 +4418,13 @@ export async function adminArchiveToken(userId, tokenId) {
       `UPDATE bot_modules SET enabled = FALSE WHERE token_id = $1`,
       [tokenIdText]
     );
+    await recordAdminAudit(client, {
+      actorUserId: scope.actorUserId,
+      targetUserId: Number(tokenRes.rows[0].user_id || 0),
+      targetTokenId: tokenIdText,
+      action: "token_archived",
+      details: { symbol: String(tokenRes.rows[0].symbol || "") },
+    });
     return { ok: true };
   });
 }
@@ -4015,12 +4435,89 @@ export async function adminRestoreArchivedToken(userId, tokenId) {
     assertAdminPermission(scope, "Only the admin account can restore tokens.");
     const tokenIdText = String(tokenId || "").trim();
     if (!tokenIdText) throw new Error("Token id is required.");
+    const tokenRes = await client.query(`SELECT user_id, symbol FROM tokens WHERE id = $1 LIMIT 1`, [tokenIdText]);
+    if (!tokenRes.rowCount) throw new Error("Token not found.");
     await client.query(
       `UPDATE tokens SET active = FALSE, disconnected = FALSE WHERE id = $1`,
       [tokenIdText]
     );
+    await recordAdminAudit(client, {
+      actorUserId: scope.actorUserId,
+      targetUserId: Number(tokenRes.rows[0].user_id || 0),
+      targetTokenId: tokenIdText,
+      action: "token_restored",
+      details: { symbol: String(tokenRes.rows[0].symbol || "") },
+    });
     return { ok: true };
   });
+}
+
+export async function adminPermanentlyDeleteArchivedToken(userId, tokenId) {
+  const scope = await resolveUserAccessScopeFromPool(userId);
+  assertAdminPermission(scope, "Only the admin account can permanently delete tokens.");
+  const tokenIdText = String(tokenId || "").trim();
+  if (!tokenIdText) throw new Error("Token id is required.");
+
+  const tokenRes = await pool.query(
+    `
+      SELECT user_id
+      FROM tokens
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [tokenIdText]
+  );
+  if (!tokenRes.rowCount) throw new Error("Token not found.");
+  const ownerUserId = Math.max(0, Math.floor(Number(tokenRes.rows[0].user_id || 0)));
+  if (!ownerUserId) throw new Error("Token owner could not be resolved.");
+
+  const tokenRowRes = await pool.query(
+    `
+      SELECT id, user_id, symbol, name, mint, picture_url, deposit, selected_bot, active, disconnected
+      FROM tokens
+      WHERE user_id = $1 AND id = $2
+      LIMIT 1
+    `,
+    [ownerUserId, tokenIdText]
+  );
+  if (!tokenRowRes.rowCount) throw new Error("Token not found.");
+  const tokenRow = tokenRowRes.rows[0];
+  if (!Boolean(tokenRow.disconnected)) {
+    throw new Error("Only archived tokens can be permanently deleted.");
+  }
+
+  const addresses = await withTx(async (client) =>
+    readTokenWalletAddresses(client, ownerUserId, tokenRow)
+  );
+  const balances = await collectWalletBalances(tokenRow, addresses);
+  const hasFunds = balances.some(
+    (a) => Number(a.solBalance || 0) > 0.00005 || Number(a.tokenBalance || 0) > 0.000001
+  );
+  if (hasFunds) {
+    throw new Error("Archived token cannot be permanently deleted while funds remain in its wallets.");
+  }
+
+  await withTx(async (client) => {
+    await client.query(`DELETE FROM token_events WHERE token_id = $1`, [tokenIdText]);
+    await client.query(`DELETE FROM referral_events WHERE token_id = $1`, [tokenIdText]);
+    await client.query(`DELETE FROM protocol_fee_credits WHERE source_token_id = $1`, [tokenIdText]);
+    await recordAdminAudit(client, {
+      actorUserId: scope.actorUserId,
+      targetUserId: ownerUserId,
+      targetTokenId: tokenIdText,
+      action: "token_permanently_deleted",
+      details: { symbol: String(tokenRow.symbol || ""), mint: String(tokenRow.mint || "") },
+    });
+    await client.query(
+      `
+        DELETE FROM tokens
+        WHERE user_id = $1 AND id = $2 AND disconnected = TRUE
+      `,
+      [ownerUserId, tokenIdText]
+    );
+  });
+
+  return { ok: true };
 }
 
 export async function getPublicDashboard() {
@@ -4052,39 +4549,73 @@ export async function getPublicDashboard() {
          AND m.module_type = t.selected_bot
         WHERE m.id IS NOT NULL
           AND COALESCE(t.disconnected, false) = false
-        ORDER BY t.active DESC, t.updated_at DESC, t.created_at DESC
+          AND COALESCE(t.hidden_from_public, false) = false
+          AND COALESCE(u.is_banned, false) = false
+        ORDER BY COALESCE(t.pinned_rank, 0) DESC, t.active DESC, t.updated_at DESC, t.created_at DESC
         LIMIT 200
       `
     ),
     pool.query(
       `
-        SELECT id, token_id, token_symbol, module_type, event_type, amount, message, tx, created_at
-        FROM token_events
-        WHERE event_type IN ('burn', 'buyback')
+        SELECT e.id, e.token_id, e.token_symbol, e.module_type, e.event_type, e.amount, e.message, e.tx, e.created_at
+        FROM token_events e
+        LEFT JOIN tokens t ON t.id = e.token_id
+        LEFT JOIN users u ON u.id = t.user_id
+        WHERE (
+            e.token_id IS NULL
+            OR (
+              COALESCE(t.disconnected, false) = false
+              AND COALESCE(t.hidden_from_public, false) = false
+              AND COALESCE(u.is_banned, false) = false
+            )
+          )
+          AND (
+            e.event_type IN ('burn', 'buyback')
            OR (
-             module_type IN ('burn', 'personal_burn')
-             AND event_type IN ('claim', 'status', 'transfer', 'error', 'withdraw', 'sell', 'buy')
+             e.module_type IN ('burn', 'personal_burn')
+             AND e.event_type IN ('claim', 'status', 'transfer', 'error', 'withdraw', 'sell', 'buy')
            )
-        ORDER BY created_at DESC
+          )
+        ORDER BY e.created_at DESC
         LIMIT 500
       `
     ),
     pool.query(
       `
-        SELECT event_type, amount, message, created_at
-        FROM token_events
-        WHERE event_type = 'burn'
-          AND created_at >= NOW() - INTERVAL '7 days'
-        ORDER BY created_at DESC
+        SELECT e.event_type, e.amount, e.message, e.created_at
+        FROM token_events e
+        LEFT JOIN tokens t ON t.id = e.token_id
+        LEFT JOIN users u ON u.id = t.user_id
+        WHERE e.event_type = 'burn'
+          AND e.created_at >= NOW() - INTERVAL '7 days'
+          AND (
+            e.token_id IS NULL
+            OR (
+              COALESCE(t.disconnected, false) = false
+              AND COALESCE(t.hidden_from_public, false) = false
+              AND COALESCE(u.is_banned, false) = false
+            )
+          )
+        ORDER BY e.created_at DESC
       `
     ),
     pool.query(
       `
         SELECT
-          UPPER(COALESCE(NULLIF(token_symbol, ''), 'UNKNOWN')) AS symbol,
-          COALESCE(SUM(amount), 0)::numeric AS amount
-        FROM token_events
-        WHERE event_type = 'burn'
+          UPPER(COALESCE(NULLIF(e.token_symbol, ''), 'UNKNOWN')) AS symbol,
+          COALESCE(SUM(e.amount), 0)::numeric AS amount
+        FROM token_events e
+        LEFT JOIN tokens t ON t.id = e.token_id
+        LEFT JOIN users u ON u.id = t.user_id
+        WHERE e.event_type = 'burn'
+          AND (
+            e.token_id IS NULL
+            OR (
+              COALESCE(t.disconnected, false) = false
+              AND COALESCE(t.hidden_from_public, false) = false
+              AND COALESCE(u.is_banned, false) = false
+            )
+          )
         GROUP BY 1
         ORDER BY amount DESC
       `
@@ -4738,6 +5269,52 @@ export async function deleteToken(userId, tokenId) {
   return { ok: true };
 }
 
+export async function permanentlyDeleteArchivedToken(userId, tokenId) {
+  const scope = await resolveUserAccessScopeFromPool(userId);
+  assertOwnerPermission(scope, "Managers cannot permanently delete archived bots.");
+
+  const tokenRes = await pool.query(
+    `
+      SELECT id, user_id, symbol, name, mint, picture_url, deposit, selected_bot, active, disconnected
+      FROM tokens
+      WHERE user_id = $1 AND id = $2
+      LIMIT 1
+    `,
+    [scope.ownerUserId, tokenId]
+  );
+  if (!tokenRes.rowCount) throw new Error("Token not found.");
+  const tokenRow = tokenRes.rows[0];
+  if (!Boolean(tokenRow.disconnected)) {
+    throw new Error("Only archived tokens can be permanently deleted.");
+  }
+
+  const addresses = await withTx(async (client) =>
+    readTokenWalletAddresses(client, scope.ownerUserId, tokenRow)
+  );
+  const balances = await collectWalletBalances(tokenRow, addresses);
+  const hasFunds = balances.some(
+    (a) => Number(a.solBalance || 0) > 0.00005 || Number(a.tokenBalance || 0) > 0.000001
+  );
+  if (hasFunds) {
+    throw new Error("Archived token cannot be permanently deleted while funds remain in its wallets.");
+  }
+
+  await withTx(async (client) => {
+    await client.query(`DELETE FROM token_events WHERE token_id = $1`, [String(tokenId)]);
+    await client.query(`DELETE FROM referral_events WHERE token_id = $1`, [String(tokenId)]);
+    await client.query(`DELETE FROM protocol_fee_credits WHERE source_token_id = $1`, [String(tokenId)]);
+    await client.query(
+      `
+        DELETE FROM tokens
+        WHERE user_id = $1 AND id = $2 AND disconnected = TRUE
+      `,
+      [scope.ownerUserId, String(tokenId)]
+    );
+  });
+
+  return { ok: true };
+}
+
 export async function restoreToken(userId, tokenId) {
   return withTx(async (client) => {
     const scope = await resolveUserAccessScope(client, userId);
@@ -5101,7 +5678,7 @@ async function getEmberHolderCount() {
 
 export async function getPublicMetrics() {
   const emberMint = String(config.emberTokenMint || "").trim();
-  const [tokenAggRes, eventAggRes, totalHolders, emberMarketCap, protocolAggRes] = await Promise.all([
+  const [tokenAggRes, eventAggRes, totalHolders, emberMarketCap, protocolAggRes, protocolSettings] = await Promise.all([
     pool.query(`
       SELECT
         COUNT(*)::bigint AS active_tokens
@@ -5130,6 +5707,7 @@ export async function getPublicMetrics() {
       WHERE id = 1
       LIMIT 1
     `).catch(() => ({ rows: [] })),
+    getProtocolSettings(pool).catch(() => DEFAULT_PROTOCOL_SETTINGS),
   ]);
 
   const tokenAgg = tokenAggRes.rows[0] || {};
@@ -5154,6 +5732,9 @@ export async function getPublicMetrics() {
       (Number(eventAgg.rewards_processed_sol) || 0) + (Number(protocolAgg.rewards_processed_sol) || 0),
     totalFeesTakenSol:
       (Number(eventAgg.fees_taken_sol) || 0) + (Number(protocolAgg.fees_taken_sol) || 0),
+    maintenanceEnabled: Boolean(protocolSettings?.maintenanceEnabled),
+    maintenanceMode: String(protocolSettings?.maintenanceMode || "soft"),
+    maintenanceMessage: String(protocolSettings?.maintenanceMessage || ""),
   };
 }
 
@@ -6665,9 +7246,14 @@ const DEFAULT_PROTOCOL_SETTINGS = Object.freeze({
   referredReferralBps: 500,
   personalBotMode: MODULE_TYPES.burn,
   personalBotEnabled: true,
+  personalBotIntensity: 45,
+  personalBotSafety: 65,
+  maintenanceEnabled: false,
+  maintenanceMode: "soft",
+  maintenanceMessage: "",
 });
 
-async function getProtocolSettings(client = pool) {
+export async function getProtocolSettings(client = pool) {
   const queryable = client?.query ? client : pool;
   const res = await queryable.query(
     `
@@ -6679,7 +7265,12 @@ async function getProtocolSettings(client = pool) {
         referred_burn_bps,
         referred_referral_bps,
         personal_bot_mode,
-        personal_bot_enabled
+        personal_bot_enabled,
+        personal_bot_intensity,
+        personal_bot_safety,
+        maintenance_enabled,
+        maintenance_mode,
+        maintenance_message
       FROM protocol_settings
       WHERE id = 1
       LIMIT 1
@@ -6698,6 +7289,67 @@ async function getProtocolSettings(client = pool) {
       typeof row.personal_bot_enabled === "boolean"
         ? row.personal_bot_enabled
       : DEFAULT_PROTOCOL_SETTINGS.personalBotEnabled,
+    personalBotIntensity: Math.max(0, Math.min(100, Math.floor(Number(row.personal_bot_intensity ?? DEFAULT_PROTOCOL_SETTINGS.personalBotIntensity)))),
+    personalBotSafety: Math.max(0, Math.min(100, Math.floor(Number(row.personal_bot_safety ?? DEFAULT_PROTOCOL_SETTINGS.personalBotSafety)))),
+    maintenanceEnabled:
+      typeof row.maintenance_enabled === "boolean"
+        ? row.maintenance_enabled
+        : DEFAULT_PROTOCOL_SETTINGS.maintenanceEnabled,
+    maintenanceMode: ["soft", "hard"].includes(String(row.maintenance_mode || "").trim().toLowerCase())
+      ? String(row.maintenance_mode).trim().toLowerCase()
+      : DEFAULT_PROTOCOL_SETTINGS.maintenanceMode,
+    maintenanceMessage: String(row.maintenance_message || DEFAULT_PROTOCOL_SETTINGS.maintenanceMessage || "").trim(),
+  };
+}
+
+function deriveProtocolPersonalReserveSol(settings = {}) {
+  const safety = Math.max(0, Math.min(100, Number(settings.personalBotSafety ?? DEFAULT_PROTOCOL_SETTINGS.personalBotSafety) || 0));
+  return Number((0.003 + (safety / 100) * 0.009).toFixed(3));
+}
+
+function buildProtocolPersonalModuleConfig(moduleType, settings = {}) {
+  const intensity = Math.max(0, Math.min(100, Number(settings.personalBotIntensity ?? DEFAULT_PROTOCOL_SETTINGS.personalBotIntensity) || 0));
+  const reserveSol = deriveProtocolPersonalReserveSol(settings);
+  if (moduleType === MODULE_TYPES.volume) {
+    return deriveVolumeConfig({
+      ...defaultVolumeModuleConfig(),
+      speed: intensity,
+      aggression: intensity,
+      minTradeSol: Number((0.005 + (intensity / 100) * 0.015).toFixed(3)),
+      maxTradeSol: Number((0.015 + (intensity / 100) * 0.05).toFixed(3)),
+      reserveSol,
+    });
+  }
+  if (moduleType === MODULE_TYPES.marketMaker) {
+    return deriveMarketMakerConfig({
+      ...defaultMarketMakerModuleConfig(),
+      aggression: intensity,
+      minTradeSol: Number((0.005 + (intensity / 100) * 0.012).toFixed(3)),
+      maxTradeSol: Number((0.018 + (intensity / 100) * 0.05).toFixed(3)),
+      reserveSol,
+      targetInventoryPct: 50,
+    });
+  }
+  if (moduleType === MODULE_TYPES.dca) {
+    return deriveDcaConfig({
+      ...defaultDcaModuleConfig(),
+      aggression: intensity,
+      minTradeSol: Number((0.005 + (intensity / 100) * 0.02).toFixed(3)),
+      cycleIntervalSec: Math.max(20, 240 - Math.round(intensity * 2)),
+      reserveSol,
+    });
+  }
+  if (moduleType === MODULE_TYPES.rekindle) {
+    return deriveRekindleConfig({
+      ...defaultRekindleModuleConfig(),
+      aggression: intensity,
+      minTradeSol: Number((0.005 + (intensity / 100) * 0.018).toFixed(3)),
+      reserveSol,
+      cooldownSec: Math.max(30, 180 - Math.round(intensity * 1.2)),
+    });
+  }
+  return {
+    reserveSol,
   };
 }
 
@@ -6764,6 +7416,208 @@ async function getUserBillingProfile(client, userId) {
       row.referrer_user_id == null ? null : Math.max(0, Math.floor(Number(row.referrer_user_id || 0))),
     referralCode: String(row.referral_code || ""),
   };
+}
+
+function intersectValues(left = [], right = []) {
+  const rightSet = new Set(Array.isArray(right) ? right.filter(Boolean) : []);
+  if (!rightSet.size) return [];
+  return Array.from(new Set((Array.isArray(left) ? left : []).filter((value) => value && rightSet.has(value))));
+}
+
+function describeReferralRisk(signals = {}, grossFeeLamports = 0) {
+  const flags = [];
+  const reasons = [];
+  const cooldownRemainingMs = Math.max(0, Number(signals.cooldownRemainingMs || 0));
+  const grossLamports = Math.max(0, Math.floor(Number(grossFeeLamports || 0)));
+
+  if (signals.walletOverlap) flags.push("wallet_overlap");
+  if (signals.ipOverlap) flags.push("ip_overlap");
+  if (signals.referrerIsOg) reasons.push("referrer_og");
+  if (cooldownRemainingMs > 0) reasons.push("cooldown");
+  if (grossLamports > 0 && grossLamports < REFERRAL_MIN_GROSS_FEE_LAMPORTS) reasons.push("below_min_fee");
+  if (!signals.hasRealUsage) reasons.push("no_real_usage");
+
+  return {
+    flags,
+    reasons,
+    eligible: reasons.length === 0,
+    statusLabel:
+      reasons[0] === "referrer_og"
+        ? "Referrer ineligible"
+        : reasons[0] === "cooldown"
+          ? "Cooling down"
+          : reasons[0] === "below_min_fee"
+            ? "Fee below minimum"
+            : reasons[0] === "no_real_usage"
+              ? "Waiting for real usage"
+              : "Eligible",
+  };
+}
+
+async function getReferralSignalMap(client, pairs = []) {
+  const normalizedPairs = Array.from(
+    new Map(
+      (Array.isArray(pairs) ? pairs : [])
+        .map((pair) => ({
+          userId: Math.max(0, Math.floor(Number(pair?.userId || 0))),
+          referrerUserId: Math.max(0, Math.floor(Number(pair?.referrerUserId || 0))),
+        }))
+        .filter((pair) => pair.userId > 0 && pair.referrerUserId > 0 && pair.userId !== pair.referrerUserId)
+        .map((pair) => [`${pair.userId}:${pair.referrerUserId}`, pair])
+    ).values()
+  );
+  const result = new Map();
+  if (!normalizedPairs.length) return result;
+
+  const userIds = Array.from(
+    new Set(normalizedPairs.flatMap((pair) => [pair.userId, pair.referrerUserId]).filter((value) => value > 0))
+  );
+
+  const [usersRes, tokensRes, modulesRes, eventsRes, walletsRes] = await Promise.all([
+    client.query(
+      `
+        SELECT
+          id,
+          created_at,
+          COALESCE(is_og, FALSE) AS is_og,
+          COALESCE(signup_ip, '') AS signup_ip,
+          COALESCE(last_login_ip, '') AS last_login_ip
+        FROM users
+        WHERE id = ANY($1::bigint[])
+      `,
+      [userIds]
+    ),
+    client.query(
+      `
+        SELECT
+          user_id,
+          COUNT(*) FILTER (WHERE COALESCE(disconnected, FALSE) = FALSE)::bigint AS active_token_count
+        FROM tokens
+        WHERE user_id = ANY($1::bigint[])
+        GROUP BY user_id
+      `,
+      [userIds]
+    ),
+    client.query(
+      `
+        SELECT
+          t.user_id,
+          COUNT(*)::bigint AS module_count
+        FROM bot_modules bm
+        JOIN tokens t ON t.id = bm.token_id
+        WHERE t.user_id = ANY($1::bigint[])
+        GROUP BY t.user_id
+      `,
+      [userIds]
+    ),
+    client.query(
+      `
+        SELECT
+          user_id,
+          COUNT(*)::bigint AS successful_event_count
+        FROM token_events
+        WHERE user_id = ANY($1::bigint[])
+          AND tx IS NOT NULL
+          AND event_type NOT IN ('status', 'transfer')
+        GROUP BY user_id
+      `,
+      [userIds]
+    ),
+    client.query(
+      `
+        SELECT user_id, wallet
+        FROM (
+          SELECT user_id, deposit AS wallet
+          FROM tokens
+          WHERE user_id = ANY($1::bigint[]) AND deposit IS NOT NULL AND BTRIM(deposit) <> ''
+          UNION
+          SELECT user_id, deploy_wallet_pubkey AS wallet
+          FROM tokens
+          WHERE user_id = ANY($1::bigint[]) AND deploy_wallet_pubkey IS NOT NULL AND BTRIM(deploy_wallet_pubkey) <> ''
+          UNION
+          SELECT user_id, deposit_pubkey AS wallet
+          FROM token_deposit_keys
+          WHERE user_id = ANY($1::bigint[]) AND deposit_pubkey IS NOT NULL AND BTRIM(deposit_pubkey) <> ''
+          UNION
+          SELECT user_id, wallet_pubkey AS wallet
+          FROM volume_trade_wallets
+          WHERE user_id = ANY($1::bigint[]) AND wallet_pubkey IS NOT NULL AND BTRIM(wallet_pubkey) <> ''
+          UNION
+          SELECT user_id, source_wallet AS wallet
+          FROM token_funding_sources
+          WHERE user_id = ANY($1::bigint[]) AND source_wallet IS NOT NULL AND BTRIM(source_wallet) <> ''
+          UNION
+          SELECT referrer_user_id AS user_id, destination_wallet AS wallet
+          FROM referral_claims
+          WHERE referrer_user_id = ANY($1::bigint[]) AND destination_wallet IS NOT NULL AND BTRIM(destination_wallet) <> ''
+        ) wallets
+      `,
+      [userIds]
+    ),
+  ]);
+
+  const userMeta = new Map();
+  usersRes.rows.forEach((row) => {
+    userMeta.set(Number(row.id || 0), {
+      createdAt: row.created_at ? new Date(row.created_at) : null,
+      isOg: Boolean(row.is_og),
+      ips: Array.from(
+        new Set(
+          [String(row.signup_ip || "").trim(), String(row.last_login_ip || "").trim()].filter(Boolean)
+        )
+      ),
+    });
+  });
+
+  const activeTokenCounts = new Map(tokensRes.rows.map((row) => [Number(row.user_id || 0), Number(row.active_token_count || 0)]));
+  const moduleCounts = new Map(modulesRes.rows.map((row) => [Number(row.user_id || 0), Number(row.module_count || 0)]));
+  const eventCounts = new Map(eventsRes.rows.map((row) => [Number(row.user_id || 0), Number(row.successful_event_count || 0)]));
+  const walletMap = new Map();
+  walletsRes.rows.forEach((row) => {
+    const userId = Number(row.user_id || 0);
+    const wallet = String(row.wallet || "").trim();
+    if (!userId || !wallet) return;
+    if (!walletMap.has(userId)) walletMap.set(userId, new Set());
+    walletMap.get(userId).add(wallet);
+  });
+
+  normalizedPairs.forEach((pair) => {
+    const referred = userMeta.get(pair.userId) || { createdAt: null, isOg: false, ips: [] };
+    const referrer = userMeta.get(pair.referrerUserId) || { createdAt: null, isOg: false, ips: [] };
+    const overlapWallets = intersectValues(
+      Array.from(walletMap.get(pair.userId) || []),
+      Array.from(walletMap.get(pair.referrerUserId) || [])
+    );
+    const overlapIps = intersectValues(referred.ips, referrer.ips);
+    const createdAtMs = referred.createdAt instanceof Date && Number.isFinite(referred.createdAt.getTime())
+      ? referred.createdAt.getTime()
+      : 0;
+    const cooldownRemainingMs = createdAtMs > 0
+      ? Math.max(0, createdAtMs + REFERRAL_COOLDOWN_MS - Date.now())
+      : REFERRAL_COOLDOWN_MS;
+    const activeTokenCount = Number(activeTokenCounts.get(pair.userId) || 0);
+    const moduleCount = Number(moduleCounts.get(pair.userId) || 0);
+    const successfulEventCount = Number(eventCounts.get(pair.userId) || 0);
+    const hasRealUsage = activeTokenCount > 0 && moduleCount > 0;
+
+    result.set(`${pair.userId}:${pair.referrerUserId}`, {
+      userId: pair.userId,
+      referrerUserId: pair.referrerUserId,
+      referrerIsOg: Boolean(referrer.isOg),
+      walletOverlap: overlapWallets.length > 0,
+      ipOverlap: overlapIps.length > 0,
+      overlapWallets: overlapWallets.slice(0, 5),
+      overlapIps: overlapIps.slice(0, 5),
+      cooldownRemainingMs,
+      cooldownEndsAt: createdAtMs > 0 ? new Date(createdAtMs + REFERRAL_COOLDOWN_MS).toISOString() : null,
+      hasRealUsage,
+      activeTokenCount,
+      moduleCount,
+      successfulEventCount,
+    });
+  });
+
+  return result;
 }
 
 function splitLamportsByBps(totalLamports, bpsMap = {}) {
@@ -6872,6 +7726,20 @@ async function applyProtocolFeeFlow(client, options = {}) {
     billing.feeBpsOverride != null
       ? billing.feeBpsOverride
       : protocolSettings.defaultFeeBps;
+  const referralSignals = billing.referrerUserId
+    ? (await getReferralSignalMap(client, [{ userId, referrerUserId: billing.referrerUserId }])).get(
+        `${userId}:${billing.referrerUserId}`
+      ) || null
+    : null;
+  const referralRisk = referralSignals
+    ? describeReferralRisk(referralSignals, Math.floor((Math.max(0, totalLamports) * Math.max(0, baseFeeBps)) / 10000))
+    : null;
+  const referralEligible =
+    Boolean(billing.referrerUserId) &&
+    Boolean(referralSignals) &&
+    Boolean(referralRisk?.eligible) &&
+    Boolean(tokenId) &&
+    Boolean(moduleType);
 
   if (billing.isOg || baseFeeBps <= 0) {
     return {
@@ -6886,7 +7754,7 @@ async function applyProtocolFeeFlow(client, options = {}) {
   }
 
   let splitBps;
-  if (billing.referrerUserId) {
+  if (referralEligible) {
     const referredTotal =
       protocolSettings.referredTreasuryBps +
       protocolSettings.referredBurnBps +
@@ -6962,7 +7830,7 @@ async function applyProtocolFeeFlow(client, options = {}) {
     );
   }
 
-  if (billing.referrerUserId && referralLamports > 0) {
+  if (referralEligible && referralLamports > 0) {
     await accrueReferralEarning(client, {
       userId,
       referrerUserId: billing.referrerUserId,
@@ -6974,7 +7842,11 @@ async function applyProtocolFeeFlow(client, options = {}) {
       burnFeeLamports: burnLamports,
       referralFeeLamports: referralLamports,
       tx: treasurySig,
-      metadata: { allocation: "protocol_fee" },
+      metadata: {
+        allocation: "protocol_fee",
+        walletOverlap: Boolean(referralSignals?.walletOverlap),
+        ipOverlap: Boolean(referralSignals?.ipOverlap),
+      },
     });
     await insertEvent(
       client,
@@ -6996,6 +7868,8 @@ async function applyProtocolFeeFlow(client, options = {}) {
     netLamports: Math.max(0, totalLamports - feeLamports),
     txCreated,
     billing,
+    referralSignals,
+    referralRisk,
   };
 }
 
@@ -9891,7 +10765,7 @@ async function runPersonalCreatorClaimCycle({
   };
 }
 
-async function runPersonalBurnExecutor(client) {
+async function runPersonalBurnExecutor(client, protocolSettings = null) {
   if (!config.devWalletPrivateKey || !config.devWalletPublicKey) {
     return { ran: false, txCreated: 0, reason: "missing-dev-wallet" };
   }
@@ -9925,7 +10799,10 @@ async function runPersonalBurnExecutor(client) {
 
   const connection = getConnection();
   const signer = Keypair.fromSecretKey(config.devWalletPrivateKey);
-  const reserveLamports = toLamports(Math.max(0.001, Number(config.devWalletSolReserve || 0.01)));
+  const personalConfig = buildProtocolPersonalModuleConfig(MODULE_TYPES.burn, protocolSettings || {});
+  const reserveLamports = toLamports(
+    Math.max(0.001, Number(personalConfig.reserveSol || config.devWalletSolReserve || 0.01))
+  );
   const beforeClaimBalance = await connection.getBalance(signer.publicKey, "confirmed");
   let txCreated = 0;
   let claimSuccess = 0;
@@ -10195,7 +11072,7 @@ async function runPersonalBurnExecutor(client) {
   return { ran: true, txCreated, claimSuccess, claimFailures, spendableLamports: spendable };
 }
 
-async function runPersonalVolumeExecutor(client) {
+async function runPersonalVolumeExecutor(client, protocolSettings = null) {
   if (!config.devWalletPrivateKey || !config.devWalletPublicKey || !config.emberTokenMint) {
     return { ran: false, txCreated: 0 };
   }
@@ -10227,7 +11104,10 @@ async function runPersonalVolumeExecutor(client) {
     }
   };
 
-  const reserveLamports = toLamports(Math.max(0.001, Number(config.devWalletSolReserve || 0.01)));
+  const configJson = buildProtocolPersonalModuleConfig(MODULE_TYPES.volume, protocolSettings || {});
+  const reserveLamports = toLamports(
+    Math.max(0.001, Number(configJson.reserveSol || config.devWalletSolReserve || 0.01))
+  );
   const claimMinSol = Math.max(0, Number(config.personalClaimMinSol || 0));
   const estimatedClaimFeeSol = Math.max(0.00015, Number(config.basePriorityFeeSol || 0.0005) + 0.0001);
 
@@ -10306,11 +11186,19 @@ async function runPersonalVolumeExecutor(client) {
     return { ran: true, txCreated, claimSuccess, claimFailures, spendableLamports };
   }
 
-  let action = tokenBalance <= 0.000001 ? "buy" : spendableLamports <= toLamports(0.0005) ? "sell" : Math.random() < 0.55 ? "buy" : "sell";
+  let action =
+    tokenBalance <= 0.000001 ? "buy" : spendableLamports <= toLamports(0.0005) ? "sell" : Math.random() < 0.55 ? "buy" : "sell";
 
   if (action === "buy") {
     const spendableSol = fromLamports(spendableLamports);
-    const tradeSol = Math.max(0.0005, Math.min(spendableSol * 0.65, Math.max(0.0025, spendableSol * (0.28 + Math.random() * 0.22))));
+    const minTradeSol = Math.max(0.0005, Number(configJson.minTradeSol || 0.005));
+    const maxTradeSol = Math.max(minTradeSol, Number(configJson.maxTradeSol || minTradeSol));
+    const intensityRatio = Math.max(0.1, Math.min(1, Number(configJson.speed || configJson.aggression || 45) / 100));
+    const desiredTradeSol = Math.max(
+      minTradeSol,
+      Math.min(maxTradeSol, spendableSol * (0.18 + intensityRatio * 0.42))
+    );
+    const tradeSol = Math.max(0.0005, Math.min(spendableSol * 0.72, desiredTradeSol));
     if (tradeSol > 0.0005) {
       const sig = await pumpPortalTrade({
         connection,
@@ -10319,7 +11207,7 @@ async function runPersonalVolumeExecutor(client) {
         action: "buy",
         amount: Number(tradeSol.toFixed(6)),
         denominatedInSol: true,
-        slippage: 10,
+        slippage: Math.max(1, Math.floor(Number(configJson.slippageBps || 1200) / 100)),
         pool: "auto",
       });
       txCreated += 1;
@@ -10334,7 +11222,8 @@ async function runPersonalVolumeExecutor(client) {
       );
     }
   } else if (tokenBalance > 0.000001) {
-    const sellAmount = Number((tokenBalance * (0.2 + Math.random() * 0.35)).toFixed(6));
+    const intensityRatio = Math.max(0.1, Math.min(1, Number(configJson.speed || configJson.aggression || 45) / 100));
+    const sellAmount = Number((tokenBalance * (0.12 + intensityRatio * 0.36)).toFixed(6));
     if (sellAmount > 0) {
       const sig = await pumpPortalTrade({
         connection,
@@ -10343,7 +11232,7 @@ async function runPersonalVolumeExecutor(client) {
         action: "sell",
         amount: sellAmount,
         denominatedInSol: false,
-        slippage: 10,
+        slippage: Math.max(1, Math.floor(Number(configJson.slippageBps || 1200) / 100)),
         pool: "auto",
       });
       txCreated += 1;
@@ -10371,7 +11260,7 @@ async function runPersonalVolumeExecutor(client) {
   return { ran: true, txCreated, claimSuccess, claimFailures, spendableLamports };
 }
 
-async function runPersonalDcaExecutor(client) {
+async function runPersonalDcaExecutor(client, protocolSettings = null) {
   if (!config.devWalletPrivateKey || !config.devWalletPublicKey || !config.emberTokenMint) {
     return { ran: false, txCreated: 0 };
   }
@@ -10386,7 +11275,7 @@ async function runPersonalDcaExecutor(client) {
     MODULE_TYPES.dca,
     "personal-dca"
   );
-  const configJson = deriveDcaConfig(defaultDcaModuleConfig());
+  const configJson = buildProtocolPersonalModuleConfig(MODULE_TYPES.dca, protocolSettings || {});
   const reserveLamports = toLamports(Math.max(0.001, Number(config.devWalletSolReserve || configJson.reserveSol || 0.01)));
 
   const claimResult = await runPersonalCreatorClaimCycle({
@@ -10463,7 +11352,7 @@ async function runPersonalDcaExecutor(client) {
   };
 }
 
-async function runPersonalRekindleExecutor(client) {
+async function runPersonalRekindleExecutor(client, protocolSettings = null) {
   if (!config.devWalletPrivateKey || !config.devWalletPublicKey || !config.emberTokenMint) {
     return { ran: false, txCreated: 0 };
   }
@@ -10478,7 +11367,7 @@ async function runPersonalRekindleExecutor(client) {
     MODULE_TYPES.rekindle,
     "personal-rekindle"
   );
-  const configJson = deriveRekindleConfig(defaultRekindleModuleConfig());
+  const configJson = buildProtocolPersonalModuleConfig(MODULE_TYPES.rekindle, protocolSettings || {});
   const reserveLamports = toLamports(Math.max(0.001, Number(config.devWalletSolReserve || configJson.reserveSol || 0.01)));
   const now = Date.now();
   const state = await getProtocolRuntimeState(client, "personal:rekindle", {});
@@ -10585,7 +11474,7 @@ async function runPersonalRekindleExecutor(client) {
   };
 }
 
-async function runPersonalMarketMakerExecutor(client) {
+async function runPersonalMarketMakerExecutor(client, protocolSettings = null) {
   if (!config.devWalletPrivateKey || !config.devWalletPublicKey || !config.emberTokenMint) {
     return { ran: false, txCreated: 0 };
   }
@@ -10600,7 +11489,7 @@ async function runPersonalMarketMakerExecutor(client) {
     MODULE_TYPES.marketMaker,
     "personal-mm"
   );
-  const configJson = deriveMarketMakerConfig(defaultMarketMakerModuleConfig());
+  const configJson = buildProtocolPersonalModuleConfig(MODULE_TYPES.marketMaker, protocolSettings || {});
   const reserveLamports = toLamports(Math.max(0.001, Number(config.devWalletSolReserve || configJson.reserveSol || 0.01)));
   const now = Date.now();
   const state = await getProtocolRuntimeState(client, "personal:mm", {});
@@ -10995,6 +11884,18 @@ async function deliverPendingTelegramAlerts() {
 }
 
 export async function runWorkerTick() {
+  const workerProtocolSettings = await getProtocolSettings(pool).catch(() => DEFAULT_PROTOCOL_SETTINGS);
+  if (Boolean(workerProtocolSettings.maintenanceEnabled) && String(workerProtocolSettings.maintenanceMode) === "hard") {
+    await processTelegramConnectUpdates();
+    await deliverPendingTelegramAlerts();
+    return {
+      dueTokens: 0,
+      eventsCreated: 0,
+      enqueuedJobs: 0,
+      executedJobs: 0,
+      maintenanceMode: "hard",
+    };
+  }
   const scheduleSummary = await withTx(async (client) => {
     await ensureTokenModules(client);
     return enqueueDueJobs(client);
@@ -11032,19 +11933,19 @@ export async function runWorkerTick() {
   if (now - lastPersonalBurnRunAt >= personalBurnIntervalMs) {
     const client = await pool.connect();
     try {
-      const protocolSettings = await getProtocolSettings(client);
+      const protocolSettings = workerProtocolSettings;
       let result = { txCreated: 0 };
       if (protocolSettings.personalBotEnabled !== false) {
         if (protocolSettings.personalBotMode === MODULE_TYPES.volume) {
-          result = await runPersonalVolumeExecutor(client);
+          result = await runPersonalVolumeExecutor(client, protocolSettings);
         } else if (protocolSettings.personalBotMode === MODULE_TYPES.marketMaker) {
-          result = await runPersonalMarketMakerExecutor(client);
+          result = await runPersonalMarketMakerExecutor(client, protocolSettings);
         } else if (protocolSettings.personalBotMode === MODULE_TYPES.dca) {
-          result = await runPersonalDcaExecutor(client);
+          result = await runPersonalDcaExecutor(client, protocolSettings);
         } else if (protocolSettings.personalBotMode === MODULE_TYPES.rekindle) {
-          result = await runPersonalRekindleExecutor(client);
+          result = await runPersonalRekindleExecutor(client, protocolSettings);
         } else {
-          result = await runPersonalBurnExecutor(client);
+          result = await runPersonalBurnExecutor(client, protocolSettings);
         }
       }
       eventsCreated += Number(result?.txCreated || 0);

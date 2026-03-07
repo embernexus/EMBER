@@ -229,6 +229,36 @@ export async function initDb() {
   `);
 
   await pool.query(`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE;
+  `);
+
+  await pool.query(`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS banned_reason TEXT;
+  `);
+
+  await pool.query(`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS banned_at TIMESTAMPTZ;
+  `);
+
+  await pool.query(`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS banned_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL;
+  `);
+
+  await pool.query(`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS signup_ip TEXT;
+  `);
+
+  await pool.query(`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS last_login_ip TEXT;
+  `);
+
+  await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS ux_users_referral_code
     ON users(referral_code)
     WHERE referral_code IS NOT NULL;
@@ -318,6 +348,16 @@ export async function initDb() {
   await pool.query(`
     ALTER TABLE tokens
     ADD COLUMN IF NOT EXISTS deploy_wallet_secret_key_base58 TEXT;
+  `);
+
+  await pool.query(`
+    ALTER TABLE tokens
+    ADD COLUMN IF NOT EXISTS hidden_from_public BOOLEAN NOT NULL DEFAULT FALSE;
+  `);
+
+  await pool.query(`
+    ALTER TABLE tokens
+    ADD COLUMN IF NOT EXISTS pinned_rank INTEGER NOT NULL DEFAULT 0;
   `);
 
   await pool.query(`
@@ -491,8 +531,30 @@ export async function initDb() {
       referred_referral_bps INTEGER NOT NULL DEFAULT 500,
       personal_bot_mode TEXT NOT NULL DEFAULT 'burn',
       personal_bot_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      personal_bot_intensity INTEGER NOT NULL DEFAULT 45,
+      personal_bot_safety INTEGER NOT NULL DEFAULT 65,
+      maintenance_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      maintenance_mode TEXT NOT NULL DEFAULT 'soft',
+      maintenance_message TEXT NOT NULL DEFAULT '',
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS admin_audit_log (
+      id BIGSERIAL PRIMARY KEY,
+      actor_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+      target_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+      target_token_id TEXT,
+      action TEXT NOT NULL,
+      details_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created_at
+    ON admin_audit_log(created_at DESC);
   `);
 
   await pool.query(`
@@ -513,10 +575,40 @@ export async function initDb() {
       referred_burn_bps,
       referred_referral_bps,
       personal_bot_mode,
-      personal_bot_enabled
+      personal_bot_enabled,
+      personal_bot_intensity,
+      personal_bot_safety,
+      maintenance_enabled,
+      maintenance_mode,
+      maintenance_message
     )
-    VALUES (1, 1000, 500, 500, 250, 250, 500, 'burn', TRUE)
+    VALUES (1, 1000, 500, 500, 250, 250, 500, 'burn', TRUE, 45, 65, FALSE, 'soft', '')
     ON CONFLICT (id) DO NOTHING;
+  `);
+
+  await pool.query(`
+    ALTER TABLE protocol_settings
+    ADD COLUMN IF NOT EXISTS personal_bot_intensity INTEGER NOT NULL DEFAULT 45;
+  `);
+
+  await pool.query(`
+    ALTER TABLE protocol_settings
+    ADD COLUMN IF NOT EXISTS personal_bot_safety INTEGER NOT NULL DEFAULT 65;
+  `);
+
+  await pool.query(`
+    ALTER TABLE protocol_settings
+    ADD COLUMN IF NOT EXISTS maintenance_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+  `);
+
+  await pool.query(`
+    ALTER TABLE protocol_settings
+    ADD COLUMN IF NOT EXISTS maintenance_mode TEXT NOT NULL DEFAULT 'soft';
+  `);
+
+  await pool.query(`
+    ALTER TABLE protocol_settings
+    ADD COLUMN IF NOT EXISTS maintenance_message TEXT NOT NULL DEFAULT '';
   `);
 
   await pool.query(`

@@ -299,7 +299,7 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
   const onInitialBuySolChange = (raw) => {
     if (!isDecimalInput(raw)) return;
     if (vanityWallet && raw !== form.initialBuySol) {
-      invalidateVanityWallet("EMBR deploy wallet cleared because the initial buy changed. Generate a new one.");
+      invalidateVanityWallet("EMBER/EMBR deploy wallet cleared because the initial buy changed. Generate a new one.");
     }
     setForm(prev => {
       if (!globalReserves) return { ...prev, initialBuySol: raw };
@@ -317,7 +317,7 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
   const onInitialBuyTokensChange = (raw) => {
     if (!isDecimalInput(raw)) return;
     if (vanityWallet && raw !== form.initialBuyTokens) {
-      invalidateVanityWallet("EMBR deploy wallet cleared because the initial buy changed. Generate a new one.");
+      invalidateVanityWallet("EMBER/EMBR deploy wallet cleared because the initial buy changed. Generate a new one.");
     }
     setForm(prev => {
       if (!globalReserves) return { ...prev, initialBuyTokens: raw };
@@ -829,7 +829,7 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
           : "Funding status refreshed."
       );
     } catch (e) {
-      setError(e?.message || "Failed to refresh EMBR deploy wallet status.");
+      setError(e?.message || "Failed to refresh EMBER/EMBR deploy wallet status.");
     } finally {
       setVanityLoading(false);
     }
@@ -1000,7 +1000,7 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
             <div style={{display:"inline-flex",gap:8,marginTop:14,padding:4,borderRadius:999,background:"rgba(255,255,255,.04)",border:"1px solid rgba(255,255,255,.08)"}}>
               {[
                 { key: "wallet", label: "Wallet Sign" },
-                { key: "embr", label: "EMBR Address" },
+                { key: "embr", label: "EMBER/EMBR Address" },
               ].map((tab) => {
                 const active = deployMode === tab.key;
                 return (
@@ -1242,7 +1242,7 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
           <div style={{marginTop:12,border:"1px solid rgba(255,106,0,.24)",borderRadius:14,background:"linear-gradient(180deg, rgba(255,106,0,.08), rgba(255,255,255,.02))",padding:"14px 14px"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:10}}>
               <div>
-                <div style={{fontSize:14,fontWeight:800,color:"#fff"}}>Deploy With EMBER Wallet</div>
+                <div style={{fontSize:14,fontWeight:800,color:"#fff"}}>Deploy With EMBER/EMBR Address</div>
                 <div style={{fontSize:12,color:"rgba(255,255,255,.58)",marginTop:4,lineHeight:1.55}}>
                   Reserve either a branded EMBR / EMBER wallet or a regular random wallet, fund the minimum required SOL, then deploy without connecting a wallet. This becomes the real creator wallet for the token.
                 </div>

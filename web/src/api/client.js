@@ -274,11 +274,19 @@ export async function apiReferralSummary() {
     canClaim: bool(data.canClaim, true),
     isOg: bool(data.isOg),
     referralCode: str(data.referralCode),
+    defaultReferralCode: str(data.defaultReferralCode),
+    canCustomizeReferralCode: bool(data.canCustomizeReferralCode, false),
     totals: isRecord(data.totals) ? data.totals : {},
-    depositWalletOptions: Array.isArray(data.depositWalletOptions) ? data.depositWalletOptions : [],
     referredUsers: Array.isArray(data.referredUsers) ? data.referredUsers : [],
     events: Array.isArray(data.events) ? data.events : [],
   };
+}
+
+export async function apiUpdateOwnReferralCode(referralCode) {
+  return requestJson("/api/referrals/code", {
+    method: "POST",
+    body: JSON.stringify({ referralCode }),
+  });
 }
 
 export async function apiClaimReferralEarnings(payload) {
@@ -313,6 +321,13 @@ export async function apiAdminSetUserReferrer(userId, referralCode) {
   });
 }
 
+export async function apiAdminSetUserBan(userId, enabled, reason) {
+  return requestJson(`/api/admin/users/${encodeURIComponent(userId)}/ban`, {
+    method: "POST",
+    body: JSON.stringify({ enabled, reason }),
+  });
+}
+
 export async function apiAdminArchiveToken(tokenId) {
   return requestJson(`/api/admin/tokens/${encodeURIComponent(tokenId)}/archive`, {
     method: "POST",
@@ -322,6 +337,26 @@ export async function apiAdminArchiveToken(tokenId) {
 
 export async function apiAdminRestoreToken(tokenId) {
   return requestJson(`/api/admin/tokens/${encodeURIComponent(tokenId)}/restore`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function apiAdminPermanentlyDeleteToken(tokenId) {
+  return requestJson(`/api/admin/tokens/${encodeURIComponent(tokenId)}/permanent`, {
+    method: "DELETE",
+  });
+}
+
+export async function apiAdminUpdateTokenPublicState(tokenId, payload) {
+  return requestJson(`/api/admin/tokens/${encodeURIComponent(tokenId)}/public`, {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export async function apiAdminForcePauseToken(tokenId) {
+  return requestJson(`/api/admin/tokens/${encodeURIComponent(tokenId)}/pause`, {
     method: "POST",
     body: JSON.stringify({}),
   });
@@ -347,6 +382,9 @@ export async function apiPublicMetrics() {
     emberIncinerated: num(data.emberIncinerated),
     totalRewardsProcessedSol: num(data.totalRewardsProcessedSol ?? data.totalRewardsProcessed),
     totalFeesTakenSol: num(data.totalFeesTakenSol ?? data.totalFeesTaken),
+    maintenanceEnabled: bool(data.maintenanceEnabled),
+    maintenanceMode: str(data.maintenanceMode, "soft"),
+    maintenanceMessage: str(data.maintenanceMessage),
   };
 }
 
@@ -488,6 +526,11 @@ export async function apiBurnWithdraw(id, payload) {
 
 export async function apiDeleteToken(id) {
   const data = await requestJson(`/api/tokens/${id}`, { method: "DELETE" });
+  return { ok: bool(data.ok, true) };
+}
+
+export async function apiPermanentlyDeleteToken(id) {
+  const data = await requestJson(`/api/tokens/${id}/permanent`, { method: "DELETE" });
   return { ok: bool(data.ok, true) };
 }
 

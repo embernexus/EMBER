@@ -29,6 +29,7 @@ export const BUY_EMBER_URL = envOr(
 );
 export const SOLANA_WEBSITE_URL = envOr(import.meta.env.VITE_SOLANA_URL, "https://solana.com");
 export const CREATOR_X_URL = envOr(import.meta.env.VITE_CREATOR_X_URL, "https://x.com/satoshEH_");
+export const SUPPORT_TELEGRAM_URL = envOr(import.meta.env.VITE_SUPPORT_TELEGRAM_URL, "https://t.me/satosheh");
 
 export const SOCIAL_LINKS = {
   x: envOr(
@@ -57,5 +58,6 @@ export const NAV_ITEMS = [
   { key: "docs", label: "Docu", enabled: true },
   { key: "stats", label: "Stats", enabled: false },
   { key: "trading", label: "AI Trading", enabled: false },
+  { key: "tools", label: "Tools", enabled: false },
   { key: "deploy", label: "Deploy", enabled: true },
 ];
