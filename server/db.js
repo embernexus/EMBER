@@ -155,6 +155,20 @@ const requiredInitTables = [
   "deploy_wallet_reservations",
 ];
 
+const requiredInitColumns = [
+  { table: "users", column: "is_admin" },
+  { table: "users", column: "is_og" },
+  { table: "users", column: "is_banned" },
+  { table: "users", column: "banned_reason" },
+  { table: "users", column: "signup_ip" },
+  { table: "users", column: "last_login_ip" },
+  { table: "tokens", column: "hidden_from_public" },
+  { table: "tokens", column: "pinned_rank" },
+  { table: "protocol_settings", column: "maintenance_enabled" },
+  { table: "protocol_settings", column: "maintenance_mode" },
+  { table: "protocol_settings", column: "maintenance_message" },
+];
+
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -165,11 +179,28 @@ async function areRequiredTablesPresent() {
   return res.rows.every((row) => Boolean(row.regclass));
 }
 
+async function areRequiredColumnsPresent() {
+  if (!requiredInitColumns.length) return true;
+  const res = await pool.query(
+    `
+      SELECT table_name, column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND (
+          ${requiredInitColumns.map((_, index) => `(table_name = $${index * 2 + 1} AND column_name = $${index * 2 + 2})`).join(" OR ")}
+        )
+    `,
+    requiredInitColumns.flatMap((entry) => [entry.table, entry.column])
+  );
+  const found = new Set(res.rows.map((row) => `${String(row.table_name)}.${String(row.column_name)}`));
+  return requiredInitColumns.every((entry) => found.has(`${entry.table}.${entry.column}`));
+}
+
 async function waitForRequiredTables(timeoutMs = 45000, pollMs = 1000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      if (await areRequiredTablesPresent()) return true;
+      if ((await areRequiredTablesPresent()) && (await areRequiredColumnsPresent())) return true;
     } catch {
       // best effort while another process is still initializing
     }
