@@ -110,7 +110,7 @@ export const config = {
   ),
   reactionManagerApiUrl: cleanEnvString(
     process.env.REACTION_MANAGER_API_URL ||
-    "https://api.dexemoji.fun/api/v2"
+    "https://panel.dexmoji.com/api/v2"
   ),
   emberFundingApiKey: cleanEnvString(
     process.env.EMBER_FUNDING_API_KEY ||

@@ -159,6 +159,9 @@ const requiredInitTables = [
   "tool_instances",
   "tool_events",
   "tool_managed_wallets",
+  "reaction_campaigns",
+  "reaction_jobs",
+  "reaction_sessions",
 ];
 
 const requiredInitColumns = [
@@ -775,6 +778,105 @@ export async function initDb() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS reaction_sessions (
+      id TEXT PRIMARY KEY,
+      owner_user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+      session_type TEXT NOT NULL DEFAULT 'provider',
+      provider_name TEXT NOT NULL DEFAULT '',
+      label TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'idle',
+      proxy_label TEXT NOT NULL DEFAULT '',
+      fingerprint TEXT NOT NULL DEFAULT '',
+      state_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_used_at TIMESTAMPTZ
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_reaction_sessions_owner_status
+    ON reaction_sessions(owner_user_id, status, updated_at DESC);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS reaction_campaigns (
+      id TEXT PRIMARY KEY,
+      tool_instance_id TEXT NOT NULL REFERENCES tool_instances(id) ON DELETE CASCADE,
+      owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      target_url TEXT NOT NULL DEFAULT '',
+      target_chain TEXT NOT NULL DEFAULT '',
+      target_pair_id TEXT NOT NULL DEFAULT '',
+      reaction_type TEXT NOT NULL,
+      target_count INTEGER NOT NULL DEFAULT 0,
+      delivered_count INTEGER NOT NULL DEFAULT 0,
+      failed_count INTEGER NOT NULL DEFAULT 0,
+      executor_type TEXT NOT NULL DEFAULT 'provider',
+      provider_name TEXT NOT NULL DEFAULT '',
+      provider_order_id TEXT,
+      status TEXT NOT NULL DEFAULT 'draft',
+      pacing_mode TEXT NOT NULL DEFAULT 'linear',
+      config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      state_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      last_error TEXT,
+      started_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
+      last_checked_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_reaction_campaigns_tool_created
+    ON reaction_campaigns(tool_instance_id, created_at DESC);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_reaction_campaigns_owner_status
+    ON reaction_campaigns(owner_user_id, status, updated_at DESC);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS reaction_jobs (
+      id TEXT PRIMARY KEY,
+      campaign_id TEXT NOT NULL REFERENCES reaction_campaigns(id) ON DELETE CASCADE,
+      tool_instance_id TEXT NOT NULL REFERENCES tool_instances(id) ON DELETE CASCADE,
+      owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      reaction_session_id TEXT REFERENCES reaction_sessions(id) ON DELETE SET NULL,
+      ordinal INTEGER NOT NULL DEFAULT 0,
+      reaction_type TEXT NOT NULL,
+      target_url TEXT NOT NULL DEFAULT '',
+      target_chain TEXT NOT NULL DEFAULT '',
+      target_pair_id TEXT NOT NULL DEFAULT '',
+      quantity INTEGER NOT NULL DEFAULT 0,
+      executor_type TEXT NOT NULL DEFAULT 'provider',
+      provider_name TEXT NOT NULL DEFAULT '',
+      provider_order_id TEXT,
+      provider_job_ref TEXT,
+      status TEXT NOT NULL DEFAULT 'queued',
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      last_error TEXT,
+      started_at TIMESTAMPTZ,
+      finished_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_reaction_jobs_campaign_ordinal
+    ON reaction_jobs(campaign_id, ordinal ASC, created_at ASC);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_reaction_jobs_owner_status
+    ON reaction_jobs(owner_user_id, status, updated_at DESC);
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS user_telegram_links (
       user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       chat_id BIGINT NOT NULL UNIQUE,
@@ -1172,6 +1274,24 @@ export async function initDb() {
   await pool.query(`
     CREATE OR REPLACE TRIGGER trg_tool_managed_wallets_updated_at
     BEFORE UPDATE ON tool_managed_wallets
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  `);
+
+  await pool.query(`
+    CREATE OR REPLACE TRIGGER trg_reaction_sessions_updated_at
+    BEFORE UPDATE ON reaction_sessions
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  `);
+
+  await pool.query(`
+    CREATE OR REPLACE TRIGGER trg_reaction_campaigns_updated_at
+    BEFORE UPDATE ON reaction_campaigns
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  `);
+
+  await pool.query(`
+    CREATE OR REPLACE TRIGGER trg_reaction_jobs_updated_at
+    BEFORE UPDATE ON reaction_jobs
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   `);
 

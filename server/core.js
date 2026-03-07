@@ -3253,6 +3253,7 @@ async function resolveUserAccessScope(client, actorUserId) {
       SELECT
         g.owner_user_id,
         owner.username AS owner_username,
+        COALESCE(owner.is_admin, FALSE) AS owner_is_admin,
         COALESCE(owner.is_og, FALSE) AS owner_is_og,
         COALESCE(owner.is_banned, FALSE) AS owner_is_banned,
         COALESCE(owner.referral_code, '') AS owner_referral_code,
@@ -3269,6 +3270,7 @@ async function resolveUserAccessScope(client, actorUserId) {
   const isOperator = grantRes.rowCount > 0;
   const ownerUserId = isOperator ? Number(grantRes.rows[0].owner_user_id) : actorId;
   const ownerUsername = isOperator ? String(grantRes.rows[0].owner_username || "") : String(actor.username || "");
+  const ownerIsAdmin = isOperator ? Boolean(grantRes.rows[0].owner_is_admin) : Boolean(actor.is_admin);
   const ownerIsOg = isOperator ? Boolean(grantRes.rows[0].owner_is_og) : Boolean(actor.is_og);
   const ownerIsBanned = isOperator ? Boolean(grantRes.rows[0].owner_is_banned) : Boolean(actor.is_banned);
   const ownerReferralCode = isOperator ? String(grantRes.rows[0].owner_referral_code || "") : String(actor.referral_code || "");
@@ -3297,6 +3299,7 @@ async function resolveUserAccessScope(client, actorUserId) {
       actor.referrer_user_id == null ? null : Math.max(0, Math.floor(Number(actor.referrer_user_id || 0))),
     ownerUserId,
     ownerUsername,
+    ownerIsAdmin,
     ownerIsOg,
     ownerIsBanned,
     ownerReferralCode,
@@ -3307,6 +3310,7 @@ async function resolveUserAccessScope(client, actorUserId) {
     isOwner: !isOperator,
     isAdmin: Boolean(actor.is_admin) && !isOperator,
     isOg: ownerIsOg,
+    ownerHasToolFeeWaiver: ownerIsAdmin || ownerIsOg,
     isBanned: ownerIsBanned || Boolean(actor.is_banned),
     canManageFunds: !isOperator,
     canDelete: !isOperator,
@@ -3821,8 +3825,24 @@ function toolRuntimeWindowHoursForType(toolType, settings = DEFAULT_PROTOCOL_SET
   return 0;
 }
 
-function buildToolCatalog(settings = DEFAULT_PROTOCOL_SETTINGS) {
+function buildToolFeeProfile(toolType, settings = DEFAULT_PROTOCOL_SETTINGS, options = {}) {
+  const waiveFees = Boolean(options.waiveFees);
+  const unlockFeeLamports = waiveFees ? 0 : toolUnlockFeeLamportsForType(toolType, settings);
+  const runtimeFeeLamports = waiveFees ? 0 : toolRuntimeFeeLamportsForType(toolType, settings);
+  const runtimeFeeWindowHours = runtimeFeeLamports > 0 ? toolRuntimeWindowHoursForType(toolType, settings) : 0;
+  return {
+    unlockFeeLamports,
+    runtimeFeeLamports,
+    runtimeFeeWindowHours,
+  };
+}
+
+function buildToolCatalog(settings = DEFAULT_PROTOCOL_SETTINGS, options = {}) {
   const safeSettings = settings || DEFAULT_PROTOCOL_SETTINGS;
+  const holderFees = buildToolFeeProfile(TOOL_TYPES.holderPooler, safeSettings, options);
+  const reactionFees = buildToolFeeProfile(TOOL_TYPES.reactionManager, safeSettings, options);
+  const smartSellFees = buildToolFeeProfile(TOOL_TYPES.smartSell, safeSettings, options);
+  const bundleFees = buildToolFeeProfile(TOOL_TYPES.bundleManager, safeSettings, options);
   return [
     {
       toolType: TOOL_TYPES.holderPooler,
@@ -3830,10 +3850,10 @@ function buildToolCatalog(settings = DEFAULT_PROTOCOL_SETTINGS) {
       description: "Distribute supply and SOL across managed holder wallets with reclaim-ready balances.",
       targetKind: "mint",
       simpleDefaults: defaultToolConfig(TOOL_TYPES.holderPooler),
-      unlockFeeLamports: toolUnlockFeeLamportsForType(TOOL_TYPES.holderPooler, safeSettings),
+      unlockFeeLamports: holderFees.unlockFeeLamports,
       reserveLamports: defaultToolReserveLamports(TOOL_TYPES.holderPooler),
-      runtimeFeeLamports: 0,
-      runtimeFeeWindowHours: 0,
+      runtimeFeeLamports: holderFees.runtimeFeeLamports,
+      runtimeFeeWindowHours: holderFees.runtimeFeeWindowHours,
     },
     {
       toolType: TOOL_TYPES.reactionManager,
@@ -3841,10 +3861,10 @@ function buildToolCatalog(settings = DEFAULT_PROTOCOL_SETTINGS) {
       description: "Run one-reaction DexScreener campaigns against a target pair page with tracked delivery.",
       targetKind: "url",
       simpleDefaults: defaultToolConfig(TOOL_TYPES.reactionManager),
-      unlockFeeLamports: toolUnlockFeeLamportsForType(TOOL_TYPES.reactionManager, safeSettings),
+      unlockFeeLamports: reactionFees.unlockFeeLamports,
       reserveLamports: defaultToolReserveLamports(TOOL_TYPES.reactionManager),
-      runtimeFeeLamports: 0,
-      runtimeFeeWindowHours: 0,
+      runtimeFeeLamports: reactionFees.runtimeFeeLamports,
+      runtimeFeeWindowHours: reactionFees.runtimeFeeWindowHours,
     },
     {
       toolType: TOOL_TYPES.smartSell,
@@ -3852,10 +3872,10 @@ function buildToolCatalog(settings = DEFAULT_PROTOCOL_SETTINGS) {
       description: "React to buy flow with configurable sell routing, timing, and managed stealth-wallet rotation.",
       targetKind: "mint",
       simpleDefaults: defaultToolConfig(TOOL_TYPES.smartSell),
-      unlockFeeLamports: toolUnlockFeeLamportsForType(TOOL_TYPES.smartSell, safeSettings),
+      unlockFeeLamports: smartSellFees.unlockFeeLamports,
       reserveLamports: defaultToolReserveLamports(TOOL_TYPES.smartSell),
-      runtimeFeeLamports: toolRuntimeFeeLamportsForType(TOOL_TYPES.smartSell, safeSettings),
-      runtimeFeeWindowHours: toolRuntimeWindowHoursForType(TOOL_TYPES.smartSell, safeSettings),
+      runtimeFeeLamports: smartSellFees.runtimeFeeLamports,
+      runtimeFeeWindowHours: smartSellFees.runtimeFeeWindowHours,
     },
     {
       toolType: TOOL_TYPES.bundleManager,
@@ -3863,10 +3883,10 @@ function buildToolCatalog(settings = DEFAULT_PROTOCOL_SETTINGS) {
       description: "Coordinate managed and imported wallet bundles for buy/sell campaigns with reserve-aware funding.",
       targetKind: "mint",
       simpleDefaults: defaultToolConfig(TOOL_TYPES.bundleManager),
-      unlockFeeLamports: toolUnlockFeeLamportsForType(TOOL_TYPES.bundleManager, safeSettings),
+      unlockFeeLamports: bundleFees.unlockFeeLamports,
       reserveLamports: defaultToolReserveLamports(TOOL_TYPES.bundleManager),
-      runtimeFeeLamports: 0,
-      runtimeFeeWindowHours: 0,
+      runtimeFeeLamports: bundleFees.runtimeFeeLamports,
+      runtimeFeeWindowHours: bundleFees.runtimeFeeWindowHours,
     },
   ].map((entry) => ({
     ...entry,
@@ -4109,8 +4129,64 @@ async function applyTelegramTradeFeeFlow(options = {}) {
   };
 }
 
+async function ownerHasToolFeeWaiver(client, ownerUserId) {
+  const ownerId = Math.max(0, Math.floor(Number(ownerUserId || 0)));
+  if (!ownerId) return false;
+  const res = await client.query(
+    `
+      SELECT COALESCE(is_admin, FALSE) AS is_admin, COALESCE(is_og, FALSE) AS is_og
+      FROM users
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [ownerId]
+  );
+  if (!res.rowCount) return false;
+  return Boolean(res.rows[0].is_admin) || Boolean(res.rows[0].is_og);
+}
+
+async function syncToolBillingForOwner(client, row) {
+  const current = row && typeof row === "object" ? row : null;
+  if (!current?.id) return current;
+  const waiveFees = await ownerHasToolFeeWaiver(client, Number(current.owner_user_id || 0));
+  const toolType = normalizeToolType(current.tool_type, TOOL_TYPES.holderPooler);
+  const currentUnlock = Math.max(0, Math.floor(Number(current.unlock_fee_lamports || 0)));
+  const currentRuntime = Math.max(0, Math.floor(Number(current.runtime_fee_lamports || 0)));
+  const currentWindow = Math.max(0, Math.floor(Number(current.runtime_fee_window_hours || 0)));
+  const targetProfile = waiveFees
+    ? { unlockFeeLamports: 0, runtimeFeeLamports: 0, runtimeFeeWindowHours: 0 }
+    : buildToolFeeProfile(toolType, await getProtocolSettings(client));
+  if (
+    currentUnlock === targetProfile.unlockFeeLamports &&
+    currentRuntime === targetProfile.runtimeFeeLamports &&
+    currentWindow === targetProfile.runtimeFeeWindowHours
+  ) {
+    return current;
+  }
+  const updateRes = await client.query(
+    `
+      UPDATE tool_instances
+      SET
+        unlock_fee_lamports = $2,
+        runtime_fee_lamports = $3,
+        runtime_fee_window_hours = $4,
+        updated_at = NOW()
+      WHERE id = $1
+      RETURNING *
+    `,
+    [
+      String(current.id || ""),
+      targetProfile.unlockFeeLamports,
+      targetProfile.runtimeFeeLamports,
+      targetProfile.runtimeFeeWindowHours,
+    ]
+  );
+  return updateRes.rows[0] || current;
+}
+
 async function syncToolInstanceFundingState(client, row) {
-  const current = row && typeof row === "object" ? row : {};
+  const billedRow = await syncToolBillingForOwner(client, row);
+  const current = billedRow && typeof billedRow === "object" ? billedRow : {};
   const fundingPubkey = String(current.funding_wallet_pubkey || "").trim();
   const secretBase58 = String(current.funding_wallet_secret_key_base58 || "").trim();
   const unlockFeeLamports = Math.max(0, Math.floor(Number(current.unlock_fee_lamports || 0)));
@@ -4598,7 +4674,7 @@ function formatReactionTypeLabel(reactionType) {
   const type = String(reactionType || 'rocket').trim().toLowerCase();
   if (type === 'fire') return 'Fire';
   if (type === 'poop') return 'Poop';
-  if (type === 'broken_heart') return 'Broken Heart';
+  if (type === 'flag') return 'Flag';
   return 'Rocket';
 }
 
@@ -6756,7 +6832,7 @@ export async function getToolsWorkspace(userId) {
 
   const scope = await resolveUserAccessScopeFromPool(userId);
   const settings = await getProtocolSettings(pool);
-  const catalog = buildToolCatalog(settings);
+  const catalog = buildToolCatalog(settings, { waiveFees: Boolean(scope.ownerHasToolFeeWaiver) });
   const instancesRes = await pool.query(
     `
       SELECT *
@@ -6811,7 +6887,9 @@ export async function createToolInstance(userId, payload = {}) {
     const scope = await resolveUserAccessScope(client, userId);
     const settings = await getProtocolSettings(client);
     const toolType = normalizeToolType(payload.toolType, TOOL_TYPES.holderPooler);
-    const catalogEntry = buildToolCatalog(settings).find((entry) => entry.toolType === toolType);
+    const catalogEntry = buildToolCatalog(settings, { waiveFees: Boolean(scope.ownerHasToolFeeWaiver) }).find(
+      (entry) => entry.toolType === toolType
+    );
     if (!catalogEntry) {
       throw new Error("Tool type is invalid.");
     }
@@ -6972,9 +7050,9 @@ function normalizeBundleManagerConfig(rawConfig = {}, currentConfig = {}) {
 
 const REACTION_MANAGER_SERVICE_BY_TYPE = Object.freeze({
   rocket: 1,
-  fire: 2,
-  poop: 3,
-  broken_heart: 4,
+  fire: 7,
+  poop: 4,
+  flag: 6,
 });
 
 function normalizeReactionManagerConfig(rawConfig = {}, currentConfig = {}) {
@@ -7359,6 +7437,199 @@ async function callReactionManagerApi(params) {
     throw new Error(String(data.error || "Reaction provider error"));
   }
   return data;
+}
+
+async function ensureProviderReactionSession(client, ownerUserId) {
+  const existingRes = await client.query(
+    `
+      SELECT *
+      FROM reaction_sessions
+      WHERE owner_user_id = $1
+        AND session_type = $2
+        AND provider_name = $3
+      ORDER BY last_used_at DESC NULLS LAST, created_at DESC
+      LIMIT 1
+    `,
+    [ownerUserId, "provider", REACTION_PROVIDER_NAME]
+  );
+  if (existingRes.rowCount) {
+    const updateRes = await client.query(
+      `
+        UPDATE reaction_sessions
+        SET status = 'active', last_error = NULL, last_used_at = NOW()
+        WHERE id = $1
+        RETURNING *
+      `,
+      [String(existingRes.rows[0].id || "")]
+    );
+    return updateRes.rows[0];
+  }
+  const insertRes = await client.query(
+    `
+      INSERT INTO reaction_sessions (
+        id,
+        owner_user_id,
+        session_type,
+        provider_name,
+        label,
+        status,
+        state_json,
+        last_used_at
+      )
+      VALUES ($1, $2, 'provider', $3, $4, 'active', '{}'::jsonb, NOW())
+      RETURNING *
+    `,
+    [makeId("rsess"), ownerUserId, REACTION_PROVIDER_NAME, "Reaction Provider Session"]
+  );
+  return insertRes.rows[0];
+}
+
+async function insertReactionCampaign(client, toolRow, configJson, options = {}) {
+  const targetInfo = parseDexPairTargetUrl(toolRow.target_url);
+  const executorType = normalizeReactionExecutorType(options.executorType, REACTION_EXECUTOR_TYPES.provider);
+  const providerName = executorType === REACTION_EXECUTOR_TYPES.provider ? REACTION_PROVIDER_NAME : "";
+  const insertRes = await client.query(
+    `
+      INSERT INTO reaction_campaigns (
+        id,
+        tool_instance_id,
+        owner_user_id,
+        target_url,
+        target_chain,
+        target_pair_id,
+        reaction_type,
+        target_count,
+        delivered_count,
+        failed_count,
+        executor_type,
+        provider_name,
+        status,
+        pacing_mode,
+        config_json,
+        state_json,
+        started_at,
+        last_checked_at
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8,
+        0, 0, $9, $10, 'queued', 'linear', $11::jsonb, '{}'::jsonb, NOW(), NOW()
+      )
+      RETURNING *
+    `,
+    [
+      makeId("rc"),
+      String(toolRow.id || ""),
+      Number(toolRow.owner_user_id || 0),
+      targetInfo.targetUrl,
+      targetInfo.targetChain,
+      targetInfo.targetPairId,
+      configJson.reactionType,
+      Math.max(0, Math.floor(Number(configJson.targetCount || 0))),
+      executorType,
+      providerName,
+      JSON.stringify({
+        reactionType: configJson.reactionType,
+        targetCount: configJson.targetCount,
+      }),
+    ]
+  );
+  return insertRes.rows[0];
+}
+
+async function insertReactionJob(client, campaignRow, sessionRow, configJson, options = {}) {
+  const insertRes = await client.query(
+    `
+      INSERT INTO reaction_jobs (
+        id,
+        campaign_id,
+        tool_instance_id,
+        owner_user_id,
+        reaction_session_id,
+        ordinal,
+        reaction_type,
+        target_url,
+        target_chain,
+        target_pair_id,
+        quantity,
+        executor_type,
+        provider_name,
+        status,
+        metadata_json,
+        started_at
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, 1, $6, $7, $8, $9, $10, $11, $12, 'queued', $13::jsonb, NOW()
+      )
+      RETURNING *
+    `,
+    [
+      makeId("rjob"),
+      String(campaignRow.id || ""),
+      String(campaignRow.tool_instance_id || ""),
+      Number(campaignRow.owner_user_id || 0),
+      sessionRow?.id ? String(sessionRow.id) : null,
+      configJson.reactionType,
+      String(campaignRow.target_url || ""),
+      String(campaignRow.target_chain || ""),
+      String(campaignRow.target_pair_id || ""),
+      Math.max(0, Math.floor(Number(configJson.targetCount || 0))),
+      normalizeReactionExecutorType(options.executorType, REACTION_EXECUTOR_TYPES.provider),
+      String(options.providerName || (sessionRow?.provider_name || "")),
+      JSON.stringify({ toolInstanceId: String(campaignRow.tool_instance_id || "") }),
+    ]
+  );
+  return insertRes.rows[0];
+}
+
+async function loadReactionBackendState(client, toolInstanceId, { campaignId = "" } = {}) {
+  const campaignRes = await client.query(
+    `
+      SELECT *
+      FROM reaction_campaigns
+      WHERE tool_instance_id = $1
+        ${campaignId ? "AND id = $2" : ""}
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    campaignId ? [String(toolInstanceId || ""), String(campaignId || "")] : [String(toolInstanceId || "")]
+  );
+  const campaignRow = campaignRes.rows[0] || null;
+  if (!campaignRow) {
+    return {
+      currentCampaign: null,
+      jobs: [],
+      sessions: [],
+    };
+  }
+  const jobsRes = await client.query(
+    `
+      SELECT *
+      FROM reaction_jobs
+      WHERE campaign_id = $1
+      ORDER BY ordinal ASC, created_at ASC
+      LIMIT 50
+    `,
+    [String(campaignRow.id || "")]
+  );
+  const sessionIds = [...new Set((jobsRes.rows || []).map((row) => String(row.reaction_session_id || "")).filter(Boolean))];
+  let sessions = [];
+  if (sessionIds.length) {
+    const sessionRes = await client.query(
+      `
+        SELECT *
+        FROM reaction_sessions
+        WHERE id = ANY($1::text[])
+        ORDER BY created_at DESC
+      `,
+      [sessionIds]
+    );
+    sessions = (sessionRes.rows || []).map((row) => mapReactionSession(row));
+  }
+  return {
+    currentCampaign: mapReactionCampaign(campaignRow),
+    jobs: (jobsRes.rows || []).map((row) => mapReactionJob(row)),
+    sessions,
+  };
 }
 
 async function readToolInstanceForScope(client, userId, toolId, { forUpdate = false } = {}) {
@@ -7751,6 +8022,13 @@ async function buildToolInstanceDetails(client, row) {
     [String(row.id || "")]
   );
 
+  let reaction = null;
+  if (mapped.toolType === TOOL_TYPES.reactionManager) {
+    reaction = await loadReactionBackendState(client, row.id, {
+      campaignId: String(row.state_json?.reactionCampaignId || ""),
+    });
+  }
+
   return {
     tool: {
       ...mapped,
@@ -7766,9 +8044,127 @@ async function buildToolInstanceDetails(client, row) {
       tokenBalance: Number(fundingTokenBalance || 0),
     },
     wallets,
+    reaction,
     permissions: {
       canManageFunds: true,
     },
+  };
+}
+
+const REACTION_EXECUTOR_TYPES = Object.freeze({
+  provider: "provider",
+  manual: "manual",
+});
+
+const REACTION_PROVIDER_NAME = "dexmoji";
+
+function normalizeReactionExecutorType(value, fallback = REACTION_EXECUTOR_TYPES.provider) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === REACTION_EXECUTOR_TYPES.manual) return REACTION_EXECUTOR_TYPES.manual;
+  if (raw === REACTION_EXECUTOR_TYPES.provider) return REACTION_EXECUTOR_TYPES.provider;
+  return fallback;
+}
+
+function parseDexPairTargetUrl(rawUrl = "") {
+  const value = String(rawUrl || "").trim();
+  if (!value) {
+    return {
+      targetUrl: "",
+      targetChain: "",
+      targetPairId: "",
+    };
+  }
+  try {
+    const parsed = new URL(value);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    return {
+      targetUrl: parsed.toString(),
+      targetChain: parts[0] ? String(parts[0]) : "",
+      targetPairId: parts[1] ? String(parts[1]) : "",
+    };
+  } catch {
+    return {
+      targetUrl: value,
+      targetChain: "",
+      targetPairId: "",
+    };
+  }
+}
+
+function mapReactionCampaign(row) {
+  if (!row) return null;
+  return {
+    id: String(row.id || ""),
+    toolInstanceId: String(row.tool_instance_id || ""),
+    ownerUserId: Math.max(0, Number(row.owner_user_id || 0)),
+    targetUrl: String(row.target_url || ""),
+    targetChain: String(row.target_chain || ""),
+    targetPairId: String(row.target_pair_id || ""),
+    reactionType: String(row.reaction_type || ""),
+    targetCount: Math.max(0, Number(row.target_count || 0)),
+    deliveredCount: Math.max(0, Number(row.delivered_count || 0)),
+    failedCount: Math.max(0, Number(row.failed_count || 0)),
+    executorType: normalizeReactionExecutorType(row.executor_type),
+    providerName: String(row.provider_name || ""),
+    providerOrderId: String(row.provider_order_id || ""),
+    status: String(row.status || "draft"),
+    pacingMode: String(row.pacing_mode || "linear"),
+    config: row.config_json && typeof row.config_json === "object" ? row.config_json : {},
+    state: row.state_json && typeof row.state_json === "object" ? row.state_json : {},
+    lastError: String(row.last_error || ""),
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    lastCheckedAt: row.last_checked_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapReactionJob(row) {
+  if (!row) return null;
+  return {
+    id: String(row.id || ""),
+    campaignId: String(row.campaign_id || ""),
+    toolInstanceId: String(row.tool_instance_id || ""),
+    ownerUserId: Math.max(0, Number(row.owner_user_id || 0)),
+    reactionSessionId: String(row.reaction_session_id || ""),
+    ordinal: Math.max(0, Number(row.ordinal || 0)),
+    reactionType: String(row.reaction_type || ""),
+    targetUrl: String(row.target_url || ""),
+    targetChain: String(row.target_chain || ""),
+    targetPairId: String(row.target_pair_id || ""),
+    quantity: Math.max(0, Number(row.quantity || 0)),
+    executorType: normalizeReactionExecutorType(row.executor_type),
+    providerName: String(row.provider_name || ""),
+    providerOrderId: String(row.provider_order_id || ""),
+    providerJobRef: String(row.provider_job_ref || ""),
+    status: String(row.status || "queued"),
+    attemptCount: Math.max(0, Number(row.attempt_count || 0)),
+    metadata: row.metadata_json && typeof row.metadata_json === "object" ? row.metadata_json : {},
+    lastError: String(row.last_error || ""),
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapReactionSession(row) {
+  if (!row) return null;
+  return {
+    id: String(row.id || ""),
+    ownerUserId: Math.max(0, Number(row.owner_user_id || 0)),
+    sessionType: String(row.session_type || "provider"),
+    providerName: String(row.provider_name || ""),
+    label: String(row.label || ""),
+    status: String(row.status || "idle"),
+    proxyLabel: String(row.proxy_label || ""),
+    fingerprint: String(row.fingerprint || ""),
+    state: row.state_json && typeof row.state_json === "object" ? row.state_json : {},
+    lastError: String(row.last_error || ""),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastUsedAt: row.last_used_at,
   };
 }
 
@@ -8129,6 +8525,14 @@ export async function runReactionManagerCampaign(userId, toolId) {
 
     const configJson = normalizeReactionManagerConfig(row.config_json || {});
     const service = REACTION_MANAGER_SERVICE_BY_TYPE[configJson.reactionType];
+    const sessionRow = await ensureProviderReactionSession(client, Number(row.owner_user_id || 0));
+    const campaignRow = await insertReactionCampaign(client, row, configJson, {
+      executorType: REACTION_EXECUTOR_TYPES.provider,
+    });
+    const jobRow = await insertReactionJob(client, campaignRow, sessionRow, configJson, {
+      executorType: REACTION_EXECUTOR_TYPES.provider,
+      providerName: REACTION_PROVIDER_NAME,
+    });
     const response = await callReactionManagerApi({
       action: "add",
       service,
@@ -8140,11 +8544,68 @@ export async function runReactionManagerCampaign(userId, toolId) {
       throw new Error("Reaction provider did not return an order id.");
     }
 
+    const deliveredCount = 0;
+    const failedCount = 0;
+    await client.query(
+      `
+        UPDATE reaction_campaigns
+        SET
+          status = 'active',
+          provider_order_id = $2,
+          delivered_count = $3,
+          failed_count = $4,
+          state_json = $5::jsonb,
+          last_error = NULL,
+          started_at = COALESCE(started_at, NOW()),
+          last_checked_at = NOW()
+        WHERE id = $1
+      `,
+      [
+        String(campaignRow.id || ""),
+        orderId,
+        deliveredCount,
+        failedCount,
+        JSON.stringify({
+          providerResponse: response,
+          providerStatus: "active",
+          remains: configJson.targetCount,
+        }),
+      ]
+    );
+    await client.query(
+      `
+        UPDATE reaction_jobs
+        SET
+          status = 'active',
+          provider_order_id = $2,
+          provider_job_ref = $2,
+          attempt_count = attempt_count + 1,
+          metadata_json = $3::jsonb,
+          last_error = NULL,
+          started_at = COALESCE(started_at, NOW())
+        WHERE id = $1
+      `,
+      [
+        String(jobRow.id || ""),
+        orderId,
+        JSON.stringify({
+          providerResponse: response,
+          remains: configJson.targetCount,
+          deliveredCount,
+        }),
+      ]
+    );
+
     const nextState = {
       ...(row.state_json && typeof row.state_json === "object" ? row.state_json : {}),
       reactionOrderId: orderId,
+      reactionCampaignId: String(campaignRow.id || ""),
+      reactionJobId: String(jobRow.id || ""),
+      reactionSessionId: String(sessionRow.id || ""),
       reactionStatus: "created",
       reactionRemains: configJson.targetCount,
+      reactionTargetCount: configJson.targetCount,
+      reactionDeliveredCount: 0,
       reactionReactionType: configJson.reactionType,
       reactionStartedAt: new Date().toISOString(),
       reactionLastProviderResponse: response,
@@ -8174,6 +8635,9 @@ export async function runReactionManagerCampaign(userId, toolId) {
         amount: 0,
         metadata: {
           orderId,
+          campaignId: String(campaignRow.id || ""),
+          jobId: String(jobRow.id || ""),
+          sessionId: String(sessionRow.id || ""),
           targetCount: configJson.targetCount,
           reactionType: configJson.reactionType,
         },
@@ -8201,10 +8665,74 @@ export async function refreshReactionManagerStatus(userId, toolId) {
     });
     const remains = Math.max(0, Math.floor(Number(response?.remains ?? state.reactionRemains ?? 0)));
     const statusText = remains <= 0 ? "completed" : "active";
+    const targetCount = Math.max(0, Math.floor(Number(state.reactionTargetCount || row.config_json?.targetCount || 0)));
+    const deliveredCount = Math.max(0, targetCount - remains);
+    const campaignId = String(state.reactionCampaignId || "").trim();
+    const jobId = String(state.reactionJobId || "").trim();
+    const sessionId = String(state.reactionSessionId || "").trim();
+    if (campaignId) {
+      await client.query(
+        `
+          UPDATE reaction_campaigns
+          SET
+            status = $2,
+            delivered_count = $3,
+            failed_count = CASE WHEN $2 = 'failed' THEN target_count - $3 ELSE failed_count END,
+            state_json = COALESCE(state_json, '{}'::jsonb) || $4::jsonb,
+            last_error = NULL,
+            last_checked_at = NOW(),
+            completed_at = CASE WHEN $2 = 'completed' THEN COALESCE(completed_at, NOW()) ELSE completed_at END
+          WHERE id = $1
+        `,
+        [
+          campaignId,
+          statusText,
+          deliveredCount,
+          JSON.stringify({
+            providerResponse: response,
+            providerStatus: statusText,
+            remains,
+          }),
+        ]
+      );
+    }
+    if (jobId) {
+      await client.query(
+        `
+          UPDATE reaction_jobs
+          SET
+            status = $2,
+            metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $3::jsonb,
+            last_error = NULL,
+            finished_at = CASE WHEN $2 = 'completed' THEN COALESCE(finished_at, NOW()) ELSE finished_at END
+          WHERE id = $1
+        `,
+        [
+          jobId,
+          statusText,
+          JSON.stringify({
+            providerResponse: response,
+            remains,
+            deliveredCount,
+          }),
+        ]
+      );
+    }
+    if (sessionId) {
+      await client.query(
+        `
+          UPDATE reaction_sessions
+          SET status = $2, last_error = NULL, last_used_at = NOW()
+          WHERE id = $1
+        `,
+        [sessionId, remains <= 0 ? "idle" : "active"]
+      );
+    }
     const nextState = {
       ...state,
       reactionStatus: statusText,
       reactionRemains: remains,
+      reactionDeliveredCount: deliveredCount,
       reactionLastCheckedAt: new Date().toISOString(),
       reactionLastProviderResponse: response,
     };
@@ -16818,6 +17346,7 @@ function getRecentSmartSellTrades(mint) {
 }
 
 async function maybeChargeSmartSellRuntimeFee(client, row) {
+  row = await syncToolBillingForOwner(client, row);
   const runtimeFeeLamports = Math.max(0, Math.floor(Number(row.runtime_fee_lamports || 0)));
   const windowHours = Math.max(0, Math.floor(Number(row.runtime_fee_window_hours || 0)));
   if (runtimeFeeLamports <= 0 || windowHours <= 0) return row;
@@ -17839,7 +18368,7 @@ async function processTelegramConnectUpdates() {
               }
             } else if (tool.toolType === TOOL_TYPES.reactionManager) {
               if (field === "reaction") {
-                configJson.reactionType = cycleTelegramValue(String(configJson.reactionType || "rocket"), ["rocket", "fire", "poop", "broken_heart"]);
+                configJson.reactionType = cycleTelegramValue(String(configJson.reactionType || "rocket"), ["rocket", "fire", "poop", "flag"]);
               } else if (field === "target") {
                 configJson.targetCount = stepTelegramPresetValue(configJson.targetCount || 1000, [1000, 2500, 5000, 10000, 25000, 50000, 100000], action);
               }

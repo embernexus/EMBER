@@ -776,7 +776,7 @@ export default function ToolsPage({
                         <option value="rocket">Rocket</option>
                         <option value="fire">Fire</option>
                         <option value="poop">Poop</option>
-                        <option value="broken_heart">Broken Heart</option>
+                        <option value="flag">Flag</option>
                       </select>
                     </div>
                     <div>
@@ -791,6 +791,18 @@ export default function ToolsPage({
                     Order id: <span style={{ color: "#fff" }}>{toolDetails.tool.state?.reactionOrderId || "Not started"}</span>
                     <br />
                     Remaining: <span style={{ color: "#fff" }}>{Number(toolDetails.tool.state?.reactionRemains || 0)}</span>
+                    {toolDetails.reaction?.currentCampaign ? (
+                      <>
+                        <br />
+                        Campaign: <span style={{ color: "#fff" }}>{toolDetails.reaction.currentCampaign.id}</span>
+                        <br />
+                        Delivered: <span style={{ color: "#fff" }}>{Number(toolDetails.reaction.currentCampaign.deliveredCount || 0)}</span>
+                        <br />
+                        Jobs: <span style={{ color: "#fff" }}>{Array.isArray(toolDetails.reaction.jobs) ? toolDetails.reaction.jobs.length : 0}</span>
+                        <br />
+                        Sessions: <span style={{ color: "#fff" }}>{Array.isArray(toolDetails.reaction.sessions) ? toolDetails.reaction.sessions.length : 0}</span>
+                      </>
+                    ) : null}
                   </div>
 
                   <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 16 }}>
