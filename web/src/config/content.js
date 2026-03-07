@@ -2,44 +2,50 @@ export const HOW_IT_WORKS_STEPS = [
   {
     n: "01",
     icon: "\u{1FA99}",
-    title: "Attach Your Token",
-    body: "Connect any Solana memecoin by providing its mint address. EMBER looks up the token automatically and generates a unique execution wallet assigned exclusively to your token.",
+    title: "Reserve A Branded Wallet",
+    body: "When you attach or deploy through EMBER, the platform reserves a prebuilt EMBR or EMBER vanity wallet from the pool. That wallet is assigned exclusively to your token so on-chain activity is easy to identify.",
   },
   {
     n: "02",
     icon: "\u{1F4CD}",
-    title: "Choose Funding Mode",
-    body: "Run automation from creator rewards, external SOL deposits, or both. If creator rewards are enabled, set your pump.fun destination to your EMBER execution address. External funding is always available by sending SOL directly to that same address.",
+    title: "Deploy Or Attach",
+    body: "Deploy from a connected wallet or launch directly from a reserved EMBR/EMBER wallet. Deploying from the branded wallet makes that address the real creator wallet on-chain, while attached bots still run as execution wallets rather than the coin creator.",
   },
   {
     n: "03",
     icon: "\u26A1",
-    title: "Funding Intake + Auto Processing",
-    body: "On your configured interval (minimum 60 seconds), EMBER processes whichever funding inputs are enabled for that module: creator-reward claims, external wallet deposits, or both. A 5% protocol fee applies to creator-reward claim execution (2.5% treasury / 2.5% $EMBER buyback + burn).",
+    title: "Choose Funding Mode",
+    body: "Run automation from creator rewards, external SOL deposits, or both. If creator rewards are enabled, set your pump.fun destination to your EMBER execution address. External funding is always available by sending SOL directly to that same address.",
   },
   {
     n: "04",
+    icon: "\u{1F4B8}",
+    title: "Funding Intake + Auto Processing",
+    body: "On your configured interval (minimum 60 seconds), EMBER processes whichever funding inputs are enabled for that module: creator-reward claims, external wallet deposits, or both. Standard fee routing is 10% total (5% treasury / 5% $EMBER buyback + burn). Referred accounts route 5% to the referrer and OG accounts run fee-free.",
+  },
+  {
+    n: "05",
     icon: "\u{1F504}",
     title: "Strategy Executes",
     body: "Available balance is executed according to your bot configuration. Burn Bot routes buybacks into supply reduction, Volume Bot drives controlled chart activity, Market Maker Bot runs attached-token two-sided execution around a target inventory posture, DCA Bot steadily accumulates, and Rekindle Bot buys real pullbacks on the attached chart.",
   },
   {
-    n: "05",
+    n: "06",
     icon: "\u{1F525}",
     title: "Supply Reduction (When Enabled)",
     body: "If Burn Bot is enabled, bought tokens are sent directly to the Solana incinerator - a program-controlled destination that permanently removes tokens from circulation.",
   },
   {
-    n: "06",
+    n: "07",
     icon: "\u{1F4CA}",
     title: "Track Everything On-Chain",
     body: "Every claim, external transfer, swap, and execution action is logged with a real transaction signature you can verify on Solscan. Your dashboard updates in real time with source-aware events so you always know exactly what happened and why.",
   },
   {
-    n: "07",
+    n: "08",
     icon: "\u{1F465}",
-    title: "Manager Access",
-    body: "Primary accounts can create one secondary manager login for shared operations. Managers can run bots and edit settings, but withdraw, sweep, and delete actions remain locked to the primary account.",
+    title: "Share Access Carefully",
+    body: "Primary accounts can create one secondary manager login for shared operations. Managers can run bots and edit settings, but withdraw, sweep, delete, and account-level payout actions remain locked to the primary account.",
   },
 ];
 
@@ -74,6 +80,8 @@ export const ROADMAP_PHASES = [
       "Rekindle bot for pullback-triggered attached-token dip buying",
       "Manager access (shared secondary login with restricted custody actions)",
       "Telegram user alerts with smart instant/digest delivery",
+      "OG account tier with 0% protocol fees",
+      "Referral earnings ledger with in-dashboard claiming to owned deposit wallets",
       "Other platform integrations",
       "Execution reliability hardening and retry logic",
       "Ops monitoring and alerting for live bot health",
@@ -112,6 +120,20 @@ export const ROADMAP_PHASES = [
 ];
 
 export const DEV_LOGS = [
+  {
+    version: "v1.5.0",
+    date: "March 6, 2026",
+    channel: "Production",
+    title: "Billing + Referrals + Vanity Wallet Expansion",
+    summary: "OG accounts, referral earnings, branded wallet flows, and updated protocol fee routing are now live.",
+    changes: [
+      "Standard protocol fee moved to 10% with treasury/burn routing.",
+      "OG accounts now run with 0% protocol fees and visible account badging.",
+      "Referral balances accrue on referred fee flow and can be claimed to owned deposit wallets.",
+      "EMBR/EMBER wallet-pool flow is now surfaced more clearly in deploy and account operations.",
+      "Protocol-owned bot runtime can now run beyond burn-only mode.",
+    ],
+  },
   {
     version: "v1.4.0",
     date: "March 6, 2026",
@@ -191,17 +213,23 @@ export const DOC_SECTIONS = [
     points: [
       "Create account and sign in to unlock Nexus dashboard.",
       "Deploy directly from EMBER or attach an existing Solana token by mint.",
+      "Wallets are reserved from a branded EMBR/EMBER pool so deposit and execution flow is easy to recognize on-chain.",
       "Choose module strategy and funding mode per bot, then monitor all on-chain events in real time.",
       "Primary accounts can optionally add one manager login for shared day-to-day operations without handing over custody actions.",
+      "Referral codes can be applied at signup so referred accounts share fee flow back to the referrer.",
+      "Primary owners can claim referral earnings to any deposit wallet on their account.",
     ],
   },
   {
     id: "deploy",
     title: "Deploy Flow",
-    text: "EMBER deploys through PumpPortal with your metadata and returns direct launch links.",
+    text: "EMBER deploys through PumpPortal with your metadata and returns direct launch links, with an optional branded-wallet launch path.",
     points: [
       "Upload token media, optional launch banner, set name/symbol/description, and submit deploy.",
       "Enter either SOL amount or token amount for initial buy; both fields stay synchronized.",
+      "You can deploy from a reserved EMBR/EMBER wallet instead of connecting a wallet directly.",
+      "The branded deploy path shows the exact wallet to fund, required launch balance, and the wallet private key with explicit custody warnings.",
+      "If you deploy from the reserved branded wallet, that wallet is the actual creator wallet seen on-chain.",
       "Deploy response returns mint, transaction signature, and Pump.fun coin link.",
       "Optional auto-attach adds a bot to Nexus in paused mode so you can configure and start manually.",
     ],
@@ -215,6 +243,9 @@ export const DOC_SECTIONS = [
       "Creator reward claiming can be enabled/disabled per module where supported; if disabled, the module executes only from external deposits.",
       "Shared/designated creator rewards can take a few minutes to become claimable; temporary 0.00 claimable states can occur before balances update.",
       "Protocol-owned creator rewards are allocated 50% to treasury and 50% to EMBER buyback + burn.",
+      "Standard user fees route 10% total as 5% treasury and 5% EMBER buyback + burn.",
+      "Referred accounts keep the same 10% total fee, but 5% accrues to the referrer while treasury and burn receive 2.5% each.",
+      "OG accounts run fee-free.",
       "Burn Bot: reward-to-buyback-to-incineration automation.",
       "Volume Bot: controlled market activity for stronger visibility.",
       "Market Maker Bot: attached-token two-sided execution with target inventory control and migration-aware routing.",
@@ -241,6 +272,7 @@ export const DOC_SECTIONS = [
     points: [
       "Event feed tracks deploy, external funding, creator-reward claims, buybacks, burns, and failures.",
       "Funding-source attribution is preserved in logs so each execution can be traced back to rewards or external deposits.",
+      "Referral earnings are tracked in-account with claimable balances and recent fee events.",
       "Direct Telegram alerts can be connected per login with smart instant/digest delivery controls.",
       "Burn tracker provides charting, token breakdown, and transaction history.",
       "Public metrics endpoint surfaces core protocol telemetry.",
@@ -265,9 +297,10 @@ export const DOC_SECTIONS = [
     title: "EMBR/EMBER Wallet Model",
     text: "Every execution module uses protocol-generated EMBR/EMBER wallets to keep on-chain attribution consistent, transparent, and brand aligned.",
     points: [
-      "Deposit and module trade wallets are generated with Solana vanity-prefix targeting (EMBR or EMBER).",
-      "Address pools are pre-warmed so new token setup can reserve a branded wallet quickly.",
+      "Deposit, deploy, and module trade wallets are generated with Solana vanity-prefix targeting (EMBR or EMBER).",
+      "Address pools are pre-warmed so new token setup can reserve a branded wallet quickly instead of waiting for a fresh grind every time.",
       "Secret keys are never sent to the frontend and are not exposed in API responses.",
+      "The only exception is the explicit branded deploy flow, where the deploy-wallet private key is shown once to the owner because that wallet is the actual creator wallet.",
       "Execution workers decrypt keys server-side only at signing time, then submit transactions to Solana RPC.",
       "This model keeps bot operations attributable on-chain while preserving key custody controls.",
     ],
@@ -302,7 +335,11 @@ export const DOC_FAQ = [
   },
   {
     q: "How are protocol fees described currently?",
-    a: "Current claim-execution fee is 5% per claim (2.5% treasury / 2.5% EMBER buyback + burn). Protocol-owned creator rewards are split 50/50 between those same destinations.",
+    a: "Standard protocol fee is 10% total (5% treasury / 5% EMBER buyback + burn). Referred accounts keep the same 10% total but route 5% to the referrer and 2.5%/2.5% to treasury/burn. OG accounts pay 0%. Protocol-owned creator rewards are still split 50/50 between treasury and EMBER buyback + burn.",
+  },
+  {
+    q: "What is the difference between an attached bot wallet and a branded deploy wallet?",
+    a: "An attached bot wallet is an EMBR/EMBER execution wallet used for automation. A branded deploy wallet is the actual launch wallet for the token, so its on-chain buys, sells, and creator state are treated as the real creator wallet activity.",
   },
   {
     q: "Can bots run from external funding only?",

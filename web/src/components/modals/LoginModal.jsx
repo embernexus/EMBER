@@ -5,7 +5,7 @@ import { useI18n } from "../../i18n/I18nProvider";
 export default function LoginModal({onClose,onLogin}) {
   const { t } = useI18n();
   const [tab,setTab]=useState("login");
-  const [f,setF]=useState({user:"",pass:"",confirm:""});
+  const [f,setF]=useState({user:"",pass:"",confirm:"",referralCode:""});
   const [err,setErr]=useState("");
   const [loading,setLoading]=useState(false);
   const submit=async ()=>{
@@ -17,7 +17,7 @@ export default function LoginModal({onClose,onLogin}) {
     try {
       const data = tab === "login"
         ? await apiAuthLogin(f.user.trim(), f.pass)
-        : await apiAuthRegister(f.user.trim(), f.pass);
+        : await apiAuthRegister(f.user.trim(), f.pass, f.referralCode.trim());
       onLogin(data?.user || { username: f.user.trim() });
     } catch (e) {
       if (isUpgradeRequiredError(e)) {
@@ -50,11 +50,11 @@ export default function LoginModal({onClose,onLogin}) {
           ))}
         </div>
         <div style={{display:"flex",flexDirection:"column",gap:14}}>
-          {[{label:t("login.username"),key:"user",type:"text"},{label:t("login.password"),key:"pass",type:"password"},...(tab==="register"?[{label:t("login.confirmPassword"),key:"confirm",type:"password"}]:[])].map(fd=>(
+          {[{label:t("login.username"),key:"user",type:"text"},{label:t("login.password"),key:"pass",type:"password"},...(tab==="register"?[{label:t("login.confirmPassword"),key:"confirm",type:"password"},{label:"Referral Code",key:"referralCode",type:"text"}]:[])].map(fd=>(
             <div key={fd.key}>
               <label style={{display:"block",fontSize:11,color:"rgba(255,255,255,.35)",letterSpacing:1,marginBottom:7,fontWeight:600}}>{fd.label.toUpperCase()}</label>
               <input type={fd.type} className="input-f" value={f[fd.key]} onChange={e=>setF({...f,[fd.key]:e.target.value})}
-                onKeyDown={e=>e.key==="Enter"&&submit()} placeholder={fd.type==="password"?"********":t("login.usernamePlaceholder")}/>
+                onKeyDown={e=>e.key==="Enter"&&submit()} placeholder={fd.type==="password"?"********":fd.key==="referralCode"?"Optional referral code":t("login.usernamePlaceholder")}/>
             </div>
           ))}
           {err&&<div style={{background:"rgba(255,64,96,.1)",border:"1px solid rgba(255,64,96,.2)",borderRadius:8,padding:"10px 14px",fontSize:13,color:"#ff8080"}}>{err}</div>}

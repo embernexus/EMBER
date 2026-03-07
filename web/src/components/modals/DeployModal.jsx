@@ -291,6 +291,7 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
   const [vanityLoading, setVanityLoading] = useState(false);
   const [vanityMessage, setVanityMessage] = useState("");
   const [showVanitySecret, setShowVanitySecret] = useState(false);
+  const [deployWalletStyle, setDeployWalletStyle] = useState("vanity");
 
   const setField = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
   const isDecimalInput = (raw) => /^(\d+|\d*\.\d*)$/.test(raw) || raw === "";
@@ -343,6 +344,11 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
       setVanityMessage(message);
     }
   };
+
+  useEffect(() => {
+    invalidateVanityWallet("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deployWalletStyle]);
 
   const copyText = async (value, successMessage) => {
     const text = String(value || "").trim();
@@ -863,12 +869,13 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
     try {
       const next = await apiReserveVanityDeployWallet({
         initialBuySol: initialBuySolNum,
+        useVanity: deployWalletStyle !== "regular",
       });
       setVanityWallet(next);
       setShowVanitySecret(false);
-      setVanityMessage("EMBR deploy wallet generated. Fund it, then click Deploy.");
+      setVanityMessage(`${deployWalletStyle === "regular" ? "Regular" : "Branded"} deploy wallet generated. Fund it, then click Deploy.`);
     } catch (e) {
-      setError(e?.message || "Failed to generate EMBR deploy wallet.");
+      setError(e?.message || "Failed to generate deploy wallet.");
     } finally {
       setVanityLoading(false);
     }
@@ -876,7 +883,7 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
 
   const submitVanity = async () => {
     if (!vanityWallet?.reservationId) {
-      setError("Generate an EMBR deploy wallet first.");
+      setError("Generate a deploy wallet first.");
       return;
     }
     if (requiresLoginForSubmit) {
@@ -884,7 +891,7 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
       return;
     }
     if (!vanityWallet?.funded) {
-      setError("Fund the EMBR deploy wallet before deploying.");
+      setError("Fund the deploy wallet before deploying.");
       return;
     }
     if (!form.name.trim() || !form.symbol.trim() || !form.description.trim()) {
@@ -911,11 +918,11 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
     setLoading(true);
     setError("");
     setResult(null);
-    setDeployStep("Preparing EMBR deploy wallet...");
+    setDeployStep("Preparing deploy wallet...");
     try {
       const imageDataUri = await fileToDataUri(imageFile);
       const bannerDataUri = bannerFile ? await fileToDataUri(bannerFile) : "";
-      setDeployStep("Submitting deploy from EMBR wallet...");
+      setDeployStep(`Submitting deploy from ${deployWalletStyle === "regular" ? "regular" : "branded"} wallet...`);
       const deployRes = await apiSubmitVanityDeploy({
         reservationId: vanityWallet.reservationId,
         name: form.name.trim(),
@@ -958,11 +965,11 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
         pumpfunUrl: deployRes?.pumpfunUrl || "",
         autoAttached: Boolean(deployRes?.autoAttached),
         postDeployWarning: deployRes?.remainingSol > 0
-          ? `Remaining SOL stays in the EMBR deploy wallet (${Number(deployRes.remainingSol || 0).toFixed(6)} SOL).`
+          ? `Remaining SOL stays in the ${vanityWallet?.vanity ? "branded" : "regular"} deploy wallet (${Number(deployRes.remainingSol || 0).toFixed(6)} SOL).`
           : "",
       });
     } catch (e) {
-      setError(e?.message || "EMBR wallet deploy failed.");
+      setError(e?.message || "Deploy wallet launch failed.");
     } finally {
       setDeployStep("");
       setLoading(false);
@@ -1235,9 +1242,9 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
           <div style={{marginTop:12,border:"1px solid rgba(255,106,0,.24)",borderRadius:14,background:"linear-gradient(180deg, rgba(255,106,0,.08), rgba(255,255,255,.02))",padding:"14px 14px"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:10}}>
               <div>
-                <div style={{fontSize:14,fontWeight:800,color:"#fff"}}>Deploy With EMBR Vanity Wallet</div>
+                <div style={{fontSize:14,fontWeight:800,color:"#fff"}}>Deploy With EMBER Wallet</div>
                 <div style={{fontSize:12,color:"rgba(255,255,255,.58)",marginTop:4,lineHeight:1.55}}>
-                  Generate an EMBR address, fund the minimum required SOL, then deploy without connecting a wallet. This becomes the real creator wallet for the token.
+                  Reserve either a branded EMBR / EMBER wallet or a regular random wallet, fund the minimum required SOL, then deploy without connecting a wallet. This becomes the real creator wallet for the token.
                 </div>
               </div>
               <div
@@ -1257,6 +1264,36 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
             </div>
 
             {!vanityWallet && (
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginTop:12}}>
+                {[
+                  { key: "vanity", label: "Branded EMBR / EMBER", hint: "Uses a vanity wallet from the address pool." },
+                  { key: "regular", label: "Regular Random", hint: "Skips vanity and generates a normal Solana wallet." },
+                ].map((option) => {
+                  const active = deployWalletStyle === option.key;
+                  return (
+                    <button
+                      key={option.key}
+                      type="button"
+                      onClick={() => setDeployWalletStyle(option.key)}
+                      style={{
+                        textAlign:"left",
+                        border: active ? "1px solid rgba(255,106,0,.45)" : "1px solid rgba(255,255,255,.08)",
+                        background: active ? "rgba(255,106,0,.10)" : "rgba(255,255,255,.03)",
+                        borderRadius: 12,
+                        padding: "12px 14px",
+                        color: "#fff",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <div style={{fontSize:13,fontWeight:800}}>{option.label}</div>
+                      <div style={{fontSize:11,color:"rgba(255,255,255,.46)",marginTop:5,lineHeight:1.5}}>{option.hint}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {!vanityWallet && (
               <div style={{marginTop:12,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
                 <div style={{fontSize:12,color:"rgba(255,255,255,.62)",lineHeight:1.6}}>
                   Minimum funding required: <span style={{color:"#fff",fontWeight:800}}>{(Number(form.initialBuySol || 0) + DEPLOY_VANITY_BUFFER_SOL).toFixed(6)} SOL</span>
@@ -1264,7 +1301,7 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
                   This includes your initial buy plus launch buffer for network and account costs. When this wallet is funded, deploy unlocks automatically.
                 </div>
                 <button className="btn-fire" onClick={reserveVanityWallet} disabled={vanityLoading || loading} style={{padding:"10px 14px",fontSize:12}}>
-                  {vanityLoading ? "Generating..." : "Generate EMBR Wallet"}
+                  {vanityLoading ? "Generating..." : deployWalletStyle === "regular" ? "Generate Regular Wallet" : "Generate Branded Wallet"}
                 </button>
               </div>
             )}
@@ -1273,7 +1310,9 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
               <div style={{marginTop:12,display:"grid",gap:12}}>
                 <div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:10,alignItems:"start"}}>
                   <div style={{padding:"12px 12px",borderRadius:12,background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.08)"}}>
-                    <div style={{fontSize:11,color:"rgba(255,255,255,.42)",fontWeight:700,letterSpacing:1,marginBottom:6}}>EMBR DEPLOY ADDRESS</div>
+                    <div style={{fontSize:11,color:"rgba(255,255,255,.42)",fontWeight:700,letterSpacing:1,marginBottom:6}}>
+                      {vanityWallet?.vanity ? "BRANDED DEPLOY ADDRESS" : "REGULAR DEPLOY ADDRESS"}
+                    </div>
                     <div style={{fontSize:13,color:"#fff",wordBreak:"break-all",lineHeight:1.6}}>{vanityWallet.deposit}</div>
                   </div>
                   <button className="btn-ghost" onClick={() => copyText(vanityWallet.deposit, "Deploy address copied.")} style={{padding:"10px 12px",fontSize:12}}>
@@ -1397,10 +1436,12 @@ export default function DeployModal({ onClose, user, onRequireLogin, onGoDashboa
           >
             {loading
               ? t("deploy.deploying")
-              : walletConnecting
-                ? t("deploy.connectingWallet")
+                : walletConnecting
+                  ? t("deploy.connectingWallet")
                 : deployMode === "embr"
-                  ? "Deploy From EMBR Wallet"
+                  ? deployWalletStyle === "regular"
+                    ? "Deploy From Regular Wallet"
+                    : "Deploy From Branded Wallet"
                   : t("deploy.deploy")}
           </button>
         </div>

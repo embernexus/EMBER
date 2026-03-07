@@ -152,6 +152,10 @@ function toUserPayload(data) {
       ownerUsername: str(data.user.ownerUsername),
       role: str(data.user.role, "owner"),
       isOperator: bool(data.user.isOperator),
+      isAdmin: bool(data.user.isAdmin),
+      isOg: bool(data.user.isOg),
+      referralCode: str(data.user.referralCode),
+      feeBpsOverride: num(data.user.feeBpsOverride, 0),
       canManageFunds: bool(data.user.canManageFunds, true),
       canDelete: bool(data.user.canDelete, true),
       canManageAccess: bool(data.user.canManageAccess, true),
@@ -167,10 +171,10 @@ export async function apiAuthLogin(username, password) {
   return toUserPayload(data);
 }
 
-export async function apiAuthRegister(username, password) {
+export async function apiAuthRegister(username, password, referralCode = "") {
   const data = await requestJson("/api/auth/register", {
     method: "POST",
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ username, password, referralCode }),
   });
   return toUserPayload(data);
 }
@@ -259,6 +263,68 @@ export async function apiDisconnectTelegramAlerts() {
   return {
     ok: bool(data.ok, true),
   };
+}
+
+export async function apiReferralSummary() {
+  const data = await requestJson("/api/referrals/me", { method: "GET" });
+  return {
+    ownerUserId: num(data.ownerUserId),
+    ownerUsername: str(data.ownerUsername),
+    role: str(data.role, "owner"),
+    canClaim: bool(data.canClaim, true),
+    isOg: bool(data.isOg),
+    referralCode: str(data.referralCode),
+    totals: isRecord(data.totals) ? data.totals : {},
+    depositWalletOptions: Array.isArray(data.depositWalletOptions) ? data.depositWalletOptions : [],
+    referredUsers: Array.isArray(data.referredUsers) ? data.referredUsers : [],
+    events: Array.isArray(data.events) ? data.events : [],
+  };
+}
+
+export async function apiClaimReferralEarnings(payload) {
+  return requestJson("/api/referrals/claim", {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export async function apiAdminOverview() {
+  return requestJson("/api/admin/overview", { method: "GET" });
+}
+
+export async function apiAdminUpdateSettings(payload) {
+  return requestJson("/api/admin/settings", {
+    method: "PATCH",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export async function apiAdminSetUserOg(userId, enabled) {
+  return requestJson(`/api/admin/users/${encodeURIComponent(userId)}/og`, {
+    method: "POST",
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+export async function apiAdminSetUserReferrer(userId, referralCode) {
+  return requestJson(`/api/admin/users/${encodeURIComponent(userId)}/referrer`, {
+    method: "POST",
+    body: JSON.stringify({ referralCode }),
+  });
+}
+
+export async function apiAdminArchiveToken(tokenId) {
+  return requestJson(`/api/admin/tokens/${encodeURIComponent(tokenId)}/archive`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function apiAdminRestoreToken(tokenId) {
+  return requestJson(`/api/admin/tokens/${encodeURIComponent(tokenId)}/restore`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
 }
 
 export async function apiDashboard() {
@@ -430,21 +496,23 @@ export async function apiRestoreToken(id) {
   return { token: toToken(data.token) };
 }
 
-export async function apiGenerateDepositAddress() {
+export async function apiGenerateDepositAddress(payload = {}) {
   const data = await requestJson("/api/tokens/generate-deposit", {
     method: "POST",
-    body: JSON.stringify({}),
+    body: JSON.stringify(payload || {}),
   });
   if (Array.isArray(data.deposits) && data.deposits.length > 0) {
     const first = isRecord(data.deposits[0]) ? data.deposits[0] : {};
     return {
       pendingDepositId: str(first.pendingDepositId),
       deposit: str(first.deposit),
+      vanity: bool(first.vanity, true),
     };
   }
   return {
     pendingDepositId: str(data.pendingDepositId),
     deposit: str(data.deposit),
+    vanity: bool(data.vanity, true),
   };
 }
 

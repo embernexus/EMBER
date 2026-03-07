@@ -204,6 +204,37 @@ export async function initDb() {
   `);
 
   await pool.query(`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
+  `);
+
+  await pool.query(`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS is_og BOOLEAN NOT NULL DEFAULT FALSE;
+  `);
+
+  await pool.query(`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS fee_bps_override INTEGER;
+  `);
+
+  await pool.query(`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS referral_code TEXT;
+  `);
+
+  await pool.query(`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS referrer_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL;
+  `);
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_users_referral_code
+    ON users(referral_code)
+    WHERE referral_code IS NOT NULL;
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS sessions (
       token TEXT PRIMARY KEY,
       user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -450,6 +481,45 @@ export async function initDb() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS protocol_settings (
+      id SMALLINT PRIMARY KEY,
+      default_fee_bps INTEGER NOT NULL DEFAULT 1000,
+      default_treasury_bps INTEGER NOT NULL DEFAULT 500,
+      default_burn_bps INTEGER NOT NULL DEFAULT 500,
+      referred_treasury_bps INTEGER NOT NULL DEFAULT 250,
+      referred_burn_bps INTEGER NOT NULL DEFAULT 250,
+      referred_referral_bps INTEGER NOT NULL DEFAULT 500,
+      personal_bot_mode TEXT NOT NULL DEFAULT 'burn',
+      personal_bot_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS protocol_runtime_state (
+      state_key TEXT PRIMARY KEY,
+      state_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    INSERT INTO protocol_settings (
+      id,
+      default_fee_bps,
+      default_treasury_bps,
+      default_burn_bps,
+      referred_treasury_bps,
+      referred_burn_bps,
+      referred_referral_bps,
+      personal_bot_mode,
+      personal_bot_enabled
+    )
+    VALUES (1, 1000, 500, 500, 250, 250, 500, 'burn', TRUE)
+    ON CONFLICT (id) DO NOTHING;
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS user_telegram_links (
       user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       chat_id BIGINT NOT NULL UNIQUE,
@@ -651,6 +721,60 @@ export async function initDb() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS referral_events (
+      id BIGSERIAL PRIMARY KEY,
+      user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      referrer_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_id TEXT REFERENCES tokens(id) ON DELETE SET NULL,
+      token_symbol TEXT,
+      module_type TEXT,
+      gross_fee_lamports BIGINT NOT NULL DEFAULT 0,
+      treasury_fee_lamports BIGINT NOT NULL DEFAULT 0,
+      burn_fee_lamports BIGINT NOT NULL DEFAULT 0,
+      referral_fee_lamports BIGINT NOT NULL DEFAULT 0,
+      tx TEXT,
+      metadata JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_referral_events_referrer_created
+    ON referral_events(referrer_user_id, created_at DESC);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_referral_events_user_created
+    ON referral_events(user_id, created_at DESC);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS referral_balances (
+      referrer_user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      total_earned_lamports BIGINT NOT NULL DEFAULT 0,
+      pending_lamports BIGINT NOT NULL DEFAULT 0,
+      claimed_lamports BIGINT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS referral_claims (
+      id BIGSERIAL PRIMARY KEY,
+      referrer_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      destination_wallet TEXT NOT NULL,
+      amount_lamports BIGINT NOT NULL,
+      tx TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_referral_claims_referrer_created
+    ON referral_claims(referrer_user_id, created_at DESC);
+  `);
+
+  await pool.query(`
     CREATE OR REPLACE FUNCTION set_updated_at()
     RETURNS TRIGGER AS $$
     BEGIN
@@ -701,6 +825,41 @@ export async function initDb() {
     BEFORE UPDATE ON deploy_wallet_reservations
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   `);
+
+  await pool.query(`
+    CREATE OR REPLACE TRIGGER trg_protocol_settings_updated_at
+    BEFORE UPDATE ON protocol_settings
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  `);
+
+  await pool.query(`
+    CREATE OR REPLACE TRIGGER trg_referral_balances_updated_at
+    BEFORE UPDATE ON referral_balances
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  `);
+
+  await pool.query(`
+    UPDATE users
+    SET referral_code = 'EMBER' || UPPER(to_hex(id))
+    WHERE referral_code IS NULL OR BTRIM(referral_code) = '';
+  `);
+
+  await pool.query(`
+    UPDATE users
+    SET is_admin = TRUE
+    WHERE username = 'satoshEH_';
+  `);
+  } catch (error) {
+    const msg = String(error?.message || "");
+    const isConcurrentCatalogRace =
+      String(error?.code || "") === "23505" &&
+      msg.includes("pg_type_typname_nsp_index");
+    if (isConcurrentCatalogRace) {
+      console.warn("[db] concurrent init catalog race detected; waiting for schema to settle");
+      const ready = await waitForRequiredTables();
+      if (ready) return;
+    }
+    throw error;
   } finally {
     if (acquired) {
       await lockClient.query("SELECT pg_advisory_unlock($1::bigint)", [initLockKey]).catch(() => {});

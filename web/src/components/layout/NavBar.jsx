@@ -29,6 +29,8 @@ export default function NavBar({
   const { t } = useI18n();
   const username = typeof user === "string" ? user : String(user?.username || "");
   const isManager = Boolean(user?.role === "manager" || user?.isOperator);
+  const isOg = Boolean(user?.isOg);
+  const isAdmin = Boolean(user?.isAdmin);
   const [showStatsHover, setShowStatsHover] = useState(false);
   const [statsHoverPos, setStatsHoverPos] = useState(null);
   const [showComingSoonHover, setShowComingSoonHover] = useState(false);
@@ -287,6 +289,16 @@ export default function NavBar({
                 {String(username).slice(0, 1).toUpperCase()}
               </div>
               <span>{username}</span>
+              {isOg && (
+                <span style={{ fontSize: 10, color: "#fff2bd", fontWeight: 800, letterSpacing: 0.6 }}>
+                  OG
+                </span>
+              )}
+              {isAdmin && (
+                <span style={{ fontSize: 10, color: "#9fdbff", fontWeight: 800, letterSpacing: 0.6 }}>
+                  ADMIN
+                </span>
+              )}
               {isManager && (
                 <span style={{ fontSize: 10, color: "#ffb26b", fontWeight: 800, letterSpacing: 0.6 }}>
                   MANAGER

@@ -114,6 +114,7 @@ export default function AttachModal({onClose,onAttach,onGenerateDeposit}) {
   const [err,setErr]=useState("");
   const [dep,setDep]=useState("");
   const [pendingDepositId,setPendingDepositId]=useState("");
+  const [walletStyle,setWalletStyle]=useState("vanity");
   const [submitting,setSubmitting]=useState(false);
   const [tokenImgVisible,setTokenImgVisible]=useState(true);
 
@@ -185,7 +186,9 @@ export default function AttachModal({onClose,onAttach,onGenerateDeposit}) {
     if(typeof onGenerateDeposit !== "function") return setErr(t("attach.errors.generatorUnavailable"));
     setSubmitting(true);
     try {
-      const result = await onGenerateDeposit();
+      const result = await onGenerateDeposit({
+        useVanity: walletStyle !== "regular",
+      });
       if(!result?.deposit || !result?.pendingDepositId){
         throw new Error(t("attach.errors.generatorInvalid"));
       }
@@ -290,6 +293,37 @@ export default function AttachModal({onClose,onAttach,onGenerateDeposit}) {
                   <input className="input-f" value={fd.val||""} readOnly disabled placeholder={t("attach.placeholders.autoMint")} style={{opacity:fd.val?1:.4,cursor:"not-allowed"}}/>
                 </div>
               ))}
+            </div>
+
+            <div>
+              <label style={{display:"block",fontSize:11,color:"rgba(255,255,255,.35)",letterSpacing:1,marginBottom:8,fontWeight:600}}>DEPOSIT WALLET STYLE</label>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                {[
+                  { key: "vanity", label: "Branded EMBR / EMBER", hint: "Uses the vanity wallet pool for on-chain branding." },
+                  { key: "regular", label: "Regular Random", hint: "Generates a standard Solana wallet immediately." },
+                ].map((option) => {
+                  const active = walletStyle === option.key;
+                  return (
+                    <button
+                      key={option.key}
+                      type="button"
+                      onClick={() => setWalletStyle(option.key)}
+                      style={{
+                        textAlign:"left",
+                        border: active ? "1px solid rgba(255,106,0,.45)" : "1px solid rgba(255,255,255,.08)",
+                        background: active ? "rgba(255,106,0,.10)" : "rgba(255,255,255,.03)",
+                        borderRadius: 12,
+                        padding: "12px 14px",
+                        color: "#fff",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <div style={{fontSize:13,fontWeight:800}}>{option.label}</div>
+                      <div style={{fontSize:11,color:"rgba(255,255,255,.46)",marginTop:5,lineHeight:1.5}}>{option.hint}</div>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             <div>

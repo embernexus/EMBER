@@ -214,6 +214,15 @@ function normalizePassword(password) {
   return value;
 }
 
+function normalizeReferralCode(value) {
+  const code = String(value || "").trim().toUpperCase();
+  if (!code) return "";
+  if (!/^[A-Z0-9_]{4,40}$/.test(code)) {
+    throw new Error("Referral code is invalid.");
+  }
+  return code;
+}
+
 function sanitizeInterval(value, fallback) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
@@ -2573,8 +2582,52 @@ export async function ensureDepositPool(targetInput = config.depositPoolTarget) 
   }
 }
 
-export async function reserveDepositAddresses(userId, countInput = 1) {
+function shouldUseVanityWallets(value, fallback = true) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  const raw = String(value).trim().toLowerCase();
+  if (["false", "0", "no", "regular", "random"].includes(raw)) return false;
+  if (["true", "1", "yes", "vanity", "branded", "ember", "embr"].includes(raw)) return true;
+  return fallback;
+}
+
+async function reserveRegularDepositAddresses(userId, count) {
+  return withTx(async (client) => {
+    const reserved = [];
+    for (let i = 0; i < count; i += 1) {
+      const generated = generateNonVanityDeposit();
+      const reservationId = makeId("dep");
+      await client.query(
+        `
+          INSERT INTO token_deposit_pool (
+            prefix,
+            deposit_pubkey,
+            secret_key_base58,
+            status,
+            reservation_id,
+            reserved_user_id,
+            reserved_at
+          )
+          VALUES ($1, $2, $3, 'reserved', $4, $5, NOW())
+        `,
+        [null, generated.pubkey, encryptDepositSecret(generated.secretKeyBase58), reservationId, userId]
+      );
+      reserved.push({
+        pendingDepositId: reservationId,
+        deposit: generated.pubkey,
+        vanity: false,
+      });
+    }
+    return reserved;
+  });
+}
+
+export async function reserveDepositAddresses(userId, countInput = 1, options = {}) {
   const count = Math.max(1, Math.min(DEPOSIT_POOL_MAX, Math.floor(Number(countInput) || 1)));
+  const useVanity = shouldUseVanityWallets(options?.useVanity, true);
+  if (!useVanity) {
+    return reserveRegularDepositAddresses(userId, count);
+  }
   const prefixCase = preferredPrefixSortCase("prefix");
   const availableRowsRes = await withTx(async (client) => {
     const rowsRes = await client.query(
@@ -2607,6 +2660,7 @@ export async function reserveDepositAddresses(userId, countInput = 1) {
       reserved.push({
         pendingDepositId: reservationId,
         deposit: row.deposit_pubkey,
+        vanity: true,
       });
     }
     return { ok: true, reserved };
@@ -2620,10 +2674,10 @@ export async function reserveDepositAddresses(userId, countInput = 1) {
   return availableRowsRes.reserved;
 }
 
-export async function generatePendingDepositAddress(userId, countInput = 1) {
+export async function generatePendingDepositAddress(userId, countInput = 1, options = {}) {
   const scope = await resolveUserAccessScopeFromPool(userId);
   const count = Math.max(1, Math.min(DEPOSIT_POOL_MAX, Math.floor(Number(countInput) || 1)));
-  const reserved = await reserveDepositAddresses(scope.ownerUserId, count);
+  const reserved = await reserveDepositAddresses(scope.ownerUserId, count, options);
   if (count === 1) {
     return reserved[0];
   }
@@ -2653,6 +2707,7 @@ function toDeployWalletReservation(row, balanceLamportsInput = null) {
     deployedMint: String(row?.deployed_mint || ""),
     deploySignature: String(row?.deploy_signature || ""),
     lastError: String(row?.last_error || ""),
+    vanity: String(row?.deposit_pubkey || "").startsWith("EMBR") || String(row?.deposit_pubkey || "").startsWith("EMBER"),
   };
 }
 
@@ -2679,12 +2734,47 @@ async function getDeployWalletReservationRow(client, reservationId, { forUpdate 
 export async function reserveVanityDeployWallet(userId, payload) {
   const deployUserId = Number(userId) > 0 ? Number(userId) : null;
   const initialBuySol = sanitizeDeployNumber(payload?.initialBuySol, 0.1, 0, 100);
+  const useVanity = shouldUseVanityWallets(payload?.useVanity, true);
   if (!Number.isFinite(initialBuySol) || initialBuySol <= 0) {
     throw new Error("Pump deploy requires an initial buy greater than 0 SOL.");
   }
 
   const requiredLamports = estimateDeployVanityRequiredLamports(initialBuySol);
   const expiresAt = deployVanityReservationExpiryDate();
+  if (!useVanity) {
+    const generated = generateNonVanityDeposit();
+    const reservationId = makeId("dvw");
+    const storedSecret = encryptDepositSecret(generated.secretKeyBase58);
+    await pool.query(
+      `
+        INSERT INTO deploy_wallet_reservations (
+          id, user_id, deposit_pubkey, secret_key_base58, required_lamports, expires_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+      `,
+      [reservationId, deployUserId, generated.pubkey, storedSecret, requiredLamports, expiresAt]
+    );
+    return {
+      reservationId,
+      deposit: generated.pubkey,
+      requiredLamports,
+      requiredSol: fromLamports(requiredLamports),
+      bufferSol: fromLamports(getDeployVanityBufferLamports()),
+      balanceLamports: 0,
+      balanceSol: 0,
+      funded: false,
+      shortfallLamports: requiredLamports,
+      shortfallSol: fromLamports(requiredLamports),
+      status: "reserved",
+      expiresAt: new Date(expiresAt).toISOString(),
+      deployedMint: "",
+      deploySignature: "",
+      lastError: "",
+      privateKeyBase58: generated.secretKeyBase58,
+      privateKeyArray: Array.from(keypairFromBase58(generated.secretKeyBase58).secretKey),
+      vanity: false,
+    };
+  }
   const prefixCase = preferredPrefixSortCase("prefix");
 
   const reservedRes = await withTx(async (client) => {
@@ -2751,6 +2841,7 @@ export async function reserveVanityDeployWallet(userId, payload) {
     ...toDeployWalletReservation(reservedRes.row, 0),
     privateKeyBase58: reservedRes.secretKeyBase58,
     privateKeyArray: Array.from(keypairFromBase58(reservedRes.secretKeyBase58).secretKey),
+    vanity: true,
   };
 }
 
@@ -2845,9 +2936,10 @@ export async function getTokenDeployWallet(userId, tokenId) {
   });
 }
 
-export async function registerUser(usernameInput, passwordInput) {
+export async function registerUser(usernameInput, passwordInput, referralCodeInput = "") {
   const username = normalizeUsername(usernameInput);
   const password = normalizePassword(passwordInput);
+  const referralCode = normalizeReferralCode(referralCodeInput);
   const passwordHash = await bcrypt.hash(password, 10);
 
   const user = await withTx(async (client) => {
@@ -2856,9 +2948,31 @@ export async function registerUser(usernameInput, passwordInput) {
       throw new Error("Username already exists.");
     }
 
+    let referrerUserId = null;
+    if (referralCode) {
+      const referrerRes = await client.query(
+        "SELECT id FROM users WHERE referral_code = $1 LIMIT 1",
+        [referralCode]
+      );
+      if (!referrerRes.rowCount) {
+        throw new Error("Referral code was not found.");
+      }
+      referrerUserId = Number(referrerRes.rows[0].id || 0) || null;
+    }
+
     const inserted = await client.query(
-      "INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id, username",
-      [username, passwordHash]
+      `
+        INSERT INTO users (username, password_hash, referrer_user_id)
+        VALUES ($1, $2, $3)
+        RETURNING id, username
+      `,
+      [username, passwordHash, referrerUserId]
+    );
+
+    const insertedId = Number(inserted.rows[0].id || 0);
+    await client.query(
+      `UPDATE users SET referral_code = COALESCE(NULLIF(referral_code, ''), $1) WHERE id = $2`,
+      [`EMBER${insertedId.toString(16).toUpperCase()}`, insertedId]
     );
 
     return inserted.rows[0];
@@ -2937,7 +3051,19 @@ async function resolveUserAccessScope(client, actorUserId) {
   }
 
   const actorRes = await client.query(
-    "SELECT id, username FROM users WHERE id = $1 LIMIT 1",
+    `
+      SELECT
+        id,
+        username,
+        COALESCE(is_admin, FALSE) AS is_admin,
+        COALESCE(is_og, FALSE) AS is_og,
+        COALESCE(referral_code, '') AS referral_code,
+        fee_bps_override,
+        referrer_user_id
+      FROM users
+      WHERE id = $1
+      LIMIT 1
+    `,
     [actorId]
   );
   if (!actorRes.rowCount) {
@@ -2947,7 +3073,13 @@ async function resolveUserAccessScope(client, actorUserId) {
 
   const grantRes = await client.query(
     `
-      SELECT g.owner_user_id, owner.username AS owner_username
+      SELECT
+        g.owner_user_id,
+        owner.username AS owner_username,
+        COALESCE(owner.is_og, FALSE) AS owner_is_og,
+        COALESCE(owner.referral_code, '') AS owner_referral_code,
+        owner.fee_bps_override AS owner_fee_bps_override,
+        owner.referrer_user_id AS owner_referrer_user_id
       FROM user_access_grants g
       JOIN users owner ON owner.id = g.owner_user_id
       WHERE g.grantee_user_id = $1
@@ -2959,15 +3091,40 @@ async function resolveUserAccessScope(client, actorUserId) {
   const isOperator = grantRes.rowCount > 0;
   const ownerUserId = isOperator ? Number(grantRes.rows[0].owner_user_id) : actorId;
   const ownerUsername = isOperator ? String(grantRes.rows[0].owner_username || "") : String(actor.username || "");
+  const ownerIsOg = isOperator ? Boolean(grantRes.rows[0].owner_is_og) : Boolean(actor.is_og);
+  const ownerReferralCode = isOperator ? String(grantRes.rows[0].owner_referral_code || "") : String(actor.referral_code || "");
+  const ownerFeeBpsOverride = isOperator
+    ? (grantRes.rows[0].owner_fee_bps_override == null
+        ? null
+        : Math.max(0, Math.floor(Number(grantRes.rows[0].owner_fee_bps_override || 0))))
+    : (actor.fee_bps_override == null ? null : Math.max(0, Math.floor(Number(actor.fee_bps_override || 0))));
+  const ownerReferrerUserId = isOperator
+    ? (grantRes.rows[0].owner_referrer_user_id == null
+        ? null
+        : Math.max(0, Math.floor(Number(grantRes.rows[0].owner_referrer_user_id || 0))))
+    : (actor.referrer_user_id == null ? null : Math.max(0, Math.floor(Number(actor.referrer_user_id || 0))));
 
   return {
     actorUserId: actorId,
     actorUsername: String(actor.username || ""),
+    actorIsAdmin: Boolean(actor.is_admin),
+    actorIsOg: Boolean(actor.is_og),
+    actorReferralCode: String(actor.referral_code || ""),
+    actorFeeBpsOverride:
+      actor.fee_bps_override == null ? null : Math.max(0, Math.floor(Number(actor.fee_bps_override || 0))),
+    actorReferrerUserId:
+      actor.referrer_user_id == null ? null : Math.max(0, Math.floor(Number(actor.referrer_user_id || 0))),
     ownerUserId,
     ownerUsername,
+    ownerIsOg,
+    ownerReferralCode,
+    ownerFeeBpsOverride,
+    ownerReferrerUserId,
     role: isOperator ? "manager" : "owner",
     isOperator,
     isOwner: !isOperator,
+    isAdmin: Boolean(actor.is_admin) && !isOperator,
+    isOg: ownerIsOg,
     canManageFunds: !isOperator,
     canDelete: !isOperator,
     canManageAccess: !isOperator,
@@ -2984,6 +3141,12 @@ function assertOwnerPermission(scope, message = "Only the primary account can pe
   }
 }
 
+function assertAdminPermission(scope, message = "Admin access is required.") {
+  if (!scope?.isAdmin) {
+    throw new Error(message);
+  }
+}
+
 export async function getUserAuthProfile(userId) {
   const scope = await resolveUserAccessScopeFromPool(userId);
   return {
@@ -2993,6 +3156,10 @@ export async function getUserAuthProfile(userId) {
     ownerUsername: scope.ownerUsername,
     role: scope.role,
     isOperator: scope.isOperator,
+    isAdmin: scope.isAdmin,
+    isOg: scope.isOg,
+    referralCode: scope.ownerReferralCode,
+    feeBpsOverride: scope.ownerFeeBpsOverride,
     canManageFunds: scope.canManageFunds,
     canDelete: scope.canDelete,
     canManageAccess: scope.canManageAccess,
@@ -3408,6 +3575,452 @@ export async function getDashboard(userId) {
     logs: logsRes.rows.map(toEvent),
     chartData: buildChartData(chartRes.rows),
   };
+}
+
+export async function getReferralAccountSummary(userId) {
+  const scope = await resolveUserAccessScopeFromPool(userId);
+  const [profileRes, referredRes, eventsRes, balanceRes, tokensRes] = await Promise.all([
+    pool.query(
+      `
+        SELECT
+          id,
+          username,
+          COALESCE(referral_code, '') AS referral_code,
+          COALESCE(is_og, FALSE) AS is_og,
+          referrer_user_id
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [scope.ownerUserId]
+    ),
+    pool.query(
+      `
+        SELECT
+          u.id,
+          u.username,
+          u.created_at,
+          COALESCE(rb.total_earned_lamports, 0) AS total_earned_lamports,
+          COALESCE(SUM(re.referral_fee_lamports), 0) AS earned_from_user_lamports
+        FROM users u
+        LEFT JOIN referral_events re
+          ON re.user_id = u.id
+         AND re.referrer_user_id = $1
+        LEFT JOIN referral_balances rb
+          ON rb.referrer_user_id = $1
+        WHERE u.referrer_user_id = $1
+        GROUP BY u.id, u.username, u.created_at, rb.total_earned_lamports
+        ORDER BY u.created_at DESC
+      `,
+      [scope.ownerUserId]
+    ),
+    pool.query(
+      `
+        SELECT
+          re.id,
+          re.user_id,
+          u.username,
+          re.token_id,
+          re.token_symbol,
+          re.module_type,
+          re.referral_fee_lamports,
+          re.gross_fee_lamports,
+          re.tx,
+          re.created_at
+        FROM referral_events re
+        JOIN users u ON u.id = re.user_id
+        WHERE re.referrer_user_id = $1
+        ORDER BY re.created_at DESC
+        LIMIT 100
+      `,
+      [scope.ownerUserId]
+    ),
+    pool.query(
+      `
+        SELECT
+          COALESCE(total_earned_lamports, 0) AS total_earned_lamports,
+          COALESCE(pending_lamports, 0) AS pending_lamports,
+          COALESCE(claimed_lamports, 0) AS claimed_lamports
+        FROM referral_balances
+        WHERE referrer_user_id = $1
+        LIMIT 1
+      `,
+      [scope.ownerUserId]
+    ),
+    pool.query(
+      `
+        SELECT id, symbol, name, deposit, disconnected
+        FROM tokens
+        WHERE user_id = $1
+        ORDER BY disconnected ASC, created_at DESC
+      `,
+      [scope.ownerUserId]
+    ),
+  ]);
+
+  const profile = profileRes.rows[0] || {};
+  const balance = balanceRes.rows[0] || {};
+  return {
+    ownerUserId: scope.ownerUserId,
+    ownerUsername: scope.ownerUsername,
+    role: scope.role,
+    canClaim: Boolean(scope.canManageFunds),
+    isOg: Boolean(profile.is_og),
+    referralCode: String(profile.referral_code || ""),
+    referredByUserId:
+      profile.referrer_user_id == null ? null : Math.max(0, Math.floor(Number(profile.referrer_user_id || 0))),
+    totals: {
+      totalEarnedSol: fromLamports(balance.total_earned_lamports),
+      pendingSol: fromLamports(balance.pending_lamports),
+      claimedSol: fromLamports(balance.claimed_lamports),
+    },
+    depositWalletOptions: tokensRes.rows.map((row) => ({
+      tokenId: String(row.id || ""),
+      symbol: String(row.symbol || ""),
+      name: String(row.name || ""),
+      deposit: String(row.deposit || ""),
+      disconnected: Boolean(row.disconnected),
+    })),
+    referredUsers: referredRes.rows.map((row) => ({
+      userId: Number(row.id || 0),
+      username: String(row.username || ""),
+      createdAt: row.created_at,
+      earnedSol: fromLamports(row.earned_from_user_lamports),
+    })),
+    events: eventsRes.rows.map((row) => ({
+      id: Number(row.id || 0),
+      userId: Number(row.user_id || 0),
+      username: String(row.username || ""),
+      tokenId: row.token_id ? String(row.token_id) : null,
+      tokenSymbol: String(row.token_symbol || "UNKNOWN"),
+      moduleType: String(row.module_type || ""),
+      referralSol: fromLamports(row.referral_fee_lamports),
+      grossFeeSol: fromLamports(row.gross_fee_lamports),
+      tx: row.tx ? String(row.tx) : null,
+      createdAt: row.created_at,
+    })),
+  };
+}
+
+export async function claimReferralEarnings(userId, payload = {}) {
+  return withTx(async (client) => {
+    const scope = await resolveUserAccessScope(client, userId);
+    assertOwnerPermission(scope, "Managers cannot claim referral earnings.");
+
+    const destination = normalizePubkeyString(payload.destinationWallet || payload.destination || "");
+    if (!destination) {
+      throw new Error("A destination deposit wallet is required.");
+    }
+
+    const ownedDepositRes = await client.query(
+      `
+        SELECT id, symbol
+        FROM tokens
+        WHERE user_id = $1 AND deposit = $2
+        LIMIT 1
+      `,
+      [scope.ownerUserId, destination]
+    );
+    if (!ownedDepositRes.rowCount) {
+      throw new Error("Destination must be one of your own token deposit wallets.");
+    }
+
+    const balanceRes = await client.query(
+      `
+        SELECT pending_lamports, total_earned_lamports, claimed_lamports
+        FROM referral_balances
+        WHERE referrer_user_id = $1
+        LIMIT 1
+        FOR UPDATE
+      `,
+      [scope.ownerUserId]
+    );
+    if (!balanceRes.rowCount) {
+      throw new Error("No referral earnings are available.");
+    }
+
+    const pendingLamports = Math.max(0, Math.floor(Number(balanceRes.rows[0].pending_lamports || 0)));
+    if (pendingLamports <= 0) {
+      throw new Error("No claimable referral earnings are available.");
+    }
+    if (!config.treasuryWalletPrivateKey) {
+      throw new Error("Treasury signer is not configured.");
+    }
+
+    const connection = getConnection();
+    const treasurySigner = Keypair.fromSecretKey(config.treasuryWalletPrivateKey);
+    const treasuryBalance = await connection.getBalance(treasurySigner.publicKey, "confirmed");
+    const maxSpendable = Math.max(0, treasuryBalance - getTxFeeSafetyLamports());
+    if (maxSpendable < pendingLamports) {
+      throw new Error("Treasury balance is too low to claim referral earnings right now.");
+    }
+
+    const sig = await sendSolTransfer(connection, treasurySigner, destination, pendingLamports);
+    await client.query(
+      `
+        UPDATE referral_balances
+        SET
+          pending_lamports = pending_lamports - $2,
+          claimed_lamports = claimed_lamports + $2,
+          updated_at = NOW()
+        WHERE referrer_user_id = $1
+      `,
+      [scope.ownerUserId, pendingLamports]
+    );
+    await client.query(
+      `
+        INSERT INTO referral_claims (
+          referrer_user_id,
+          destination_wallet,
+          amount_lamports,
+          tx
+        )
+        VALUES ($1, $2, $3, $4)
+      `,
+      [scope.ownerUserId, destination, pendingLamports, sig]
+    );
+    return {
+      ok: true,
+      signature: sig,
+      claimedSol: fromLamports(pendingLamports),
+      destinationWallet: destination,
+      destinationTokenId: String(ownedDepositRes.rows[0].id || ""),
+      destinationSymbol: String(ownedDepositRes.rows[0].symbol || ""),
+    };
+  });
+}
+
+export async function getAdminOverview(userId) {
+  const scope = await resolveUserAccessScopeFromPool(userId);
+  assertAdminPermission(scope, "Only the admin account can access admin controls.");
+
+  const [settings, usersRes, tokensRes, referralsRes] = await Promise.all([
+    getProtocolSettings(pool),
+    pool.query(
+      `
+        SELECT
+          u.id,
+          u.username,
+          COALESCE(u.is_admin, FALSE) AS is_admin,
+          COALESCE(u.is_og, FALSE) AS is_og,
+          COALESCE(u.referral_code, '') AS referral_code,
+          ref.username AS referrer_username,
+          COALESCE(ref.referral_code, '') AS referrer_code,
+          COALESCE(rb.total_earned_lamports, 0) AS total_earned_lamports,
+          COALESCE(rb.pending_lamports, 0) AS pending_lamports,
+          COUNT(t.id)::bigint AS token_count,
+          MAX(u.created_at) AS created_at
+        FROM users u
+        LEFT JOIN users ref ON ref.id = u.referrer_user_id
+        LEFT JOIN referral_balances rb ON rb.referrer_user_id = u.id
+        LEFT JOIN tokens t ON t.user_id = u.id
+        WHERE u.username <> $1
+        GROUP BY u.id, u.username, u.is_admin, u.is_og, u.referral_code, ref.username, ref.referral_code, rb.total_earned_lamports, rb.pending_lamports
+        ORDER BY u.created_at DESC, u.id DESC
+        LIMIT 250
+      `,
+      [PROTOCOL_SYSTEM_USERNAME]
+    ),
+    pool.query(
+      `
+        SELECT
+          t.id,
+          t.user_id,
+          u.username,
+          t.symbol,
+          t.mint,
+          t.selected_bot,
+          t.active,
+          t.disconnected,
+          t.deposit,
+          t.created_at
+        FROM tokens t
+        JOIN users u ON u.id = t.user_id
+        ORDER BY t.created_at DESC
+        LIMIT 250
+      `
+    ),
+    pool.query(
+      `
+        SELECT
+          re.referrer_user_id,
+          u.username,
+          COALESCE(SUM(re.referral_fee_lamports), 0) AS earned_lamports,
+          COUNT(*)::bigint AS event_count
+        FROM referral_events re
+        JOIN users u ON u.id = re.referrer_user_id
+        GROUP BY re.referrer_user_id, u.username
+        ORDER BY earned_lamports DESC
+        LIMIT 100
+      `
+    ),
+  ]);
+
+  return {
+    settings,
+    users: usersRes.rows.map((row) => ({
+      id: Number(row.id || 0),
+      username: String(row.username || ""),
+      isAdmin: Boolean(row.is_admin),
+      isOg: Boolean(row.is_og),
+      referralCode: String(row.referral_code || ""),
+      referrerUsername: String(row.referrer_username || ""),
+      referrerCode: String(row.referrer_code || ""),
+      totalReferralEarnedSol: fromLamports(row.total_earned_lamports),
+      pendingReferralSol: fromLamports(row.pending_lamports),
+      tokenCount: Number(row.token_count || 0),
+      createdAt: row.created_at,
+    })),
+    tokens: tokensRes.rows.map((row) => ({
+      id: String(row.id || ""),
+      userId: Number(row.user_id || 0),
+      username: String(row.username || ""),
+      symbol: String(row.symbol || ""),
+      mint: String(row.mint || ""),
+      selectedBot: String(row.selected_bot || "burn"),
+      active: Boolean(row.active),
+      disconnected: Boolean(row.disconnected),
+      deposit: String(row.deposit || ""),
+      createdAt: row.created_at,
+    })),
+    referralLeaders: referralsRes.rows.map((row) => ({
+      userId: Number(row.referrer_user_id || 0),
+      username: String(row.username || ""),
+      earnedSol: fromLamports(row.earned_lamports),
+      eventCount: Number(row.event_count || 0),
+    })),
+  };
+}
+
+export async function updateAdminProtocolSettings(userId, payload = {}) {
+  return withTx(async (client) => {
+    const scope = await resolveUserAccessScope(client, userId);
+    assertAdminPermission(scope, "Only the admin account can update protocol settings.");
+    const current = await getProtocolSettings(client);
+    const next = {
+      defaultFeeBps:
+        payload.defaultFeeBps === undefined ? current.defaultFeeBps : Math.max(0, Math.min(5000, Math.floor(Number(payload.defaultFeeBps || current.defaultFeeBps)))),
+      defaultTreasuryBps:
+        payload.defaultTreasuryBps === undefined ? current.defaultTreasuryBps : Math.max(0, Math.min(5000, Math.floor(Number(payload.defaultTreasuryBps || current.defaultTreasuryBps)))),
+      defaultBurnBps:
+        payload.defaultBurnBps === undefined ? current.defaultBurnBps : Math.max(0, Math.min(5000, Math.floor(Number(payload.defaultBurnBps || current.defaultBurnBps)))),
+      referredTreasuryBps:
+        payload.referredTreasuryBps === undefined ? current.referredTreasuryBps : Math.max(0, Math.min(5000, Math.floor(Number(payload.referredTreasuryBps || current.referredTreasuryBps)))),
+      referredBurnBps:
+        payload.referredBurnBps === undefined ? current.referredBurnBps : Math.max(0, Math.min(5000, Math.floor(Number(payload.referredBurnBps || current.referredBurnBps)))),
+      referredReferralBps:
+        payload.referredReferralBps === undefined ? current.referredReferralBps : Math.max(0, Math.min(5000, Math.floor(Number(payload.referredReferralBps || current.referredReferralBps)))),
+      personalBotMode:
+        payload.personalBotMode === undefined ? current.personalBotMode : normalizeModuleType(payload.personalBotMode, current.personalBotMode),
+      personalBotEnabled:
+        payload.personalBotEnabled === undefined ? current.personalBotEnabled : Boolean(payload.personalBotEnabled),
+    };
+
+    await client.query(
+      `
+        UPDATE protocol_settings
+        SET
+          default_fee_bps = $2,
+          default_treasury_bps = $3,
+          default_burn_bps = $4,
+          referred_treasury_bps = $5,
+          referred_burn_bps = $6,
+          referred_referral_bps = $7,
+          personal_bot_mode = $8,
+          personal_bot_enabled = $9,
+          updated_at = NOW()
+        WHERE id = $1
+      `,
+      [
+        1,
+        next.defaultFeeBps,
+        next.defaultTreasuryBps,
+        next.defaultBurnBps,
+        next.referredTreasuryBps,
+        next.referredBurnBps,
+        next.referredReferralBps,
+        next.personalBotMode,
+        next.personalBotEnabled,
+      ]
+    );
+
+    return getProtocolSettings(client);
+  });
+}
+
+export async function adminSetUserOg(userId, targetUserId, enabled) {
+  return withTx(async (client) => {
+    const scope = await resolveUserAccessScope(client, userId);
+    assertAdminPermission(scope, "Only the admin account can update OG accounts.");
+    const targetId = Math.max(0, Math.floor(Number(targetUserId || 0)));
+    if (!targetId) throw new Error("User id is required.");
+    await client.query(
+      `UPDATE users SET is_og = $2 WHERE id = $1`,
+      [targetId, Boolean(enabled)]
+    );
+    return { ok: true };
+  });
+}
+
+export async function adminSetUserReferrer(userId, targetUserId, referralCodeInput = "") {
+  return withTx(async (client) => {
+    const scope = await resolveUserAccessScope(client, userId);
+    assertAdminPermission(scope, "Only the admin account can update referrals.");
+    const targetId = Math.max(0, Math.floor(Number(targetUserId || 0)));
+    if (!targetId) throw new Error("User id is required.");
+
+    const referralCode = normalizeReferralCode(referralCodeInput);
+    let referrerId = null;
+    if (referralCode) {
+      const refRes = await client.query(
+        `SELECT id FROM users WHERE referral_code = $1 LIMIT 1`,
+        [referralCode]
+      );
+      if (!refRes.rowCount) throw new Error("Referral code not found.");
+      referrerId = Math.max(0, Math.floor(Number(refRes.rows[0].id || 0))) || null;
+      if (referrerId === targetId) {
+        throw new Error("Users cannot refer themselves.");
+      }
+    }
+
+    await client.query(
+      `UPDATE users SET referrer_user_id = $2 WHERE id = $1`,
+      [targetId, referrerId]
+    );
+    return { ok: true };
+  });
+}
+
+export async function adminArchiveToken(userId, tokenId) {
+  return withTx(async (client) => {
+    const scope = await resolveUserAccessScope(client, userId);
+    assertAdminPermission(scope, "Only the admin account can archive tokens.");
+    const tokenIdText = String(tokenId || "").trim();
+    if (!tokenIdText) throw new Error("Token id is required.");
+    await client.query(
+      `UPDATE tokens SET active = FALSE, disconnected = TRUE WHERE id = $1`,
+      [tokenIdText]
+    );
+    await client.query(
+      `UPDATE bot_modules SET enabled = FALSE WHERE token_id = $1`,
+      [tokenIdText]
+    );
+    return { ok: true };
+  });
+}
+
+export async function adminRestoreArchivedToken(userId, tokenId) {
+  return withTx(async (client) => {
+    const scope = await resolveUserAccessScope(client, userId);
+    assertAdminPermission(scope, "Only the admin account can restore tokens.");
+    const tokenIdText = String(tokenId || "").trim();
+    if (!tokenIdText) throw new Error("Token id is required.");
+    await client.query(
+      `UPDATE tokens SET active = FALSE, disconnected = FALSE WHERE id = $1`,
+      [tokenIdText]
+    );
+    return { ok: true };
+  });
 }
 
 export async function getPublicDashboard() {
@@ -6043,6 +6656,349 @@ async function incrementProtocolMetrics(client, delta = {}) {
   }
 }
 
+const DEFAULT_PROTOCOL_SETTINGS = Object.freeze({
+  defaultFeeBps: 1000,
+  defaultTreasuryBps: 500,
+  defaultBurnBps: 500,
+  referredTreasuryBps: 250,
+  referredBurnBps: 250,
+  referredReferralBps: 500,
+  personalBotMode: MODULE_TYPES.burn,
+  personalBotEnabled: true,
+});
+
+async function getProtocolSettings(client = pool) {
+  const queryable = client?.query ? client : pool;
+  const res = await queryable.query(
+    `
+      SELECT
+        default_fee_bps,
+        default_treasury_bps,
+        default_burn_bps,
+        referred_treasury_bps,
+        referred_burn_bps,
+        referred_referral_bps,
+        personal_bot_mode,
+        personal_bot_enabled
+      FROM protocol_settings
+      WHERE id = 1
+      LIMIT 1
+    `
+  ).catch(() => ({ rows: [] }));
+  const row = res.rows?.[0] || {};
+  return {
+    defaultFeeBps: Math.max(0, Math.floor(Number(row.default_fee_bps || DEFAULT_PROTOCOL_SETTINGS.defaultFeeBps))),
+    defaultTreasuryBps: Math.max(0, Math.floor(Number(row.default_treasury_bps || DEFAULT_PROTOCOL_SETTINGS.defaultTreasuryBps))),
+    defaultBurnBps: Math.max(0, Math.floor(Number(row.default_burn_bps || DEFAULT_PROTOCOL_SETTINGS.defaultBurnBps))),
+    referredTreasuryBps: Math.max(0, Math.floor(Number(row.referred_treasury_bps || DEFAULT_PROTOCOL_SETTINGS.referredTreasuryBps))),
+    referredBurnBps: Math.max(0, Math.floor(Number(row.referred_burn_bps || DEFAULT_PROTOCOL_SETTINGS.referredBurnBps))),
+    referredReferralBps: Math.max(0, Math.floor(Number(row.referred_referral_bps || DEFAULT_PROTOCOL_SETTINGS.referredReferralBps))),
+    personalBotMode: normalizeModuleType(row.personal_bot_mode, DEFAULT_PROTOCOL_SETTINGS.personalBotMode),
+    personalBotEnabled:
+      typeof row.personal_bot_enabled === "boolean"
+        ? row.personal_bot_enabled
+      : DEFAULT_PROTOCOL_SETTINGS.personalBotEnabled,
+  };
+}
+
+async function getProtocolRuntimeState(client, stateKey, fallback = {}) {
+  const key = String(stateKey || "").trim();
+  if (!key) return { ...(fallback || {}) };
+  const res = await client.query(
+    `
+      SELECT state_json
+      FROM protocol_runtime_state
+      WHERE state_key = $1
+      LIMIT 1
+    `,
+    [key]
+  );
+  return {
+    ...(fallback || {}),
+    ...((res.rows[0]?.state_json && typeof res.rows[0].state_json === "object") ? res.rows[0].state_json : {}),
+  };
+}
+
+async function setProtocolRuntimeState(client, stateKey, state = {}) {
+  const key = String(stateKey || "").trim();
+  if (!key) return;
+  await client.query(
+    `
+      INSERT INTO protocol_runtime_state (state_key, state_json, updated_at)
+      VALUES ($1, $2::jsonb, NOW())
+      ON CONFLICT (state_key) DO UPDATE
+      SET state_json = EXCLUDED.state_json,
+          updated_at = NOW()
+    `,
+    [key, JSON.stringify(state || {})]
+  );
+}
+
+async function getUserBillingProfile(client, userId) {
+  const res = await client.query(
+    `
+      SELECT
+        id,
+        username,
+        COALESCE(is_og, FALSE) AS is_og,
+        fee_bps_override,
+        referrer_user_id,
+        COALESCE(referral_code, '') AS referral_code
+      FROM users
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [userId]
+  );
+  if (!res.rowCount) {
+    throw new Error("User not found.");
+  }
+  const row = res.rows[0];
+  return {
+    userId: Number(row.id || 0),
+    username: String(row.username || ""),
+    isOg: Boolean(row.is_og),
+    feeBpsOverride:
+      row.fee_bps_override == null ? null : Math.max(0, Math.floor(Number(row.fee_bps_override || 0))),
+    referrerUserId:
+      row.referrer_user_id == null ? null : Math.max(0, Math.floor(Number(row.referrer_user_id || 0))),
+    referralCode: String(row.referral_code || ""),
+  };
+}
+
+function splitLamportsByBps(totalLamports, bpsMap = {}) {
+  const total = Math.max(0, Math.floor(Number(totalLamports || 0)));
+  const entries = Object.entries(bpsMap).map(([key, value]) => [key, Math.max(0, Math.floor(Number(value || 0)))]);
+  const allocations = {};
+  let remaining = total;
+  let bpsRemaining = entries.reduce((sum, [, bps]) => sum + bps, 0);
+  entries.forEach(([key, bps], index) => {
+    if (index === entries.length - 1 || bpsRemaining <= 0) {
+      allocations[key] = remaining;
+      remaining = 0;
+      return;
+    }
+    const piece = Math.min(remaining, Math.floor((total * bps) / 10000));
+    allocations[key] = piece;
+    remaining -= piece;
+    bpsRemaining -= bps;
+  });
+  return allocations;
+}
+
+async function accrueReferralEarning(client, entry = {}) {
+  const referrerUserId = Math.max(0, Math.floor(Number(entry.referrerUserId || 0)));
+  const userId = Math.max(0, Math.floor(Number(entry.userId || 0)));
+  const referralFeeLamports = Math.max(0, Math.floor(Number(entry.referralFeeLamports || 0)));
+  if (!referrerUserId || !userId || referralFeeLamports <= 0) return;
+
+  await client.query(
+    `
+      INSERT INTO referral_events (
+        user_id,
+        referrer_user_id,
+        token_id,
+        token_symbol,
+        module_type,
+        gross_fee_lamports,
+        treasury_fee_lamports,
+        burn_fee_lamports,
+        referral_fee_lamports,
+        tx,
+        metadata
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    `,
+    [
+      userId,
+      referrerUserId,
+      entry.tokenId ? String(entry.tokenId) : null,
+      String(entry.symbol || "").trim().toUpperCase() || "UNKNOWN",
+      entry.moduleType ? String(entry.moduleType) : null,
+      Math.max(0, Math.floor(Number(entry.grossFeeLamports || 0))),
+      Math.max(0, Math.floor(Number(entry.treasuryFeeLamports || 0))),
+      Math.max(0, Math.floor(Number(entry.burnFeeLamports || 0))),
+      referralFeeLamports,
+      entry.tx ? String(entry.tx) : null,
+      entry.metadata && typeof entry.metadata === "object" ? JSON.stringify(entry.metadata) : null,
+    ]
+  );
+
+  await client.query(
+    `
+      INSERT INTO referral_balances (
+        referrer_user_id,
+        total_earned_lamports,
+        pending_lamports,
+        claimed_lamports
+      )
+      VALUES ($1, $2, $2, 0)
+      ON CONFLICT (referrer_user_id) DO UPDATE
+      SET
+        total_earned_lamports = referral_balances.total_earned_lamports + EXCLUDED.total_earned_lamports,
+        pending_lamports = referral_balances.pending_lamports + EXCLUDED.pending_lamports,
+        updated_at = NOW()
+    `,
+    [referrerUserId, referralFeeLamports]
+  );
+}
+
+async function applyProtocolFeeFlow(client, options = {}) {
+  const connection = options.connection;
+  const signer = options.signer;
+  const userId = Math.max(0, Math.floor(Number(options.userId || 0)));
+  const tokenId = options.tokenId ? String(options.tokenId) : null;
+  const symbol = String(options.symbol || "").trim().toUpperCase() || "UNKNOWN";
+  const moduleType = options.moduleType ? String(options.moduleType) : null;
+  const eventPrefix = String(options.eventPrefix || makeId("fee"));
+  const totalLamports = Math.max(0, Math.floor(Number(options.totalLamports || 0)));
+  const treasuryMessage = String(options.treasuryMessage || "Protocol fee sent to treasury");
+  const burnMessage = String(options.burnMessage || "Protocol fee sent to dev burn wallet");
+  const referralMessage = String(options.referralMessage || "Referral earnings accrued");
+  if (!connection || !signer || !userId || totalLamports <= 0) {
+    return {
+      feeLamports: 0,
+      treasuryLamports: 0,
+      burnLamports: 0,
+      referralLamports: 0,
+      netLamports: Math.max(0, totalLamports),
+      txCreated: 0,
+    };
+  }
+
+  const protocolSettings = await getProtocolSettings(client);
+  const billing = await getUserBillingProfile(client, userId);
+  const baseFeeBps =
+    billing.feeBpsOverride != null
+      ? billing.feeBpsOverride
+      : protocolSettings.defaultFeeBps;
+
+  if (billing.isOg || baseFeeBps <= 0) {
+    return {
+      feeLamports: 0,
+      treasuryLamports: 0,
+      burnLamports: 0,
+      referralLamports: 0,
+      netLamports: totalLamports,
+      txCreated: 0,
+      billing,
+    };
+  }
+
+  let splitBps;
+  if (billing.referrerUserId) {
+    const referredTotal =
+      protocolSettings.referredTreasuryBps +
+      protocolSettings.referredBurnBps +
+      protocolSettings.referredReferralBps;
+    const scale = referredTotal > 0 ? baseFeeBps / referredTotal : 0;
+    splitBps = {
+      treasury: Math.floor(protocolSettings.referredTreasuryBps * scale),
+      burn: Math.floor(protocolSettings.referredBurnBps * scale),
+      referral: Math.max(0, baseFeeBps) - Math.floor(protocolSettings.referredTreasuryBps * scale) - Math.floor(protocolSettings.referredBurnBps * scale),
+    };
+  } else {
+    const defaultTotal = protocolSettings.defaultTreasuryBps + protocolSettings.defaultBurnBps;
+    const scale = defaultTotal > 0 ? baseFeeBps / defaultTotal : 0;
+    splitBps = {
+      treasury: Math.floor(protocolSettings.defaultTreasuryBps * scale),
+      burn: Math.max(0, baseFeeBps) - Math.floor(protocolSettings.defaultTreasuryBps * scale),
+      referral: 0,
+    };
+  }
+
+  const feeLamports = Math.min(totalLamports, Math.floor((totalLamports * baseFeeBps) / 10000));
+  const allocations = splitLamportsByBps(feeLamports, splitBps);
+  let treasuryLamports = Math.max(0, Math.floor(Number(allocations.treasury || 0)));
+  let burnLamports = Math.max(0, Math.floor(Number(allocations.burn || 0)));
+  const referralLamports = Math.max(0, Math.floor(Number(allocations.referral || 0)));
+  if (burnLamports > 0 && !config.devWalletPublicKey) {
+    treasuryLamports += burnLamports;
+    burnLamports = 0;
+  }
+  const treasuryTransferLamports = treasuryLamports + referralLamports;
+  let txCreated = 0;
+  let treasurySig = null;
+  let burnSig = null;
+
+  if (treasuryTransferLamports > 0) {
+    treasurySig = await sendSolTransfer(connection, signer, config.treasuryWallet, treasuryTransferLamports);
+    txCreated += treasurySig ? 1 : 0;
+  }
+  if (burnLamports > 0 && config.devWalletPublicKey) {
+    burnSig = await sendSolTransfer(connection, signer, config.devWalletPublicKey, burnLamports);
+    txCreated += burnSig ? 1 : 0;
+    await addProtocolFeeCredit(client, {
+      tokenId,
+      userId,
+      symbol,
+      lamports: burnLamports,
+    });
+  }
+
+  if (treasuryLamports > 0) {
+    await insertEvent(
+      client,
+      userId,
+      tokenId,
+      symbol,
+      "fee",
+      `${treasuryMessage} (${fromLamports(treasuryLamports).toFixed(6)} SOL)`,
+      treasurySig,
+      { moduleType, amount: fromLamports(treasuryLamports), idempotencyKey: `${eventPrefix}:fee:treasury` }
+    );
+  }
+
+  if (burnLamports > 0) {
+    await insertEvent(
+      client,
+      userId,
+      tokenId,
+      symbol,
+      "fee",
+      `${burnMessage} (${fromLamports(burnLamports).toFixed(6)} SOL)`,
+      burnSig,
+      { moduleType, amount: fromLamports(burnLamports), idempotencyKey: `${eventPrefix}:fee:burn` }
+    );
+  }
+
+  if (billing.referrerUserId && referralLamports > 0) {
+    await accrueReferralEarning(client, {
+      userId,
+      referrerUserId: billing.referrerUserId,
+      tokenId,
+      symbol,
+      moduleType,
+      grossFeeLamports: feeLamports,
+      treasuryFeeLamports: treasuryLamports,
+      burnFeeLamports: burnLamports,
+      referralFeeLamports: referralLamports,
+      tx: treasurySig,
+      metadata: { allocation: "protocol_fee" },
+    });
+    await insertEvent(
+      client,
+      userId,
+      tokenId,
+      symbol,
+      "fee",
+      `${referralMessage} (${fromLamports(referralLamports).toFixed(6)} SOL)`,
+      treasurySig,
+      { moduleType, amount: fromLamports(referralLamports), idempotencyKey: `${eventPrefix}:fee:referral` }
+    );
+  }
+
+  return {
+    feeLamports,
+    treasuryLamports,
+    burnLamports,
+    referralLamports,
+    netLamports: Math.max(0, totalLamports - feeLamports),
+    txCreated,
+    billing,
+  };
+}
+
 async function addProtocolFeeCredit(client, credit = {}) {
   const tokenIdRaw = credit?.tokenId;
   const tokenId = tokenIdRaw == null ? null : String(tokenIdRaw).trim();
@@ -6214,6 +7170,12 @@ async function enqueueDueJobs(client) {
       WHERE m.enabled = TRUE
         AND t.active = TRUE
         AND (m.next_run_at IS NULL OR m.next_run_at <= NOW())
+        AND NOT EXISTS (
+          SELECT 1
+          FROM bot_jobs j
+          WHERE j.module_id = m.id
+            AND j.status IN ('queued', 'running')
+        )
       ORDER BY m.next_run_at NULLS FIRST, m.id
       LIMIT $1
       FOR UPDATE SKIP LOCKED
@@ -6918,46 +7880,21 @@ async function runBurnExecutor(client, row) {
     return { txCreated, burnedAmount: 0 };
   }
 
-  const feeLamports = Math.floor(delta * 0.05);
-  const treasuryLamports = Math.floor(feeLamports / 2);
-  const devLamports = feeLamports - treasuryLamports;
-  const netLamports = Math.max(0, delta - feeLamports);
-
-  if (treasuryLamports > 0) {
-    const sig = await sendSolTransfer(connection, signer, config.treasuryWallet, treasuryLamports);
-    txCreated += sig ? 1 : 0;
-    await insertEvent(
-      client,
-      row.user_id,
-      row.token_id,
-      row.symbol,
-      "fee",
-      `Protocol fee sent to treasury (${fromLamports(treasuryLamports).toFixed(6)} SOL)`,
-      sig,
-      { moduleType: MODULE_TYPES.burn, amount: fromLamports(treasuryLamports), idempotencyKey: `${eventPrefix}:fee:treasury` }
-    );
-  }
-
-  if (devLamports > 0 && config.devWalletPublicKey) {
-    const sig = await sendSolTransfer(connection, signer, config.devWalletPublicKey, devLamports);
-    txCreated += sig ? 1 : 0;
-    await insertEvent(
-      client,
-      row.user_id,
-      row.token_id,
-      row.symbol,
-      "fee",
-      `Protocol fee sent to dev burn wallet (${fromLamports(devLamports).toFixed(6)} SOL)`,
-      sig,
-      { moduleType: MODULE_TYPES.burn, amount: fromLamports(devLamports), idempotencyKey: `${eventPrefix}:fee:dev` }
-    );
-    await addProtocolFeeCredit(client, {
-      tokenId: row.token_id,
-      userId: row.user_id,
-      symbol: row.symbol,
-      lamports: devLamports,
-    });
-  }
+  const feeResult = await applyProtocolFeeFlow(client, {
+    connection,
+    signer,
+    userId: row.user_id,
+    tokenId: row.token_id,
+    symbol: row.symbol,
+    moduleType: MODULE_TYPES.burn,
+    eventPrefix,
+    totalLamports: delta,
+    treasuryMessage: "Protocol fee sent to treasury",
+    burnMessage: "Protocol fee sent to dev burn wallet",
+    referralMessage: "Referral reserve accrued",
+  });
+  txCreated += Number(feeResult.txCreated || 0);
+  const netLamports = Math.max(0, Number(feeResult.netLamports || 0));
 
   if (netLamports <= minProcessLamports) {
     const balanceAfterFee = await connection.getBalance(signer.publicKey, "confirmed");
@@ -7286,43 +8223,20 @@ async function runVolumeExecutor(client, row) {
   state.ignoreInflowLamports = Math.max(0, ignore - rawDelta);
 
   if (effectiveDelta > toLamports(0.0001)) {
-    const feeLamports = Math.floor(effectiveDelta * 0.05);
-    const treasuryLamports = Math.floor(feeLamports / 2);
-    const devLamports = feeLamports - treasuryLamports;
-    if (treasuryLamports > 0) {
-      const sig = await sendSolTransfer(connection, depositSigner, config.treasuryWallet, treasuryLamports);
-      txCreated += sig ? 1 : 0;
-      await insertEvent(
-        client,
-        row.user_id,
-        row.token_id,
-        row.symbol,
-        "fee",
-        `Volume fee to treasury (${fromLamports(treasuryLamports).toFixed(6)} SOL)`,
-        sig,
-        { moduleType: MODULE_TYPES.volume, amount: fromLamports(treasuryLamports), idempotencyKey: `${eventPrefix}:fee:treasury` }
-      );
-    }
-    if (devLamports > 0 && config.devWalletPublicKey) {
-      const sig = await sendSolTransfer(connection, depositSigner, config.devWalletPublicKey, devLamports);
-      txCreated += sig ? 1 : 0;
-      await insertEvent(
-        client,
-        row.user_id,
-        row.token_id,
-        row.symbol,
-        "fee",
-        `Volume fee to dev burn wallet (${fromLamports(devLamports).toFixed(6)} SOL)`,
-        sig,
-        { moduleType: MODULE_TYPES.volume, amount: fromLamports(devLamports), idempotencyKey: `${eventPrefix}:fee:dev` }
-      );
-      await addProtocolFeeCredit(client, {
-        tokenId: row.token_id,
-        userId: row.user_id,
-        symbol: row.symbol,
-        lamports: devLamports,
-      });
-    }
+    const feeResult = await applyProtocolFeeFlow(client, {
+      connection,
+      signer: depositSigner,
+      userId: row.user_id,
+      tokenId: row.token_id,
+      symbol: row.symbol,
+      moduleType: MODULE_TYPES.volume,
+      eventPrefix,
+      totalLamports: effectiveDelta,
+      treasuryMessage: "Volume fee to treasury",
+      burnMessage: "Volume fee to dev burn wallet",
+      referralMessage: "Volume referral reserve accrued",
+    });
+    txCreated += Number(feeResult.txCreated || 0);
   }
 
   if (!state.fannedOut && wallets.length) {
@@ -7691,43 +8605,20 @@ async function runDcaExecutor(client, row) {
   state.ignoreInflowLamports = Math.max(0, ignore - rawDelta);
 
   if (effectiveDelta > toLamports(0.0001)) {
-    const feeLamports = Math.floor(effectiveDelta * 0.05);
-    const treasuryLamports = Math.floor(feeLamports / 2);
-    const devLamports = feeLamports - treasuryLamports;
-    if (treasuryLamports > 0) {
-      const sig = await sendSolTransfer(connection, depositSigner, config.treasuryWallet, treasuryLamports);
-      txCreated += sig ? 1 : 0;
-      await insertEvent(
-        client,
-        row.user_id,
-        row.token_id,
-        row.symbol,
-        "fee",
-        `${moduleLabel} fee to treasury (${fromLamports(treasuryLamports).toFixed(6)} SOL)`,
-        sig,
-        { moduleType, amount: fromLamports(treasuryLamports), idempotencyKey: `${eventPrefix}:fee:treasury` }
-      );
-    }
-    if (devLamports > 0 && config.devWalletPublicKey) {
-      const sig = await sendSolTransfer(connection, depositSigner, config.devWalletPublicKey, devLamports);
-      txCreated += sig ? 1 : 0;
-      await insertEvent(
-        client,
-        row.user_id,
-        row.token_id,
-        row.symbol,
-        "fee",
-        `${moduleLabel} fee to dev burn wallet (${fromLamports(devLamports).toFixed(6)} SOL)`,
-        sig,
-        { moduleType, amount: fromLamports(devLamports), idempotencyKey: `${eventPrefix}:fee:dev` }
-      );
-      await addProtocolFeeCredit(client, {
-        tokenId: row.token_id,
-        userId: row.user_id,
-        symbol: row.symbol,
-        lamports: devLamports,
-      });
-    }
+    const feeResult = await applyProtocolFeeFlow(client, {
+      connection,
+      signer: depositSigner,
+      userId: row.user_id,
+      tokenId: row.token_id,
+      symbol: row.symbol,
+      moduleType,
+      eventPrefix,
+      totalLamports: effectiveDelta,
+      treasuryMessage: `${moduleLabel} fee to treasury`,
+      burnMessage: `${moduleLabel} fee to dev burn wallet`,
+      referralMessage: `${moduleLabel} referral reserve accrued`,
+    });
+    txCreated += Number(feeResult.txCreated || 0);
   }
 
   if (!state.fannedOut && wallets.length) {
@@ -8096,43 +8987,20 @@ async function runRekindleExecutor(client, row) {
   state.ignoreInflowLamports = Math.max(0, ignore - rawDelta);
 
   if (effectiveDelta > toLamports(0.0001)) {
-    const feeLamports = Math.floor(effectiveDelta * 0.05);
-    const treasuryLamports = Math.floor(feeLamports / 2);
-    const devLamports = feeLamports - treasuryLamports;
-    if (treasuryLamports > 0) {
-      const sig = await sendSolTransfer(connection, depositSigner, config.treasuryWallet, treasuryLamports);
-      txCreated += sig ? 1 : 0;
-      await insertEvent(
-        client,
-        row.user_id,
-        row.token_id,
-        row.symbol,
-        "fee",
-        `${moduleLabel} fee to treasury (${fromLamports(treasuryLamports).toFixed(6)} SOL)`,
-        sig,
-        { moduleType, amount: fromLamports(treasuryLamports), idempotencyKey: `${eventPrefix}:fee:treasury` }
-      );
-    }
-    if (devLamports > 0 && config.devWalletPublicKey) {
-      const sig = await sendSolTransfer(connection, depositSigner, config.devWalletPublicKey, devLamports);
-      txCreated += sig ? 1 : 0;
-      await insertEvent(
-        client,
-        row.user_id,
-        row.token_id,
-        row.symbol,
-        "fee",
-        `${moduleLabel} fee to dev burn wallet (${fromLamports(devLamports).toFixed(6)} SOL)`,
-        sig,
-        { moduleType, amount: fromLamports(devLamports), idempotencyKey: `${eventPrefix}:fee:dev` }
-      );
-      await addProtocolFeeCredit(client, {
-        tokenId: row.token_id,
-        userId: row.user_id,
-        symbol: row.symbol,
-        lamports: devLamports,
-      });
-    }
+    const feeResult = await applyProtocolFeeFlow(client, {
+      connection,
+      signer: depositSigner,
+      userId: row.user_id,
+      tokenId: row.token_id,
+      symbol: row.symbol,
+      moduleType,
+      eventPrefix,
+      totalLamports: effectiveDelta,
+      treasuryMessage: `${moduleLabel} fee to treasury`,
+      burnMessage: `${moduleLabel} fee to dev burn wallet`,
+      referralMessage: `${moduleLabel} referral reserve accrued`,
+    });
+    txCreated += Number(feeResult.txCreated || 0);
   }
 
   if (!state.fannedOut && wallets.length) {
@@ -8718,43 +9586,20 @@ async function runMarketMakerExecutor(client, row) {
   state.ignoreInflowLamports = Math.max(0, ignore - rawDelta);
 
   if (effectiveDelta > toLamports(0.0001)) {
-    const feeLamports = Math.floor(effectiveDelta * 0.05);
-    const treasuryLamports = Math.floor(feeLamports / 2);
-    const devLamports = feeLamports - treasuryLamports;
-    if (treasuryLamports > 0) {
-      const sig = await sendSolTransfer(connection, depositSigner, config.treasuryWallet, treasuryLamports);
-      txCreated += sig ? 1 : 0;
-      await insertEvent(
-        client,
-        row.user_id,
-        row.token_id,
-        row.symbol,
-        "fee",
-        `${moduleLabel} fee to treasury (${fromLamports(treasuryLamports).toFixed(6)} SOL)`,
-        sig,
-        { moduleType, amount: fromLamports(treasuryLamports), idempotencyKey: `${eventPrefix}:fee:treasury` }
-      );
-    }
-    if (devLamports > 0 && config.devWalletPublicKey) {
-      const sig = await sendSolTransfer(connection, depositSigner, config.devWalletPublicKey, devLamports);
-      txCreated += sig ? 1 : 0;
-      await insertEvent(
-        client,
-        row.user_id,
-        row.token_id,
-        row.symbol,
-        "fee",
-        `${moduleLabel} fee to dev burn wallet (${fromLamports(devLamports).toFixed(6)} SOL)`,
-        sig,
-        { moduleType, amount: fromLamports(devLamports), idempotencyKey: `${eventPrefix}:fee:dev` }
-      );
-      await addProtocolFeeCredit(client, {
-        tokenId: row.token_id,
-        userId: row.user_id,
-        symbol: row.symbol,
-        lamports: devLamports,
-      });
-    }
+    const feeResult = await applyProtocolFeeFlow(client, {
+      connection,
+      signer: depositSigner,
+      userId: row.user_id,
+      tokenId: row.token_id,
+      symbol: row.symbol,
+      moduleType,
+      eventPrefix,
+      totalLamports: effectiveDelta,
+      treasuryMessage: `${moduleLabel} fee to treasury`,
+      burnMessage: `${moduleLabel} fee to dev burn wallet`,
+      referralMessage: `${moduleLabel} referral reserve accrued`,
+    });
+    txCreated += Number(feeResult.txCreated || 0);
   }
 
   if (!state.fannedOut && wallets.length) {
@@ -8933,6 +9778,116 @@ async function runMarketMakerExecutor(client, row) {
     posture: plan.posture,
     inventoryPct: plan.inventoryPct,
     targetInventoryPct: plan.targetInventoryPct,
+  };
+}
+
+function getProtocolPersonalClaimMints() {
+  return [
+    ...new Set(
+      [config.emberTokenMint, ...(Array.isArray(config.personalCreatorMints) ? config.personalCreatorMints : [])]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+    ),
+  ];
+}
+
+function makeProtocolPersonalEventLogger(client, protocolUserId, personalMode, logPrefix = "personal") {
+  return async (type, message, tx = null, options = {}) => {
+    const metadata = {
+      personalMode,
+      ...(options?.metadata && typeof options.metadata === "object" ? options.metadata : {}),
+    };
+    try {
+      await insertEvent(
+        client,
+        protocolUserId,
+        null,
+        "EMBER",
+        type,
+        message,
+        tx,
+        { ...options, moduleType: MODULE_TYPES.personalBurn, metadata }
+      );
+    } catch (error) {
+      console.warn(`[${logPrefix}] protocol event insert failed: ${error?.message || error}`);
+    }
+  };
+}
+
+async function runPersonalCreatorClaimCycle({
+  client,
+  connection,
+  signer,
+  claimMints,
+  moduleType,
+  moduleLabel,
+  eventPrefix,
+  safeProtocolEvent,
+  logPrefix,
+  poolHint = "auto",
+}) {
+  const creatorMints = Array.isArray(claimMints) ? claimMints : [];
+  const claimMinSol = Math.max(0, Number(config.personalClaimMinSol || 0));
+  const estimatedClaimFeeSol = Math.max(0.00015, Number(config.basePriorityFeeSol || 0.0005) + 0.0001);
+  let txCreated = 0;
+  let claimSuccess = 0;
+  let claimSkipped = 0;
+  let claimFailures = 0;
+  let claimedLamports = 0;
+
+  for (const mint of creatorMints) {
+    try {
+      const previewLamports = await previewCreatorFeeLamports(connection, signer.publicKey, mint);
+      const previewSol = fromLamports(previewLamports);
+      if (claimMinSol > 0 && previewSol < Math.max(claimMinSol, estimatedClaimFeeSol)) {
+        claimSkipped += 1;
+        console.log(
+          `[${logPrefix}] claim skipped for ${mint}: preview ${previewSol.toFixed(6)} < min ${Math.max(
+            claimMinSol,
+            estimatedClaimFeeSol
+          ).toFixed(6)} SOL`
+        );
+        continue;
+      }
+      const claimSig = await pumpPortalCollectCreatorFee({
+        connection,
+        signer,
+        mint,
+        pool: poolHint,
+      });
+      txCreated += 1;
+      claimSuccess += 1;
+      const summary = await getClaimExecutionSummary(connection, claimSig, signer.publicKey.toBase58());
+      const gross = Math.max(0, Number(summary.grossClaimLamports || 0));
+      claimedLamports += gross;
+      if (gross > 0) {
+        await safeProtocolEvent(
+          "claim",
+          `${moduleLabel} claimed creator rewards (${fromLamports(gross).toFixed(6)} SOL)`,
+          claimSig,
+          {
+            amount: fromLamports(gross),
+            idempotencyKey: `${eventPrefix}:claim:${moduleType}:${mint}`,
+          }
+        );
+      }
+    } catch (error) {
+      if (isSoftClaimError(error)) {
+        claimSkipped += 1;
+        console.log(`[${logPrefix}] claim skipped for ${mint}: ${error?.message || error}`);
+      } else {
+        claimFailures += 1;
+        console.warn(`[${logPrefix}] claim failed for ${mint}: ${error?.message || error}`);
+      }
+    }
+  }
+
+  return {
+    txCreated,
+    claimSuccess,
+    claimSkipped,
+    claimFailures,
+    claimedLamports,
   };
 }
 
@@ -9238,6 +10193,536 @@ async function runPersonalBurnExecutor(client) {
     ).toFixed(6)}`
   );
   return { ran: true, txCreated, claimSuccess, claimFailures, spendableLamports: spendable };
+}
+
+async function runPersonalVolumeExecutor(client) {
+  if (!config.devWalletPrivateKey || !config.devWalletPublicKey || !config.emberTokenMint) {
+    return { ran: false, txCreated: 0 };
+  }
+
+  const connection = getConnection();
+  const signer = Keypair.fromSecretKey(config.devWalletPrivateKey);
+  const protocolUserId = await getOrCreateProtocolSystemUserId(client);
+  const protocolEventPrefix = `protocol:volume:${Date.now()}`;
+  let txCreated = 0;
+  let claimSuccess = 0;
+  let claimSkipped = 0;
+  let claimFailures = 0;
+  let claimedLamports = 0;
+
+  const safeProtocolEvent = async (type, message, tx = null, options = {}) => {
+    try {
+      await insertEvent(
+        client,
+        protocolUserId,
+        null,
+        "EMBER",
+        type,
+        message,
+        tx,
+        { moduleType: MODULE_TYPES.personalBurn, ...options }
+      );
+    } catch (error) {
+      console.warn(`[personal-volume] protocol event insert failed: ${error?.message || error}`);
+    }
+  };
+
+  const reserveLamports = toLamports(Math.max(0.001, Number(config.devWalletSolReserve || 0.01)));
+  const claimMinSol = Math.max(0, Number(config.personalClaimMinSol || 0));
+  const estimatedClaimFeeSol = Math.max(0.00015, Number(config.basePriorityFeeSol || 0.0005) + 0.0001);
+
+  const creatorMints = [
+    ...new Set(
+      [
+        config.emberTokenMint,
+        ...(Array.isArray(config.personalCreatorMints) ? config.personalCreatorMints : []),
+      ]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+    ),
+  ];
+
+  for (const mint of creatorMints) {
+    try {
+      const previewLamports = await previewCreatorFeeLamports(connection, signer.publicKey, mint);
+      const previewSol = fromLamports(previewLamports);
+      if (claimMinSol > 0 && previewSol < Math.max(claimMinSol, estimatedClaimFeeSol)) {
+        claimSkipped += 1;
+        console.log(
+          `[personal-volume] claim skipped for ${mint}: preview ${previewSol.toFixed(6)} < min ${Math.max(
+            claimMinSol,
+            estimatedClaimFeeSol
+          ).toFixed(6)} SOL`
+        );
+        continue;
+      }
+      const claimSig = await pumpPortalCollectCreatorFee({
+        connection,
+        signer,
+        mint,
+        pool: "auto",
+      });
+      txCreated += 1;
+      claimSuccess += 1;
+      const summary = await getClaimExecutionSummary(connection, claimSig, signer.publicKey.toBase58());
+      const gross = Math.max(0, Number(summary.grossClaimLamports || 0));
+      claimedLamports += gross;
+      if (gross > 0) {
+        await safeProtocolEvent(
+          "claim",
+          `Protocol volume claimed creator rewards (${fromLamports(gross).toFixed(6)} SOL)`,
+          claimSig,
+          {
+            amount: fromLamports(gross),
+            idempotencyKey: `${protocolEventPrefix}:claim:${mint}`,
+          }
+        );
+      }
+    } catch (error) {
+      if (isSoftClaimError(error)) {
+        claimSkipped += 1;
+        console.log(`[personal-volume] claim skipped for ${mint}: ${error?.message || error}`);
+      } else {
+        claimFailures += 1;
+        console.warn(`[personal-volume] claim failed for ${mint}: ${error?.message || error}`);
+      }
+    }
+  }
+
+  const balanceLamports = await connection.getBalance(signer.publicKey, "confirmed");
+  const spendableLamports = Math.max(0, balanceLamports - reserveLamports);
+  const tokenBalance = await getOwnerTokenBalanceUi(connection, signer.publicKey, config.emberTokenMint);
+
+  if (spendableLamports <= toLamports(0.0005) && tokenBalance <= 0.000001) {
+    await incrementProtocolMetrics(client, {
+      totalBotTransactions: txCreated,
+      rewardsProcessedSol: fromLamports(claimedLamports),
+    });
+    console.log(
+      `[personal-volume] no actionable balance (${fromLamports(balanceLamports).toFixed(6)} total, reserve ${fromLamports(
+        reserveLamports
+      ).toFixed(6)}) claims_ok=${claimSuccess} claims_skip=${claimSkipped} claims_fail=${claimFailures}`
+    );
+    return { ran: true, txCreated, claimSuccess, claimFailures, spendableLamports };
+  }
+
+  let action = tokenBalance <= 0.000001 ? "buy" : spendableLamports <= toLamports(0.0005) ? "sell" : Math.random() < 0.55 ? "buy" : "sell";
+
+  if (action === "buy") {
+    const spendableSol = fromLamports(spendableLamports);
+    const tradeSol = Math.max(0.0005, Math.min(spendableSol * 0.65, Math.max(0.0025, spendableSol * (0.28 + Math.random() * 0.22))));
+    if (tradeSol > 0.0005) {
+      const sig = await pumpPortalTrade({
+        connection,
+        signer,
+        mint: config.emberTokenMint,
+        action: "buy",
+        amount: Number(tradeSol.toFixed(6)),
+        denominatedInSol: true,
+        slippage: 10,
+        pool: "auto",
+      });
+      txCreated += 1;
+      await safeProtocolEvent(
+        "buy",
+        `Protocol volume buy (${tradeSol.toFixed(6)} SOL)`,
+        sig,
+        {
+          amount: tradeSol,
+          idempotencyKey: `${protocolEventPrefix}:buy`,
+        }
+      );
+    }
+  } else if (tokenBalance > 0.000001) {
+    const sellAmount = Number((tokenBalance * (0.2 + Math.random() * 0.35)).toFixed(6));
+    if (sellAmount > 0) {
+      const sig = await pumpPortalTrade({
+        connection,
+        signer,
+        mint: config.emberTokenMint,
+        action: "sell",
+        amount: sellAmount,
+        denominatedInSol: false,
+        slippage: 10,
+        pool: "auto",
+      });
+      txCreated += 1;
+      await safeProtocolEvent(
+        "sell",
+        `Protocol volume sell (${sellAmount.toFixed(6)} EMBER)`,
+        sig,
+        {
+          amount: sellAmount,
+          idempotencyKey: `${protocolEventPrefix}:sell`,
+        }
+      );
+    }
+  }
+
+  await incrementProtocolMetrics(client, {
+    totalBotTransactions: txCreated,
+    rewardsProcessedSol: fromLamports(claimedLamports),
+  });
+  console.log(
+    `[personal-volume] executed tx=${txCreated} claims_ok=${claimSuccess} claims_skip=${claimSkipped} claims_fail=${claimFailures} spendable=${fromLamports(
+      spendableLamports
+    ).toFixed(6)} token_balance=${Number(tokenBalance || 0).toFixed(6)}`
+  );
+  return { ran: true, txCreated, claimSuccess, claimFailures, spendableLamports };
+}
+
+async function runPersonalDcaExecutor(client) {
+  if (!config.devWalletPrivateKey || !config.devWalletPublicKey || !config.emberTokenMint) {
+    return { ran: false, txCreated: 0 };
+  }
+
+  const connection = getConnection();
+  const signer = Keypair.fromSecretKey(config.devWalletPrivateKey);
+  const protocolUserId = await getOrCreateProtocolSystemUserId(client);
+  const protocolEventPrefix = `protocol:dca:${Date.now()}`;
+  const safeProtocolEvent = makeProtocolPersonalEventLogger(
+    client,
+    protocolUserId,
+    MODULE_TYPES.dca,
+    "personal-dca"
+  );
+  const configJson = deriveDcaConfig(defaultDcaModuleConfig());
+  const reserveLamports = toLamports(Math.max(0.001, Number(config.devWalletSolReserve || configJson.reserveSol || 0.01)));
+
+  const claimResult = await runPersonalCreatorClaimCycle({
+    client,
+    connection,
+    signer,
+    claimMints: getProtocolPersonalClaimMints(),
+    moduleType: MODULE_TYPES.dca,
+    moduleLabel: "Protocol DCA",
+    eventPrefix: protocolEventPrefix,
+    safeProtocolEvent,
+    logPrefix: "personal-dca",
+  });
+
+  let txCreated = Number(claimResult.txCreated || 0);
+  const balanceLamports = await connection.getBalance(signer.publicKey, "confirmed");
+  const spendableLamports = Math.max(0, balanceLamports - reserveLamports);
+  const walletState = {
+    wallet_pubkey: signer.publicKey.toBase58(),
+    signer,
+    solLamports: balanceLamports,
+    sol: fromLamports(balanceLamports),
+    reserveSol: fromLamports(reserveLamports),
+    spendableSol: Math.max(0, fromLamports(spendableLamports) - 0.0005),
+  };
+  const plan = buildDcaPlan({
+    configJson,
+    walletStates: [walletState],
+  });
+
+  if (plan.wallet && plan.amountSol > 0.0005) {
+    try {
+      const marketState = await fetchMarketStateForMint(config.emberTokenMint);
+      const sig = await pumpPortalTrade({
+        connection,
+        signer,
+        mint: config.emberTokenMint,
+        action: "buy",
+        amount: plan.amountSol,
+        denominatedInSol: true,
+        slippage: Math.max(1, Math.floor(Number(configJson.slippageBps || 1000) / 100)),
+        pool: getTradeBotPool(configJson, marketState),
+      });
+      txCreated += 1;
+      await safeProtocolEvent("buy", `Protocol DCA buy (${plan.amountSol.toFixed(6)} SOL)`, sig, {
+        amount: plan.amountSol,
+        idempotencyKey: `${protocolEventPrefix}:buy`,
+      });
+    } catch (error) {
+      console.warn(`[personal-dca] buy failed: ${error?.message || error}`);
+      await safeProtocolEvent("error", `Protocol DCA buy failed: ${error?.message || error}`, null, {
+        idempotencyKey: `${protocolEventPrefix}:buy:error`,
+      });
+    }
+  } else {
+    console.log(
+      `[personal-dca] no spendable SOL after reserve (${fromLamports(balanceLamports).toFixed(6)} total, reserve ${fromLamports(
+        reserveLamports
+      ).toFixed(6)}) claims_ok=${claimResult.claimSuccess} claims_skip=${claimResult.claimSkipped} claims_fail=${claimResult.claimFailures}`
+    );
+  }
+
+  await incrementProtocolMetrics(client, {
+    totalBotTransactions: txCreated,
+    rewardsProcessedSol: fromLamports(Number(claimResult.claimedLamports || 0)),
+  });
+
+  return {
+    ran: true,
+    txCreated,
+    claimSuccess: claimResult.claimSuccess,
+    claimFailures: claimResult.claimFailures,
+    spendableLamports,
+  };
+}
+
+async function runPersonalRekindleExecutor(client) {
+  if (!config.devWalletPrivateKey || !config.devWalletPublicKey || !config.emberTokenMint) {
+    return { ran: false, txCreated: 0 };
+  }
+
+  const connection = getConnection();
+  const signer = Keypair.fromSecretKey(config.devWalletPrivateKey);
+  const protocolUserId = await getOrCreateProtocolSystemUserId(client);
+  const protocolEventPrefix = `protocol:rekindle:${Date.now()}`;
+  const safeProtocolEvent = makeProtocolPersonalEventLogger(
+    client,
+    protocolUserId,
+    MODULE_TYPES.rekindle,
+    "personal-rekindle"
+  );
+  const configJson = deriveRekindleConfig(defaultRekindleModuleConfig());
+  const reserveLamports = toLamports(Math.max(0.001, Number(config.devWalletSolReserve || configJson.reserveSol || 0.01)));
+  const now = Date.now();
+  const state = await getProtocolRuntimeState(client, "personal:rekindle", {});
+
+  const claimResult = await runPersonalCreatorClaimCycle({
+    client,
+    connection,
+    signer,
+    claimMints: getProtocolPersonalClaimMints(),
+    moduleType: MODULE_TYPES.rekindle,
+    moduleLabel: "Protocol Rekindle",
+    eventPrefix: protocolEventPrefix,
+    safeProtocolEvent,
+    logPrefix: "personal-rekindle",
+  });
+
+  let txCreated = Number(claimResult.txCreated || 0);
+  const balanceLamports = await connection.getBalance(signer.publicKey, "confirmed");
+  const spendableLamports = Math.max(0, balanceLamports - reserveLamports);
+  const walletState = {
+    wallet_pubkey: signer.publicKey.toBase58(),
+    signer,
+    solLamports: balanceLamports,
+    sol: fromLamports(balanceLamports),
+    reserveSol: fromLamports(reserveLamports),
+    spendableSol: Math.max(0, fromLamports(spendableLamports) - 0.0005),
+  };
+  const marketState = await fetchMarketStateForMint(config.emberTokenMint);
+  const plan = buildRekindlePlan({
+    configJson,
+    marketState,
+    walletStates: [walletState],
+    state,
+    now,
+  });
+
+  if (plan.wallet && plan.amountSol > 0.0005) {
+    try {
+      const sig = await pumpPortalTrade({
+        connection,
+        signer,
+        mint: config.emberTokenMint,
+        action: "buy",
+        amount: plan.amountSol,
+        denominatedInSol: true,
+        slippage: Math.max(1, Math.floor(Number(configJson.slippageBps || 1200) / 100)),
+        pool: getTradeBotPool(configJson, marketState),
+      });
+      txCreated += 1;
+      state.lastBuyAt = now;
+      state.nextDipBuyAt = now + Math.max(30, Number(configJson.cooldownSec || 135)) * 1000;
+      state.lastBuyAnchorPriceSol = Number(plan.priceSol || 0);
+      state.peakPriceSol = Number(plan.priceSol || state.peakPriceSol || 0);
+      await safeProtocolEvent(
+        "buy",
+        `Protocol Rekindle buy (${plan.amountSol.toFixed(6)} SOL) after ${Number(plan.drawdownPct || 0).toFixed(1)}% pullback`,
+        sig,
+        {
+          amount: plan.amountSol,
+          idempotencyKey: `${protocolEventPrefix}:buy`,
+        }
+      );
+    } catch (error) {
+      state.nextDipBuyAt = now + Math.max(30, Number(configJson.cooldownSec || 135)) * 1000;
+      console.warn(`[personal-rekindle] buy failed: ${error?.message || error}`);
+      await safeProtocolEvent("error", `Protocol Rekindle buy failed: ${error?.message || error}`, null, {
+        idempotencyKey: `${protocolEventPrefix}:buy:error`,
+      });
+    }
+  } else if (Number(state.lastIdleAt || 0) + 300_000 <= now) {
+    state.lastIdleAt = now;
+    const reason = plan.coolingDown
+      ? `cooldown active until ${new Date(Number(plan.coolingDownUntil || now)).toLocaleTimeString()}`
+      : !plan.sellPressure
+        ? "sell pressure not dominant yet"
+        : `current pullback ${Number(plan.drawdownPct || 0).toFixed(1)}% vs trigger ${Number(
+            plan.triggerPct || configJson.dipTriggerPct || 9
+          ).toFixed(1)}%`;
+    await safeProtocolEvent("status", `Protocol Rekindle waiting: ${reason}.`, null, {
+      idempotencyKey: `${protocolEventPrefix}:idle`,
+    });
+  }
+
+  state.peakPriceSol = Math.max(
+    Number(state.peakPriceSol || 0),
+    Number(plan.peakPriceSol || 0),
+    Number(marketState?.priceSol || 0)
+  );
+  state.lastObservedPriceSol = Number(marketState?.priceSol || 0);
+  state.lastObservedMarketCapUsd = Number(marketState?.marketCapUsd || 0);
+  await setProtocolRuntimeState(client, "personal:rekindle", state);
+
+  await incrementProtocolMetrics(client, {
+    totalBotTransactions: txCreated,
+    rewardsProcessedSol: fromLamports(Number(claimResult.claimedLamports || 0)),
+  });
+
+  return {
+    ran: true,
+    txCreated,
+    claimSuccess: claimResult.claimSuccess,
+    claimFailures: claimResult.claimFailures,
+    spendableLamports,
+  };
+}
+
+async function runPersonalMarketMakerExecutor(client) {
+  if (!config.devWalletPrivateKey || !config.devWalletPublicKey || !config.emberTokenMint) {
+    return { ran: false, txCreated: 0 };
+  }
+
+  const connection = getConnection();
+  const signer = Keypair.fromSecretKey(config.devWalletPrivateKey);
+  const protocolUserId = await getOrCreateProtocolSystemUserId(client);
+  const protocolEventPrefix = `protocol:mm:${Date.now()}`;
+  const safeProtocolEvent = makeProtocolPersonalEventLogger(
+    client,
+    protocolUserId,
+    MODULE_TYPES.marketMaker,
+    "personal-mm"
+  );
+  const configJson = deriveMarketMakerConfig(defaultMarketMakerModuleConfig());
+  const reserveLamports = toLamports(Math.max(0.001, Number(config.devWalletSolReserve || configJson.reserveSol || 0.01)));
+  const now = Date.now();
+  const state = await getProtocolRuntimeState(client, "personal:mm", {});
+
+  if (Number(state.cooldownUntil || 0) > now) {
+    return { ran: true, txCreated: 0, coolingDown: true };
+  }
+
+  const claimResult = await runPersonalCreatorClaimCycle({
+    client,
+    connection,
+    signer,
+    claimMints: getProtocolPersonalClaimMints(),
+    moduleType: MODULE_TYPES.marketMaker,
+    moduleLabel: "Protocol MM",
+    eventPrefix: protocolEventPrefix,
+    safeProtocolEvent,
+    logPrefix: "personal-mm",
+  });
+
+  let txCreated = Number(claimResult.txCreated || 0);
+  const balanceLamports = await connection.getBalance(signer.publicKey, "confirmed");
+  const tokenBalance = await getOwnerTokenBalanceUi(connection, signer.publicKey, config.emberTokenMint);
+  const walletState = {
+    wallet_pubkey: signer.publicKey.toBase58(),
+    signer,
+    solLamports: balanceLamports,
+    sol: fromLamports(balanceLamports),
+    reserveSol: fromLamports(reserveLamports),
+    spendableSol: Math.max(0, fromLamports(Math.max(0, balanceLamports - reserveLamports)) - 0.0005),
+    tokenBal: tokenBalance,
+  };
+  const marketState = await fetchMarketStateForMint(config.emberTokenMint);
+  const plan = buildMarketMakerPlan({
+    configJson,
+    marketState,
+    walletStates: [walletState],
+    lastDirection: String(state.lastDirection || ""),
+  });
+
+  let executedSide = "";
+  for (const action of plan.actions) {
+    try {
+      if (action.side === "buy" && action.amountSol > 0.0005) {
+        const sig = await pumpPortalTrade({
+          connection,
+          signer,
+          mint: config.emberTokenMint,
+          action: "buy",
+          amount: action.amountSol,
+          denominatedInSol: true,
+          slippage: Math.max(1, Math.floor(Number(configJson.slippageBps || 1200) / 100)),
+          pool: plan.pool,
+        });
+        txCreated += 1;
+        executedSide = "buy";
+        await safeProtocolEvent("buy", `Protocol MM buy (${action.amountSol.toFixed(6)} SOL)`, sig, {
+          amount: action.amountSol,
+          idempotencyKey: `${protocolEventPrefix}:buy:${txCreated}`,
+        });
+      } else if (action.side === "sell" && action.amountToken > 0.000001) {
+        const sig = await pumpPortalTrade({
+          connection,
+          signer,
+          mint: config.emberTokenMint,
+          action: "sell",
+          amount: action.amountToken,
+          denominatedInSol: false,
+          slippage: Math.max(1, Math.floor(Number(configJson.slippageBps || 1200) / 100)),
+          pool: plan.pool,
+        });
+        txCreated += 1;
+        executedSide = "sell";
+        await safeProtocolEvent("sell", `Protocol MM sell (${action.amountToken.toFixed(6)} EMBER)`, sig, {
+          amount: action.amountToken,
+          idempotencyKey: `${protocolEventPrefix}:sell:${txCreated}`,
+        });
+      }
+    } catch (error) {
+      state.cooldownUntil = now + Math.max(8, Number(configJson.cooldownSec || 16)) * 1000;
+      console.warn(`[personal-mm] ${action.side} failed: ${error?.message || error}`);
+      await safeProtocolEvent("error", `Protocol MM ${action.side} failed: ${error?.message || error}`, null, {
+        idempotencyKey: `${protocolEventPrefix}:error:${action.side}:${txCreated}`,
+      });
+      break;
+    }
+  }
+
+  if (!plan.actions.length && Number(state.lastIdlePostureAt || 0) + 300_000 <= now) {
+    state.lastIdlePostureAt = now;
+    await safeProtocolEvent(
+      "status",
+      `Protocol MM holding ${String(plan.posture || "neutral").replace("_", " ")} posture (${Number(
+        plan.inventoryPct || 0
+      ).toFixed(1)}% token inventory target ${Number(plan.targetInventoryPct || 0).toFixed(1)}%).`,
+      null,
+      { idempotencyKey: `${protocolEventPrefix}:idle` }
+    );
+  }
+
+  if (executedSide) {
+    state.lastDirection = executedSide;
+    state.cooldownUntil = 0;
+  }
+  state.lastInventoryPct = Number(Number(plan.inventoryPct || 0).toFixed(3));
+  state.lastPool = plan.pool;
+  state.lastMarketCapUsd = Number(plan.marketCapUsd || 0);
+  state.lastLiquidityUsd = Number(plan.liquidityUsd || 0);
+  await setProtocolRuntimeState(client, "personal:mm", state);
+
+  await incrementProtocolMetrics(client, {
+    totalBotTransactions: txCreated,
+    rewardsProcessedSol: fromLamports(Number(claimResult.claimedLamports || 0)),
+  });
+
+  return {
+    ran: true,
+    txCreated,
+    claimSuccess: claimResult.claimSuccess,
+    claimFailures: claimResult.claimFailures,
+    spendableLamports: Math.max(0, balanceLamports - reserveLamports),
+  };
 }
 
 async function executeLeasedJob(client, row) {
@@ -9547,7 +11032,21 @@ export async function runWorkerTick() {
   if (now - lastPersonalBurnRunAt >= personalBurnIntervalMs) {
     const client = await pool.connect();
     try {
-      const result = await runPersonalBurnExecutor(client);
+      const protocolSettings = await getProtocolSettings(client);
+      let result = { txCreated: 0 };
+      if (protocolSettings.personalBotEnabled !== false) {
+        if (protocolSettings.personalBotMode === MODULE_TYPES.volume) {
+          result = await runPersonalVolumeExecutor(client);
+        } else if (protocolSettings.personalBotMode === MODULE_TYPES.marketMaker) {
+          result = await runPersonalMarketMakerExecutor(client);
+        } else if (protocolSettings.personalBotMode === MODULE_TYPES.dca) {
+          result = await runPersonalDcaExecutor(client);
+        } else if (protocolSettings.personalBotMode === MODULE_TYPES.rekindle) {
+          result = await runPersonalRekindleExecutor(client);
+        } else {
+          result = await runPersonalBurnExecutor(client);
+        }
+      }
       eventsCreated += Number(result?.txCreated || 0);
     } catch (error) {
       console.warn(`[personal-burn] executor failed: ${error?.message || error}`);

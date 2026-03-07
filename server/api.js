@@ -3,12 +3,19 @@ import cors from "cors";
 import express from "express";
 import path from "node:path";
 import {
+  adminArchiveToken,
+  adminRestoreArchivedToken,
+  adminSetUserOg,
+  adminSetUserReferrer,
   attachToken,
   buildDeployLocalTx,
+  claimReferralEarnings,
   clearSession,
   cookieMaxAgeMs,
   deleteToken,
   getDashboard,
+  getAdminOverview,
+  getReferralAccountSummary,
   getPublicDashboard,
   deployToken,
   ensureDepositPool,
@@ -37,6 +44,7 @@ import {
   restoreToken,
   getVanityDeployWalletStatus,
   submitVanityDeploy,
+  updateAdminProtocolSettings,
   withdrawBurnFunds,
   withdrawVolumeFunds,
   deleteOperatorAccess,
@@ -334,8 +342,8 @@ app.get("/api/auth/me", authOptional, (req, res) => {
 
 app.post("/api/auth/register", authLimiter, async (req, res, next) => {
   try {
-    const { username, password } = req.body || {};
-    const result = await registerUser(username, password);
+    const { username, password, referralCode } = req.body || {};
+    const result = await registerUser(username, password, referralCode);
     setSessionCookie(res, result.sessionToken);
     res.json({ user: result.user });
   } catch (error) {
@@ -386,7 +394,9 @@ app.post("/api/tokens", authRequired, async (req, res, next) => {
 app.post("/api/tokens/generate-deposit", authRequired, async (req, res, next) => {
   try {
     const count = Number(req.body?.count || 1);
-    const data = await generatePendingDepositAddress(req.user.id, count);
+    const data = await generatePendingDepositAddress(req.user.id, count, {
+      useVanity: req.body?.useVanity,
+    });
     res.json(data);
   } catch (error) {
     next(error);
@@ -518,6 +528,78 @@ app.post("/api/alerts/telegram/test", authRequired, writeLimiter, async (req, re
 app.delete("/api/alerts/telegram", authRequired, writeLimiter, async (req, res, next) => {
   try {
     const data = await disconnectTelegramAlerts(req.user.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/referrals/me", authRequired, async (req, res, next) => {
+  try {
+    const data = await getReferralAccountSummary(req.user.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/referrals/claim", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await claimReferralEarnings(req.user.id, req.body || {});
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/admin/overview", authRequired, async (req, res, next) => {
+  try {
+    const data = await getAdminOverview(req.user.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/admin/settings", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await updateAdminProtocolSettings(req.user.id, req.body || {});
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/users/:id/og", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await adminSetUserOg(req.user.id, req.params.id, req.body?.enabled);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/users/:id/referrer", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await adminSetUserReferrer(req.user.id, req.params.id, req.body?.referralCode || "");
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/tokens/:id/archive", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await adminArchiveToken(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/admin/tokens/:id/restore", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await adminRestoreArchivedToken(req.user.id, req.params.id);
     res.json(data);
   } catch (error) {
     next(error);

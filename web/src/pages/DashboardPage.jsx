@@ -67,11 +67,21 @@ export default function DashboardPage({
   onSaveTelegramAlerts,
   onDisconnectTelegramAlerts,
   onSendTelegramTestAlert,
+  onLoadReferralSummary,
+  onClaimReferralEarnings,
+  onLoadAdminOverview,
+  onSaveAdminSettings,
+  onAdminSetUserOg,
+  onAdminSetUserReferrer,
+  onAdminArchiveToken,
+  onAdminRestoreToken,
 }) {
   const { t } = useI18n();
   const username = typeof user === "string" ? user : String(user?.username || "");
   const isManager = Boolean(user?.role === "manager" || user?.isOperator);
   const canManageAccess = Boolean(user?.canManageAccess);
+  const isAdmin = Boolean(user?.isAdmin);
+  const isOg = Boolean(user?.isOg);
   const visibleTokens = tokens.filter((t) => !t?.disconnected);
   const archivedTokens = tokens.filter((t) => t?.disconnected);
   const totalBurned = tokens.reduce((sum, t) => sum + (Number(t.burned) || 0), 0);
@@ -122,6 +132,29 @@ export default function DashboardPage({
   const [telegramMessage, setTelegramMessage] = useState("");
   const [showManagerModal, setShowManagerModal] = useState(false);
   const [showTelegramModal, setShowTelegramModal] = useState(false);
+  const [showReferralModal, setShowReferralModal] = useState(false);
+  const [showAdminModal, setShowAdminModal] = useState(false);
+  const [referralState, setReferralState] = useState({
+    referralCode: "",
+    totals: { totalEarnedSol: 0, pendingSol: 0, claimedSol: 0 },
+    depositWalletOptions: [],
+    referredUsers: [],
+    events: [],
+    canClaim: true,
+  });
+  const [referralClaimDestination, setReferralClaimDestination] = useState("");
+  const [referralLoading, setReferralLoading] = useState(false);
+  const [referralError, setReferralError] = useState("");
+  const [referralMessage, setReferralMessage] = useState("");
+  const [adminState, setAdminState] = useState({
+    settings: null,
+    users: [],
+    tokens: [],
+    referralLeaders: [],
+  });
+  const [adminLoading, setAdminLoading] = useState(false);
+  const [adminError, setAdminError] = useState("");
+  const [adminMessage, setAdminMessage] = useState("");
 
   useEffect(() => {
     if (!canManageAccess || typeof onLoadManagerAccess !== "function") return;
@@ -169,6 +202,66 @@ export default function DashboardPage({
       alive = false;
     };
   }, [onLoadTelegramAlerts]);
+
+  useEffect(() => {
+    if (!showReferralModal || typeof onLoadReferralSummary !== "function") return;
+    let alive = true;
+    setReferralLoading(true);
+    setReferralError("");
+    (async () => {
+      try {
+        const data = await onLoadReferralSummary();
+        if (!alive) return;
+        setReferralState((prev) => ({
+          ...prev,
+          ...data,
+          totals: { ...prev.totals, ...(data?.totals || {}) },
+          depositWalletOptions: Array.isArray(data?.depositWalletOptions) ? data.depositWalletOptions : [],
+          referredUsers: Array.isArray(data?.referredUsers) ? data.referredUsers : [],
+          events: Array.isArray(data?.events) ? data.events : [],
+        }));
+        const firstWallet = Array.isArray(data?.depositWalletOptions) && data.depositWalletOptions[0]?.deposit
+          ? String(data.depositWalletOptions[0].deposit)
+          : "";
+        setReferralClaimDestination((prev) => prev || firstWallet);
+      } catch (error) {
+        if (!alive) return;
+        setReferralError(error?.message || "Unable to load referrals.");
+      } finally {
+        if (alive) setReferralLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [showReferralModal, onLoadReferralSummary]);
+
+  useEffect(() => {
+    if (!showAdminModal || !isAdmin || typeof onLoadAdminOverview !== "function") return;
+    let alive = true;
+    setAdminLoading(true);
+    setAdminError("");
+    (async () => {
+      try {
+        const data = await onLoadAdminOverview();
+        if (!alive) return;
+        setAdminState({
+          settings: data?.settings || null,
+          users: Array.isArray(data?.users) ? data.users : [],
+          tokens: Array.isArray(data?.tokens) ? data.tokens : [],
+          referralLeaders: Array.isArray(data?.referralLeaders) ? data.referralLeaders : [],
+        });
+      } catch (error) {
+        if (!alive) return;
+        setAdminError(error?.message || "Unable to load admin panel.");
+      } finally {
+        if (alive) setAdminLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [showAdminModal, isAdmin, onLoadAdminOverview]);
 
   const saveManager = async () => {
     if (typeof onSaveManagerAccess !== "function") return;
@@ -289,10 +382,62 @@ export default function DashboardPage({
     }
   };
 
+  const claimReferral = async () => {
+    if (typeof onClaimReferralEarnings !== "function") return;
+    setReferralError("");
+    setReferralMessage("");
+    setReferralLoading(true);
+    try {
+      const result = await onClaimReferralEarnings({ destinationWallet: referralClaimDestination });
+      const data = await onLoadReferralSummary();
+      setReferralState((prev) => ({
+        ...prev,
+        ...data,
+        totals: { ...prev.totals, ...(data?.totals || {}) },
+        depositWalletOptions: Array.isArray(data?.depositWalletOptions) ? data.depositWalletOptions : [],
+        referredUsers: Array.isArray(data?.referredUsers) ? data.referredUsers : [],
+        events: Array.isArray(data?.events) ? data.events : [],
+      }));
+      setReferralMessage(`Claimed ${Number(result?.claimedSol || 0).toFixed(6)} SOL to ${result?.destinationSymbol || "wallet"}.`);
+    } catch (error) {
+      setReferralError(error?.message || "Unable to claim referral earnings.");
+    } finally {
+      setReferralLoading(false);
+    }
+  };
+
+  const refreshAdmin = async () => {
+    if (!isAdmin || typeof onLoadAdminOverview !== "function") return;
+    const data = await onLoadAdminOverview();
+    setAdminState({
+      settings: data?.settings || null,
+      users: Array.isArray(data?.users) ? data.users : [],
+      tokens: Array.isArray(data?.tokens) ? data.tokens : [],
+      referralLeaders: Array.isArray(data?.referralLeaders) ? data.referralLeaders : [],
+    });
+  };
+
   return (
     <div style={{ position: "relative", zIndex: 2, maxWidth: 1300, margin: "0 auto", padding: "32px 24px" }}>
       <div style={{ marginBottom: 24, animation: "slideUp .4s ease" }}>
-        <h1 style={{ fontSize: 26, fontWeight: 800, color: "#fff", marginBottom: 4 }}>{t("dashboard.hey", { user: username })} {"\u{1F525}"}</h1>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 4 }}>
+          <h1 style={{ fontSize: 26, fontWeight: 800, color: "#fff", margin: 0 }}>{t("dashboard.hey", { user: username })} {"\u{1F525}"}</h1>
+          {isOg && (
+            <span style={{ padding: "5px 10px", borderRadius: 999, fontSize: 11, fontWeight: 800, letterSpacing: 0.8, color: "#fff2bd", background: "linear-gradient(135deg, rgba(255,197,61,.92), rgba(255,119,0,.88))", boxShadow: "0 0 18px rgba(255,170,0,.28)" }}>
+              OG
+            </span>
+          )}
+          {isAdmin && (
+            <span style={{ padding: "5px 10px", borderRadius: 999, fontSize: 11, fontWeight: 800, letterSpacing: 0.8, color: "#d8ecff", background: "linear-gradient(135deg, rgba(43,112,255,.92), rgba(0,189,255,.88))" }}>
+              ADMIN
+            </span>
+          )}
+          {isManager && (
+            <span style={{ padding: "5px 10px", borderRadius: 999, fontSize: 11, fontWeight: 800, letterSpacing: 0.8, color: "#ffd9b8", background: "rgba(255,106,0,.18)", border: "1px solid rgba(255,106,0,.28)" }}>
+              MANAGER
+            </span>
+          )}
+        </div>
         <p style={{ fontSize: 13, color: "rgba(255,255,255,.3)" }}>{t("dashboard.synced")}</p>
       </div>
 
@@ -330,12 +475,20 @@ export default function DashboardPage({
               <div style={{ fontSize: 12, color: "rgba(255,255,255,.28)" }}>{t("dashboard.tokensHint")}</div>
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <button className="btn-ghost" onClick={() => setShowReferralModal(true)} style={{ padding: "9px 14px", fontSize: 12 }}>
+                Referrals
+              </button>
               <button className="btn-ghost" onClick={() => setShowTelegramModal(true)} style={{ padding: "9px 14px", fontSize: 12 }}>
                 Telegram Alerts
               </button>
               <button className="btn-ghost" onClick={() => setShowManagerModal(true)} style={{ padding: "9px 14px", fontSize: 12 }}>
                 {canManageAccess ? "Manager Access" : "Access Level"}
               </button>
+              {isAdmin && (
+                <button className="btn-ghost" onClick={() => setShowAdminModal(true)} style={{ padding: "9px 14px", fontSize: 12 }}>
+                  Admin
+                </button>
+              )}
               <button className="btn-fire" onClick={onShowAttach} style={{ padding: "9px 18px", fontSize: 13 }}>
                 + {t("dashboard.attachToken")}
               </button>
@@ -502,6 +655,315 @@ export default function DashboardPage({
           </div>
         </div>
       </div>
+
+      {showReferralModal && (
+        <ActionModal title="Referrals" onClose={() => setShowReferralModal(false)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ fontSize: 12, color: "rgba(255,255,255,.46)", lineHeight: 1.6 }}>
+              Standard accounts pay 10% protocol fees. Referred accounts keep the same total fee, but part of it accrues to the referrer. OG accounts pay 0%.
+            </div>
+            <div className="glass" style={{ padding: "14px 16px", display: "grid", gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: 10 }}>
+              {[
+                ["Pending", `${Number(referralState.totals?.pendingSol || 0).toFixed(6)} SOL`],
+                ["Total Earned", `${Number(referralState.totals?.totalEarnedSol || 0).toFixed(6)} SOL`],
+                ["Claimed", `${Number(referralState.totals?.claimedSol || 0).toFixed(6)} SOL`],
+              ].map(([label, value]) => (
+                <div key={label} style={{ textAlign: "center" }}>
+                  <div style={{ fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, fontWeight: 700 }}>{label.toUpperCase()}</div>
+                  <div style={{ marginTop: 6, fontSize: 16, fontWeight: 800, color: "#fff" }}>{value}</div>
+                </div>
+              ))}
+            </div>
+            <div>
+              <div style={{ fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 6, fontWeight: 700 }}>YOUR REFERRAL CODE</div>
+              <div className="input-f" style={{ display: "flex", alignItems: "center", minHeight: 42 }}>{referralState.referralCode || "Loading..."}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 10, color: "rgba(255,255,255,.35)", letterSpacing: 1, marginBottom: 6, fontWeight: 700 }}>CLAIM DESTINATION</div>
+              <select
+                className="input-f"
+                value={referralClaimDestination}
+                onChange={(e) => setReferralClaimDestination(e.target.value)}
+              >
+                <option value="">Select a deposit wallet</option>
+                {referralState.depositWalletOptions.map((item) => (
+                  <option key={`${item.tokenId}:${item.deposit}`} value={item.deposit}>
+                    {item.symbol} {item.disconnected ? "(archived)" : ""} - {item.deposit}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button
+                className="btn-fire"
+                onClick={claimReferral}
+                disabled={
+                  referralLoading ||
+                  !referralState.canClaim ||
+                  !referralClaimDestination ||
+                  Number(referralState.totals?.pendingSol || 0) <= 0
+                }
+                style={{ padding: "9px 16px", fontSize: 12 }}
+              >
+                {referralLoading ? "Claiming..." : "Claim Earnings"}
+              </button>
+              {!referralState.canClaim && (
+                <div style={{ fontSize: 12, color: "rgba(255,178,107,.86)", alignSelf: "center" }}>
+                  Manager logins can view referrals but cannot claim.
+                </div>
+              )}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div className="glass" style={{ padding: "14px 16px" }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", marginBottom: 10 }}>Referred Users</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 220, overflowY: "auto" }}>
+                  {referralState.referredUsers.length ? referralState.referredUsers.map((row) => (
+                    <div key={row.userId} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12 }}>
+                      <span style={{ color: "#fff", fontWeight: 700 }}>{row.username}</span>
+                      <span style={{ color: "rgba(255,255,255,.52)" }}>{Number(row.earnedSol || 0).toFixed(6)} SOL</span>
+                    </div>
+                  )) : (
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,.38)" }}>No referrals yet.</div>
+                  )}
+                </div>
+              </div>
+              <div className="glass" style={{ padding: "14px 16px" }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", marginBottom: 10 }}>Referral Earnings</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 220, overflowY: "auto" }}>
+                  {referralState.events.length ? referralState.events.map((row) => (
+                    <div key={row.id} style={{ borderBottom: "1px solid rgba(255,255,255,.05)", paddingBottom: 8 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                        <span style={{ color: "#fff", fontSize: 12, fontWeight: 700 }}>{row.username}</span>
+                        <span style={{ color: "#7ae7ab", fontSize: 12, fontWeight: 700 }}>{Number(row.referralSol || 0).toFixed(6)} SOL</span>
+                      </div>
+                      <div style={{ fontSize: 11, color: "rgba(255,255,255,.38)", marginTop: 4 }}>
+                        {row.tokenSymbol} · {row.moduleType || "bot"}
+                      </div>
+                    </div>
+                  )) : (
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,.38)" }}>No earnings logged yet.</div>
+                  )}
+                </div>
+              </div>
+            </div>
+            {referralError && <div style={{ fontSize: 12, color: "#ff8f8f" }}>{referralError}</div>}
+            {referralMessage && <div style={{ fontSize: 12, color: "#7ae7ab" }}>{referralMessage}</div>}
+          </div>
+        </ActionModal>
+      )}
+
+      {showAdminModal && isAdmin && (
+        <ActionModal title="Admin Panel" onClose={() => setShowAdminModal(false)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ fontSize: 12, color: "rgba(255,255,255,.46)", lineHeight: 1.6 }}>
+              Admin controls are bound to the primary `satoshEH_` account. Manager access does not inherit admin rights.
+            </div>
+            <div className="glass" style={{ padding: "14px 16px" }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", marginBottom: 10 }}>Protocol Settings</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: 10 }}>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>TOTAL FEE BPS</label>
+                  <input className="input-f" type="number" value={adminState.settings?.defaultFeeBps || 1000} onChange={(e) => setAdminState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), defaultFeeBps: Math.max(0, Number(e.target.value) || 0) } }))} />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>TREASURY BPS</label>
+                  <input className="input-f" type="number" value={adminState.settings?.defaultTreasuryBps || 500} onChange={(e) => setAdminState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), defaultTreasuryBps: Math.max(0, Number(e.target.value) || 0) } }))} />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>BURN BPS</label>
+                  <input className="input-f" type="number" value={adminState.settings?.defaultBurnBps || 500} onChange={(e) => setAdminState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), defaultBurnBps: Math.max(0, Number(e.target.value) || 0) } }))} />
+                </div>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0,1fr))", gap: 10, marginTop: 10 }}>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>REFERRED TREASURY</label>
+                  <input className="input-f" type="number" value={adminState.settings?.referredTreasuryBps || 250} onChange={(e) => setAdminState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), referredTreasuryBps: Math.max(0, Number(e.target.value) || 0) } }))} />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>REFERRED BURN</label>
+                  <input className="input-f" type="number" value={adminState.settings?.referredBurnBps || 250} onChange={(e) => setAdminState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), referredBurnBps: Math.max(0, Number(e.target.value) || 0) } }))} />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>REFERRED REFERRAL</label>
+                  <input className="input-f" type="number" value={adminState.settings?.referredReferralBps || 500} onChange={(e) => setAdminState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), referredReferralBps: Math.max(0, Number(e.target.value) || 0) } }))} />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>PERSONAL BOT MODE</label>
+                  <select className="input-f" value={adminState.settings?.personalBotMode || "burn"} onChange={(e) => setAdminState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), personalBotMode: e.target.value } }))}>
+                    <option value="burn">Burn</option>
+                    <option value="volume">Volume</option>
+                    <option value="market_maker">Market Maker</option>
+                    <option value="dca">DCA</option>
+                    <option value="rekindle">Rekindle</option>
+                  </select>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                <button
+                  className="btn-fire"
+                  disabled={adminLoading || !adminState.settings}
+                  onClick={async () => {
+                    if (!onSaveAdminSettings || !adminState.settings) return;
+                    setAdminLoading(true);
+                    setAdminError("");
+                    setAdminMessage("");
+                    try {
+                      const saved = await onSaveAdminSettings(adminState.settings);
+                      setAdminState((prev) => ({ ...prev, settings: saved }));
+                      setAdminMessage("Admin settings saved.");
+                    } catch (error) {
+                      setAdminError(error?.message || "Unable to save admin settings.");
+                    } finally {
+                      setAdminLoading(false);
+                    }
+                  }}
+                  style={{ padding: "9px 16px", fontSize: 12 }}
+                >
+                  {adminLoading ? "Saving..." : "Save Settings"}
+                </button>
+                <button className="btn-ghost" disabled={adminLoading} onClick={refreshAdmin} style={{ padding: "9px 16px", fontSize: 12 }}>
+                  Refresh
+                </button>
+              </div>
+            </div>
+            <div className="glass" style={{ padding: "14px 16px" }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", marginBottom: 10 }}>Users</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 260, overflowY: "auto" }}>
+                {adminState.users.map((row) => (
+                  <div key={row.id} style={{ borderBottom: "1px solid rgba(255,255,255,.05)", paddingBottom: 10 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                      <div>
+                        <div style={{ color: "#fff", fontWeight: 700, fontSize: 13 }}>{row.username}</div>
+                        <div style={{ color: "rgba(255,255,255,.4)", fontSize: 11 }}>
+                          {row.referralCode} · {row.tokenCount} token(s) · {Number(row.pendingReferralSol || 0).toFixed(6)} SOL pending
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "rgba(255,255,255,.72)" }}>
+                          <input
+                            type="checkbox"
+                            checked={Boolean(row.isOg)}
+                            onChange={async (e) => {
+                              if (!onAdminSetUserOg) return;
+                              setAdminLoading(true);
+                              setAdminError("");
+                              try {
+                                await onAdminSetUserOg(row.id, e.target.checked);
+                                await refreshAdmin();
+                              } catch (error) {
+                                setAdminError(error?.message || "Unable to update OG account.");
+                              } finally {
+                                setAdminLoading(false);
+                              }
+                            }}
+                          />
+                          OG
+                        </label>
+                        <input
+                          className="input-f"
+                          style={{ width: 140 }}
+                          value={row.referrerCode || ""}
+                          placeholder="Referral code"
+                          onChange={(e) =>
+                            setAdminState((prev) => ({
+                              ...prev,
+                              users: prev.users.map((item) =>
+                                item.id === row.id ? { ...item, referrerCode: e.target.value } : item
+                              ),
+                            }))
+                          }
+                          onBlur={async (e) => {
+                            if (!onAdminSetUserReferrer) return;
+                            const value = String(e.target.value || "").trim();
+                            try {
+                              setAdminLoading(true);
+                              await onAdminSetUserReferrer(row.id, value);
+                              await refreshAdmin();
+                            } catch (error) {
+                              setAdminError(error?.message || "Unable to update referrer.");
+                            } finally {
+                              setAdminLoading(false);
+                            }
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="glass" style={{ padding: "14px 16px" }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", marginBottom: 10 }}>Tokens</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 240, overflowY: "auto" }}>
+                {adminState.tokens.map((row) => (
+                  <div key={row.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", borderBottom: "1px solid rgba(255,255,255,.05)", paddingBottom: 10 }}>
+                    <div>
+                      <div style={{ color: "#fff", fontWeight: 700, fontSize: 13 }}>{row.symbol} <span style={{ color: "rgba(255,255,255,.45)", fontWeight: 500 }}>· {row.username}</span></div>
+                      <div style={{ color: "rgba(255,255,255,.4)", fontSize: 11 }}>{row.selectedBot} · {row.disconnected ? "archived" : row.active ? "active" : "paused"}</div>
+                    </div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      {row.disconnected ? (
+                        <button
+                          className="btn-ghost"
+                          style={{ padding: "8px 12px", fontSize: 12 }}
+                          onClick={async () => {
+                            if (!onAdminRestoreToken) return;
+                            setAdminLoading(true);
+                            try {
+                              await onAdminRestoreToken(row.id);
+                              await refreshAdmin();
+                            } catch (error) {
+                              setAdminError(error?.message || "Unable to restore token.");
+                            } finally {
+                              setAdminLoading(false);
+                            }
+                          }}
+                        >
+                          Restore
+                        </button>
+                      ) : (
+                        <button
+                          className="btn-ghost"
+                          style={{ padding: "8px 12px", fontSize: 12 }}
+                          onClick={async () => {
+                            if (!onAdminArchiveToken) return;
+                            setAdminLoading(true);
+                            try {
+                              await onAdminArchiveToken(row.id);
+                              await refreshAdmin();
+                            } catch (error) {
+                              setAdminError(error?.message || "Unable to archive token.");
+                            } finally {
+                              setAdminLoading(false);
+                            }
+                          }}
+                        >
+                          Archive
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            {!!adminState.referralLeaders.length && (
+              <div className="glass" style={{ padding: "14px 16px" }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", marginBottom: 10 }}>Referral Leaders</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {adminState.referralLeaders.slice(0, 10).map((row) => (
+                    <div key={row.userId} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12 }}>
+                      <span style={{ color: "#fff", fontWeight: 700 }}>{row.username}</span>
+                      <span style={{ color: "rgba(255,255,255,.52)" }}>{Number(row.earnedSol || 0).toFixed(6)} SOL</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {adminError && <div style={{ fontSize: 12, color: "#ff8f8f" }}>{adminError}</div>}
+            {adminMessage && <div style={{ fontSize: 12, color: "#7ae7ab" }}>{adminMessage}</div>}
+          </div>
+        </ActionModal>
+      )}
 
       {showManagerModal && (
         <ActionModal title={canManageAccess ? "Manager Access" : "Access Level"} onClose={() => setShowManagerModal(false)}>

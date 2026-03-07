@@ -1,10 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  apiAdminArchiveToken,
+  apiAdminOverview,
+  apiAdminRestoreToken,
+  apiAdminSetUserOg,
+  apiAdminSetUserReferrer,
+  apiAdminUpdateSettings,
   apiAuthLogout,
   apiAuthMe,
+  apiClaimReferralEarnings,
   apiDeleteManagerAccess,
   apiDisconnectTelegramAlerts,
   apiManagerAccess,
+  apiReferralSummary,
   apiTelegramAlerts,
   apiTelegramTestAlert,
   apiCreateToken,
@@ -380,6 +388,50 @@ export default function App() {
     return apiTelegramTestAlert();
   }, []);
 
+  const handleReferralSummaryLoad = useCallback(async () => {
+    return apiReferralSummary();
+  }, []);
+
+  const handleReferralClaim = useCallback(async (payload) => {
+    const result = await apiClaimReferralEarnings(payload || {});
+    await loadDashboard();
+    return result;
+  }, [loadDashboard]);
+
+  const handleAdminOverviewLoad = useCallback(async () => {
+    return apiAdminOverview();
+  }, []);
+
+  const handleAdminSettingsSave = useCallback(async (payload) => {
+    return apiAdminUpdateSettings(payload || {});
+  }, []);
+
+  const handleAdminSetUserOg = useCallback(async (targetUserId, enabled) => {
+    const result = await apiAdminSetUserOg(targetUserId, enabled);
+    await loadDashboard();
+    return result;
+  }, [loadDashboard]);
+
+  const handleAdminSetUserReferrer = useCallback(async (targetUserId, referralCode) => {
+    const result = await apiAdminSetUserReferrer(targetUserId, referralCode);
+    await loadDashboard();
+    return result;
+  }, [loadDashboard]);
+
+  const handleAdminArchiveToken = useCallback(async (tokenId) => {
+    const result = await apiAdminArchiveToken(tokenId);
+    await loadDashboard();
+    await loadPublicDashboard();
+    return result;
+  }, [loadDashboard, loadPublicDashboard]);
+
+  const handleAdminRestoreToken = useCallback(async (tokenId) => {
+    const result = await apiAdminRestoreToken(tokenId);
+    await loadDashboard();
+    await loadPublicDashboard();
+    return result;
+  }, [loadDashboard, loadPublicDashboard]);
+
   const handleAttachToken = useCallback(async (payload) => {
     const data = await apiCreateToken(payload);
     await loadDashboard();
@@ -657,6 +709,14 @@ export default function App() {
           onSaveTelegramAlerts={handleTelegramAlertsSave}
           onDisconnectTelegramAlerts={handleTelegramAlertsDisconnect}
           onSendTelegramTestAlert={handleTelegramAlertsTest}
+          onLoadReferralSummary={handleReferralSummaryLoad}
+          onClaimReferralEarnings={handleReferralClaim}
+          onLoadAdminOverview={handleAdminOverviewLoad}
+          onSaveAdminSettings={handleAdminSettingsSave}
+          onAdminSetUserOg={handleAdminSetUserOg}
+          onAdminSetUserReferrer={handleAdminSetUserReferrer}
+          onAdminArchiveToken={handleAdminArchiveToken}
+          onAdminRestoreToken={handleAdminRestoreToken}
         />
       )}
 

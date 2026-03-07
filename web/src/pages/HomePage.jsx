@@ -94,6 +94,8 @@ export default function HomePage({ heroWord, publicMetrics, onShowLogin }) {
             "Market Maker",
             "DCA Bot",
             "Rekindle Bot",
+            "EMBR / EMBER Wallet Pool",
+            "Vanity Deploy Wallets",
             "Telegram Alerts",
             "Creator Rewards / External Funding / Hybrid",
             "Manager Access",
