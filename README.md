@@ -1,4 +1,4 @@
-﻿# EMBER.nexus
+# EMBER.nexus
 
 <p align="center">
   <img src="web/public/icons/ember-mark.svg" alt="EMBER.nexus" width="120" />
@@ -13,8 +13,8 @@
 </p>
 
 <p align="center">
-  <a href="https://ember.nexus">Site</a> ·
-  <a href="https://x.com/i/communities/2029665598809198626">X Community</a> ·
+  <a href="https://ember.nexus">Site</a> |
+  <a href="https://x.com/i/communities/2029665598809198626">X Community</a> |
   <a href="https://t.me/ember_nexus">Telegram</a>
 </p>
 
@@ -28,81 +28,87 @@
 
 ## Overview
 
-EMBER.nexus lets token teams deploy, attach, and operate Solana execution bots from a single stack.
+EMBER.nexus is a Solana execution platform for token teams. It combines branded wallet infrastructure, attached-token automation, Telegram-first operations, deploy tooling, and public burn telemetry in one stack.
 
-Current platform capabilities in this repository:
+Current platform coverage in this repository:
 
 - Burn Bot
 - Volume Bot
-- Market Maker Bot
-- DCA Bot
-- Rekindle Bot
+- Market Maker
+- DCA
+- Rekindle
+- Holder Pooler
+- Reaction Manager
+- Smart Sell
+- Bundle Manager
 - branded `EMBR` / `EMBER` wallet pool
 - branded or regular deploy-wallet flow
-- creator-reward funding, external funding, or hybrid funding
-- manager access for shared account operations
-- Telegram user alerts
-- referrals, OG fee exemptions, and protocol fee routing
+- Telegram tools, bots, deploy, and trade controls
+- direct funding and EMBER-managed funding modes for wallet-based tools
+- team access, referrals, OG billing, and admin controls
 
-This repo contains the full platform runtime:
+This repository contains the full runtime:
 
 - `web/` Vite + React frontend
 - `server/` Express API and execution core
 - `worker/` scheduler and on-chain executor
 
-## What EMBER Does
+## Highlights
 
-The platform is built around attached-token execution.
+- branded `EMBR` / `EMBER` wallet reservation and deploy flow
+- Telegram-first controls for bots, tools, deploy, and trade
+- public ticker, burn metrics, and live logs
+- owner/team access model with restricted custody actions
+- referrals, OG billing, and admin control surface
+
+## Product Surface
+
+### Bots
 
 - **Burn Bot** converts available value into buybacks and supply reduction.
-- **Volume Bot** creates controlled chart activity across deposit and trade wallets.
-- **Market Maker Bot** runs attached-token two-sided execution around an inventory target.
-- **DCA Bot** steadily accumulates the attached token.
-- **Rekindle Bot** waits for pullbacks, then buys weakness under cooldown-aware rules.
+- **Volume Bot** runs controlled chart activity across deposit and trade wallets.
+- **Market Maker** manages attached-token inventory and alternates buy/sell pressure around a target.
+- **DCA** steadily accumulates the attached token.
+- **Rekindle** buys pullbacks under cooldown-aware rules.
 
-The wallet layer supports:
+### Tools
 
-- **Branded attach wallets** from the `EMBR` / `EMBER` pool
-- **Regular random wallets** for users who do not want vanity addresses
-- **Branded deploy wallets** for the backend-managed deploy path
+- **Holder Pooler** spreads token balances across generated wallets for holder distribution.
+- **Reaction Manager** runs one-reaction-at-a-time DexScreener campaigns against a target URL.
+- **Smart Sell** reacts to buy flow with configurable sell behavior across managed wallets.
+- **Bundle Manager** coordinates managed or imported wallet bundles for buy and sell campaigns.
 
-That means users can choose whether they want branded wallet attribution or a normal random Solana wallet.
+### Wallet Infrastructure
 
-## Core Product Model
+- branded attach wallets from the `EMBR` / `EMBER` pool
+- regular random wallets for users who do not want vanity attribution
+- branded or regular deploy wallets for backend-managed deploys
+- direct and EMBER-managed funding modes for wallet-based tools
 
-### 1. Attach a token
+## Telegram Surface
 
-Users attach a token and pick a bot strategy.
+The platform is not web-only.
 
-### 2. Fund the bot
+Telegram supports:
 
-Bots can run from:
+- bot control
+- tool creation and management
+- token deploy setup
+- trading-wallet creation, import, buy, sell, and withdraw
 
-- creator rewards
-- external SOL deposits
-- hybrid funding
-
-### 3. Execute on-chain
-
-The worker executes claims, buys, sells, burns, treasury routing, gas top-ups, and wallet fanout against Solana.
-
-### 4. Observe everything
-
-The dashboard and public surfaces read from token events, bot state, and protocol metrics for live visibility.
+The Telegram surface is button-first and shares the same backend command layer as the web app.
 
 ## Account Model
 
-The account system currently supports:
+The account model is intentionally simple:
 
 - **Primary owner**
   - full control
-- **Manager**
+- **Team access**
   - can operate the account
   - cannot withdraw
   - cannot sweep
   - cannot delete
-
-This is intentionally simpler than a full team/invite model.
 
 ## Fees, Referrals, and OG Accounts
 
@@ -122,17 +128,18 @@ Current billing logic in the repo:
 - **OG account**
   - `0%` protocol fees
 
-Referral earnings are tracked in-account and claimable by the account owner.
+Referral earnings are tracked in-account and claimable by the primary owner.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
   U[Browser Client<br/>React + Vite] -->|HTTP + cookies| API[Express API<br/>server/api.js]
+  TG[Telegram Bot] --> API
   API --> DB[(PostgreSQL)]
   API --> RPC[Solana RPC]
   API --> PP[Pump / PumpPortal]
-  API --> TG[Telegram Bot API]
+  API --> EXT[Funding / Reaction Providers]
 
   W[Worker<br/>worker/worker.js] --> DB
   W --> RPC
@@ -145,8 +152,8 @@ PostgreSQL is the source of truth for:
 - users and sessions
 - token state
 - module config and runtime state
+- tool instances and events
 - wallet metadata
-- event history
 - referrals and protocol settings
 
 ## Runtime Components
@@ -158,6 +165,7 @@ The frontend renders:
 - homepage and docs
 - deploy flow
 - attach flow
+- tools
 - dashboard
 - live logs
 - public ticker
@@ -170,9 +178,11 @@ The API is responsible for:
 - auth and cookies
 - token attach/update/delete/archive flows
 - deploy orchestration
-- dashboard/public payloads
+- tool creation and control
+- Telegram control flows
+- dashboard and public payloads
 - wallet reservation
-- admin, referral, manager, and Telegram settings
+- admin, referral, team-access, and Telegram settings
 
 ### Worker
 
@@ -185,28 +195,6 @@ The worker is responsible for:
 - protocol-owned bot execution
 - fee routing
 - event creation
-
-## Bot Coverage In This Repo
-
-| Module | Status | Notes |
-|---|---|---|
-| Burn Bot | Implemented | Claim + buyback + burn path |
-| Volume Bot | Implemented | Trade-wallet fanout and buy/sell loops |
-| Market Maker Bot | Implemented | Attached-token inventory-targeted execution |
-| DCA Bot | Implemented | Recurring attached-token accumulation |
-| Rekindle Bot | Implemented | Pullback-triggered attached-token buying |
-| AI Trading | Not implemented | UI/roadmap only |
-
-## GitHub / Repo Notes
-
-This repository is the platform codebase. It intentionally does **not** include:
-
-- private keys
-- live production secrets
-- hosted service configuration values
-- internal operational credentials
-
-If any credential is exposed, rotate it immediately.
 
 ## Local Development
 
@@ -233,7 +221,7 @@ npm run dev
 Default local endpoints:
 
 - web: `http://localhost:5173`
-- api: `http://localhost:3002` if `PORT=3002`
+- api: `http://localhost:3002` when `PORT=3002`
 
 If you split web and API locally, make sure `VITE_API_BASE_URL` points to the running API port.
 
@@ -247,7 +235,6 @@ Critical production variables:
 - `SOLANA_RPC_URL`
 - `DEPOSIT_KEY_ENCRYPTION_KEY`
 - `VITE_API_BASE_URL`
-- cookie settings if web and API are on separate origins
 
 Notable execution variables:
 
@@ -256,71 +243,16 @@ Notable execution variables:
 - `DEV_WALLET_PRIVATE_KEY`
 - `BOT_SOL_RESERVE`
 - `CLAIM_GAS_TOPUP_SOL`
-- `VOLUME_DEFAULT_MIN_TRADE_SOL`
-- `VOLUME_DEFAULT_MAX_TRADE_SOL`
+- `VITE_BUY_EMBER_URL`
+- Telegram and provider keys used by the platform surfaces
 
-Wallet-pool variables:
+## Repository Notes
 
-- `DEPOSIT_VANITY_PREFIX`
-- `DEPOSIT_VANITY_THREADS`
-- `DEPOSIT_VANITY_TIMEOUT_MS`
-- `DEPOSIT_POOL_TARGET`
-- `DEPOSIT_POOL_REFILL_INTERVAL_MS`
-- `DEPOSIT_KEY_ENCRYPTION_KEY`
+This repository intentionally does not include:
 
-## Useful Scripts
+- live private keys
+- production secrets
+- hosted service credentials
+- internal operational credentials
 
-```bash
-npm run dev
-npm run build
-npm run start
-npm run start:api
-npm run start:worker
-npm run db:status
-npm run db:export -- --file ./db-snapshot.json
-npm run db:import -- --file ./db-snapshot.json
-npm run db:reset
-```
-
-## API Surface
-
-Main routes currently exposed by the app:
-
-| Method | Path | Auth | Purpose |
-|---|---|---|---|
-| `GET` | `/api/health` | Public | Health check |
-| `GET` | `/api/public-metrics` | Public | Public protocol metrics |
-| `GET` | `/api/public-dashboard` | Public | Public ticker and logs payload |
-| `GET` | `/api/auth/me` | Optional | Current session |
-| `POST` | `/api/auth/register` | Public | Register account |
-| `POST` | `/api/auth/login` | Public | Login |
-| `POST` | `/api/auth/logout` | Optional | Logout |
-| `GET` | `/api/dashboard` | Required | Full user dashboard |
-| `POST` | `/api/tokens` | Required | Attach token |
-| `PATCH` | `/api/tokens/:id` | Required | Update token/module config |
-| `DELETE` | `/api/tokens/:id` | Required | Archive token |
-| `POST` | `/api/tokens/:id/restore` | Required | Restore archived token |
-| `POST` | `/api/deploy` | Optional | Wallet-signed deploy path |
-| `POST` | `/api/deploy/record` | Optional | Persist deploy result |
-
-## Deployment Notes
-
-The current production shape is:
-
-- one API service
-- one worker service
-- one web build/output
-- one shared PostgreSQL database
-
-API and worker must point at the same database and Solana execution environment.
-
-## Security Notes
-
-- `.env` is gitignored
-- wallet keys can be encrypted at rest
-- signing happens server-side only when required for execution
-- referral, manager, and admin privileges are backend-enforced, not frontend-only
-
-## Status
-
-This repo reflects the actively developed EMBER.nexus platform, including the branded wallet pool, deploy wallet reservation flow, manager access, Telegram user alerts, referrals, and the current live bot lineup.
+If any credential is exposed, rotate it immediately.

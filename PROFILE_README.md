@@ -13,48 +13,62 @@
 </p>
 
 <p align="center">
-  <a href="https://ember.nexus">Site</a> ·
-  <a href="https://x.com/i/communities/2029665598809198626">X Community</a> ·
-  <a href="https://t.me/ember_nexus">Telegram</a> ·
+  <a href="https://ember.nexus">Site</a> |
+  <a href="https://x.com/i/communities/2029665598809198626">X Community</a> |
+  <a href="https://t.me/ember_nexus">Telegram</a> |
   <a href="https://github.com/embernexus/EMBER">Platform Repo</a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Burn%20Bot-live-f97316?style=flat-square" alt="Burn Bot" />
-  <img src="https://img.shields.io/badge/Volume%20Bot-live-f59e0b?style=flat-square" alt="Volume Bot" />
-  <img src="https://img.shields.io/badge/Market%20Maker-live-ef4444?style=flat-square" alt="Market Maker" />
+  <img src="https://img.shields.io/badge/Burn-live-f97316?style=flat-square" alt="Burn" />
+  <img src="https://img.shields.io/badge/Volume-live-f59e0b?style=flat-square" alt="Volume" />
+  <img src="https://img.shields.io/badge/MM-live-ef4444?style=flat-square" alt="Market Maker" />
   <img src="https://img.shields.io/badge/DCA-live-38bdf8?style=flat-square" alt="DCA" />
   <img src="https://img.shields.io/badge/Rekindle-live-a855f7?style=flat-square" alt="Rekindle" />
+  <img src="https://img.shields.io/badge/Tools-live-22c55e?style=flat-square" alt="Tools" />
 </p>
 
 ## What EMBER.nexus Is
 
-EMBER.nexus is a Solana execution platform for token teams.
+EMBER.nexus is a Solana execution and tooling platform for token teams.
 
-The stack supports:
+The live stack includes:
 
-- burn automation
-- volume execution
-- attached-token market making
-- recurring DCA accumulation
-- pullback-triggered Rekindle buys
+- attached-token automation bots
 - branded `EMBR` / `EMBER` wallet infrastructure
 - branded or regular deploy-wallet flows
-- creator rewards, external funding, or hybrid funding
+- tool-driven holder, reaction, smart-sell, and bundle workflows
+- Telegram-first controls for bots, tools, deploy, and trade
+- referrals, OG billing, team access, and protocol burn routing
 
-## Live Platform Highlights
+## Live Platform Coverage
 
-- **Burn Bot** routes value into buyback and burn execution.
-- **Volume Bot** runs controlled chart activity across deposit and trade wallets.
-- **Market Maker Bot** holds an attached-token inventory target and alternates buy/sell pressure around it.
-- **DCA Bot** steadily accumulates the attached token.
-- **Rekindle Bot** buys real pullbacks under cooldown-aware rules.
+### Bots
+
+- Burn
+- Volume
+- Market Maker
+- DCA
+- Rekindle
+
+### Tools
+
+- Holder Pooler
+- Reaction Manager
+- Smart Sell
+- Bundle Manager
+
+## Why It Exists
+
+- give token teams branded wallet infrastructure without custom ops overhead
+- make burn, volume, market making, deploy, and tool workflows accessible from web and Telegram
+- keep treasury routing, burn telemetry, and user operations in one controlled stack
 
 ## Account Model
 
 - primary owner account
 - one optional restricted team-access login
-- owner-only custody actions for withdraw, sweep, and delete
+- owner-only custody actions for withdraw, sweep, delete, and sensitive key reveal
 
 ## Billing Model
 

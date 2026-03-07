@@ -13,12 +13,26 @@ import {
   apiAuthLogout,
   apiAuthMe,
   apiClaimReferralEarnings,
+  apiCreateToolInstance,
+  apiToolFundingKey,
+  apiToolWalletKeys,
+  apiToolDetails,
   apiDeleteManagerAccess,
   apiDisconnectTelegramAlerts,
+  apiArmSmartSell,
   apiManagerAccess,
+  apiPauseSmartSell,
+  apiRefreshReactionManager,
+  apiRefreshToolFunding,
+  apiReclaimSmartSell,
   apiReferralSummary,
+  apiReclaimBundleManager,
+  apiRunReactionManager,
+  apiRunBundleManager,
+  apiRunHolderPooler,
   apiTelegramAlerts,
   apiTelegramTestAlert,
+  apiToolsWorkspace,
   apiCreateToken,
   apiDeleteToken,
   apiPermanentlyDeleteToken,
@@ -37,6 +51,7 @@ import {
   apiUpdateToken,
   apiUpdateTelegramAlerts,
   apiUpdateOwnReferralCode,
+  apiUpdateToolInstance,
   apiUpsertManagerAccess,
   isApiError,
 } from "./api/client";
@@ -56,6 +71,7 @@ import DevLogsPage from "./pages/DevLogsPage";
 import HomePage from "./pages/HomePage";
 import ProtocolHubPage from "./pages/ProtocolHubPage";
 import RoadmapPage from "./pages/RoadmapPage";
+import ToolsPage from "./pages/ToolsPage";
 import WhitepaperPage from "./pages/WhitepaperPage";
 
 const DEFAULT_PUBLIC_METRICS = {
@@ -70,6 +86,11 @@ const DEFAULT_PUBLIC_METRICS = {
   maintenanceEnabled: false,
   maintenanceMode: "soft",
   maintenanceMessage: "",
+};
+const DEFAULT_TOOLS_WORKSPACE = {
+  catalog: [],
+  instances: [],
+  permissions: {},
 };
 const DASHBOARD_POLL_MS = 5000;
 const DEFAULT_EMBER_MINT = "xxxxx";
@@ -97,6 +118,9 @@ export default function App() {
   const [publicBurnBreakdown, setPublicBurnBreakdown] = useState([]);
   const [activeOverrides, setActiveOverrides] = useState({});
   const [supportOpen, setSupportOpen] = useState(false);
+  const [toolsWorkspace, setToolsWorkspace] = useState(DEFAULT_TOOLS_WORKSPACE);
+  const [toolsLoading, setToolsLoading] = useState(false);
+  const [toolsError, setToolsError] = useState("");
   const [emberTickerMeta, setEmberTickerMeta] = useState({
     mint: "",
     symbol: "",
@@ -118,6 +142,9 @@ export default function App() {
     setAllLogs([]);
     setChartData([]);
     setActiveOverrides({});
+    setToolsWorkspace(DEFAULT_TOOLS_WORKSPACE);
+    setToolsError("");
+    setToolsLoading(false);
   }, []);
 
   const tokensForUi = useMemo(
@@ -251,6 +278,21 @@ export default function App() {
     return data;
   }, []);
 
+  const loadToolsWorkspace = useCallback(async () => {
+    setToolsLoading(true);
+    setToolsError("");
+    try {
+      const data = await apiToolsWorkspace();
+      setToolsWorkspace(data || DEFAULT_TOOLS_WORKSPACE);
+      return data;
+    } catch (error) {
+      setToolsError(error?.message || "Unable to load tools.");
+      throw error;
+    } finally {
+      setToolsLoading(false);
+    }
+  }, []);
+
   const loadPublicMetrics = useCallback(async () => {
     try {
       const data = await apiPublicMetrics();
@@ -346,6 +388,33 @@ export default function App() {
       clearInterval(id);
     };
   }, [authUser, loadDashboard, clearPrivateState]);
+
+  useEffect(() => {
+    if (!authUser || page !== "tools") return;
+    let active = true;
+
+    const pull = async () => {
+      try {
+        await loadToolsWorkspace();
+      } catch (error) {
+        if (!active) return;
+        const msg = String(error?.message || "").toLowerCase();
+        const unauthorized = msg.includes("unauthorized") || (isApiError(error) && error.status === 401);
+        if (unauthorized) {
+          setAuthUser(null);
+          clearPrivateState();
+          setPage("home");
+        }
+      }
+    };
+
+    pull();
+    const id = setInterval(pull, 8000);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, [authUser, page, loadToolsWorkspace, clearPrivateState]);
 
   const handleSignOut = useCallback(async () => {
     try {
@@ -483,6 +552,84 @@ export default function App() {
     await loadPublicDashboard();
     return result;
   }, [loadDashboard, loadPublicDashboard]);
+
+  const handleCreateToolInstance = useCallback(async (payload) => {
+    const result = await apiCreateToolInstance(payload || {});
+    await loadToolsWorkspace();
+    return result.tool;
+  }, [loadToolsWorkspace]);
+
+  const handleLoadToolDetails = useCallback(async (toolId) => {
+    return apiToolDetails(toolId);
+  }, []);
+
+  const handleRevealToolFundingKey = useCallback(async (toolId) => {
+    return apiToolFundingKey(toolId);
+  }, []);
+
+  const handleRevealToolWalletKeys = useCallback(async (toolId) => {
+    return apiToolWalletKeys(toolId);
+  }, []);
+
+  const handleUpdateToolInstance = useCallback(async (toolId, payload) => {
+    const result = await apiUpdateToolInstance(toolId, payload || {});
+    await loadToolsWorkspace();
+    return result;
+  }, [loadToolsWorkspace]);
+
+  const handleRunHolderPooler = useCallback(async (toolId) => {
+    const result = await apiRunHolderPooler(toolId);
+    await loadToolsWorkspace();
+    return result;
+  }, [loadToolsWorkspace]);
+
+  const handleRunReactionManager = useCallback(async (toolId) => {
+    const result = await apiRunReactionManager(toolId);
+    await loadToolsWorkspace();
+    return result;
+  }, [loadToolsWorkspace]);
+
+  const handleRefreshReactionManager = useCallback(async (toolId) => {
+    const result = await apiRefreshReactionManager(toolId);
+    await loadToolsWorkspace();
+    return result;
+  }, [loadToolsWorkspace]);
+
+  const handleRefreshToolFunding = useCallback(async (toolId) => {
+    const result = await apiRefreshToolFunding(toolId);
+    await loadToolsWorkspace();
+    return result;
+  }, [loadToolsWorkspace]);
+
+  const handleArmSmartSell = useCallback(async (toolId) => {
+    const result = await apiArmSmartSell(toolId);
+    await loadToolsWorkspace();
+    return result;
+  }, [loadToolsWorkspace]);
+
+  const handlePauseSmartSell = useCallback(async (toolId) => {
+    const result = await apiPauseSmartSell(toolId);
+    await loadToolsWorkspace();
+    return result;
+  }, [loadToolsWorkspace]);
+
+  const handleReclaimSmartSell = useCallback(async (toolId) => {
+    const result = await apiReclaimSmartSell(toolId);
+    await loadToolsWorkspace();
+    return result;
+  }, [loadToolsWorkspace]);
+
+  const handleRunBundleManager = useCallback(async (toolId) => {
+    const result = await apiRunBundleManager(toolId);
+    await loadToolsWorkspace();
+    return result;
+  }, [loadToolsWorkspace]);
+
+  const handleReclaimBundleManager = useCallback(async (toolId) => {
+    const result = await apiReclaimBundleManager(toolId);
+    await loadToolsWorkspace();
+    return result;
+  }, [loadToolsWorkspace]);
 
   const handleAttachToken = useCallback(async (payload) => {
     const data = await apiCreateToken(payload);
@@ -681,6 +828,16 @@ export default function App() {
       window.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
+    if (item.key === "tools") {
+      if (!authUser) {
+        setShowLogin(true);
+        return;
+      }
+      setMenuOpen(false);
+      setPage("tools");
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      return;
+    }
     if (item.key === "deploy") {
       setShowDeploy(true);
       return;
@@ -770,6 +927,30 @@ export default function App() {
       {page === "docs" && <ProtocolHubPage />}
       {page === "whitepaper" && <WhitepaperPage />}
       {page === "updates" && <DevLogsPage />}
+      {page === "tools" && authUser && (
+        <ToolsPage
+          user={authUser}
+          toolsWorkspace={toolsWorkspace}
+          attachedTokens={tokensForUi}
+          loading={toolsLoading}
+          error={toolsError}
+          onRefresh={loadToolsWorkspace}
+          onCreateToolInstance={handleCreateToolInstance}
+          onLoadToolDetails={handleLoadToolDetails}
+          onRevealToolFundingKey={handleRevealToolFundingKey}
+          onRevealToolWalletKeys={handleRevealToolWalletKeys}
+          onUpdateToolInstance={handleUpdateToolInstance}
+          onRunReactionManager={handleRunReactionManager}
+          onRefreshReactionManager={handleRefreshReactionManager}
+          onRefreshToolFunding={handleRefreshToolFunding}
+          onArmSmartSell={handleArmSmartSell}
+          onPauseSmartSell={handlePauseSmartSell}
+          onReclaimSmartSell={handleReclaimSmartSell}
+          onRunHolderPooler={handleRunHolderPooler}
+          onRunBundleManager={handleRunBundleManager}
+          onReclaimBundleManager={handleReclaimBundleManager}
+        />
+      )}
 
       {page === "dashboard" && authUser && (
         <DashboardPage

@@ -19,11 +19,11 @@
     "db:backfill:personal-burn": "node scripts/backfill-personal-burn-events.mjs"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "^4.3.4",
     "@pump-fun/pump-sdk": "^1.30.0",
     "@pump-fun/pump-swap-sdk": "^1.14.1",
     "@solana/spl-token": "^0.4.8",
     "@solana/web3.js": "^1.98.4",
+    "@vitejs/plugin-react": "^4.3.4",
     "bcryptjs": "^3.0.2",
     "bs58": "^6.0.0",
     "cookie-parser": "^1.4.7",
@@ -33,7 +33,8 @@
     "pg": "^8.16.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "vite": "^5.4.11"
+    "vite": "^5.4.11",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

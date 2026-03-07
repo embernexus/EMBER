@@ -152,7 +152,13 @@ const requiredInitTables = [
   "bot_modules",
   "user_access_grants",
   "user_telegram_alert_queue",
+  "telegram_flow_state",
+  "telegram_trade_wallets",
+  "telegram_trade_events",
   "deploy_wallet_reservations",
+  "tool_instances",
+  "tool_events",
+  "tool_managed_wallets",
 ];
 
 const requiredInitColumns = [
@@ -169,6 +175,15 @@ const requiredInitColumns = [
   { table: "protocol_settings", column: "maintenance_enabled" },
   { table: "protocol_settings", column: "maintenance_mode" },
   { table: "protocol_settings", column: "maintenance_message" },
+  { table: "protocol_settings", column: "tool_fee_holder_pooler_lamports" },
+  { table: "protocol_settings", column: "tool_fee_reaction_manager_lamports" },
+  { table: "protocol_settings", column: "tool_fee_smart_sell_lamports" },
+  { table: "protocol_settings", column: "tool_fee_smart_sell_runtime_lamports" },
+  { table: "protocol_settings", column: "tool_fee_smart_sell_runtime_window_hours" },
+  { table: "protocol_settings", column: "tool_fee_bundle_manager_lamports" },
+  { table: "protocol_settings", column: "telegram_trade_buy_fee_lamports" },
+  { table: "protocol_settings", column: "telegram_trade_sell_fee_lamports" },
+  { table: "telegram_trade_wallet_slots", column: "imported" },
 ];
 
 function wait(ms) {
@@ -566,6 +581,14 @@ export async function initDb() {
       personal_bot_enabled BOOLEAN NOT NULL DEFAULT TRUE,
       personal_bot_intensity INTEGER NOT NULL DEFAULT 45,
       personal_bot_safety INTEGER NOT NULL DEFAULT 65,
+      tool_fee_holder_pooler_lamports BIGINT NOT NULL DEFAULT 60000000,
+      tool_fee_reaction_manager_lamports BIGINT NOT NULL DEFAULT 40000000,
+      tool_fee_smart_sell_lamports BIGINT NOT NULL DEFAULT 80000000,
+      tool_fee_smart_sell_runtime_lamports BIGINT NOT NULL DEFAULT 10000000,
+      tool_fee_smart_sell_runtime_window_hours INTEGER NOT NULL DEFAULT 24,
+      tool_fee_bundle_manager_lamports BIGINT NOT NULL DEFAULT 100000000,
+      telegram_trade_buy_fee_lamports BIGINT NOT NULL DEFAULT 1000000,
+      telegram_trade_sell_fee_lamports BIGINT NOT NULL DEFAULT 1000000,
       maintenance_enabled BOOLEAN NOT NULL DEFAULT FALSE,
       maintenance_mode TEXT NOT NULL DEFAULT 'soft',
       maintenance_message TEXT NOT NULL DEFAULT '',
@@ -610,6 +633,46 @@ export async function initDb() {
 
   await pool.query(`
     ALTER TABLE protocol_settings
+    ADD COLUMN IF NOT EXISTS tool_fee_holder_pooler_lamports BIGINT NOT NULL DEFAULT 60000000;
+  `);
+
+  await pool.query(`
+    ALTER TABLE protocol_settings
+    ADD COLUMN IF NOT EXISTS tool_fee_reaction_manager_lamports BIGINT NOT NULL DEFAULT 40000000;
+  `);
+
+  await pool.query(`
+    ALTER TABLE protocol_settings
+    ADD COLUMN IF NOT EXISTS tool_fee_smart_sell_lamports BIGINT NOT NULL DEFAULT 80000000;
+  `);
+
+  await pool.query(`
+    ALTER TABLE protocol_settings
+    ADD COLUMN IF NOT EXISTS tool_fee_smart_sell_runtime_lamports BIGINT NOT NULL DEFAULT 10000000;
+  `);
+
+  await pool.query(`
+    ALTER TABLE protocol_settings
+    ADD COLUMN IF NOT EXISTS tool_fee_smart_sell_runtime_window_hours INTEGER NOT NULL DEFAULT 24;
+  `);
+
+  await pool.query(`
+    ALTER TABLE protocol_settings
+    ADD COLUMN IF NOT EXISTS tool_fee_bundle_manager_lamports BIGINT NOT NULL DEFAULT 100000000;
+  `);
+
+  await pool.query(`
+    ALTER TABLE protocol_settings
+    ADD COLUMN IF NOT EXISTS telegram_trade_buy_fee_lamports BIGINT NOT NULL DEFAULT 1000000;
+  `);
+
+  await pool.query(`
+    ALTER TABLE protocol_settings
+    ADD COLUMN IF NOT EXISTS telegram_trade_sell_fee_lamports BIGINT NOT NULL DEFAULT 1000000;
+  `);
+
+  await pool.query(`
+    ALTER TABLE protocol_settings
     ADD COLUMN IF NOT EXISTS maintenance_enabled BOOLEAN NOT NULL DEFAULT FALSE;
   `);
 
@@ -624,24 +687,91 @@ export async function initDb() {
   `);
 
   await pool.query(`
-    INSERT INTO protocol_settings (
-      id,
-      default_fee_bps,
-      default_treasury_bps,
-      default_burn_bps,
-      referred_treasury_bps,
-      referred_burn_bps,
-      referred_referral_bps,
-      personal_bot_mode,
-      personal_bot_enabled,
-      personal_bot_intensity,
-      personal_bot_safety,
-      maintenance_enabled,
-      maintenance_mode,
-      maintenance_message
-    )
-    VALUES (1, 1000, 500, 500, 250, 250, 500, 'burn', TRUE, 45, 65, FALSE, 'soft', '')
+    INSERT INTO protocol_settings (id)
+    VALUES (1)
     ON CONFLICT (id) DO NOTHING;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tool_instances (
+      id TEXT PRIMARY KEY,
+      owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+      tool_type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'awaiting_funds',
+      simple_mode BOOLEAN NOT NULL DEFAULT TRUE,
+      title TEXT NOT NULL DEFAULT '',
+      target_mint TEXT NOT NULL DEFAULT '',
+      target_url TEXT NOT NULL DEFAULT '',
+      funding_wallet_pubkey TEXT NOT NULL UNIQUE,
+      funding_wallet_secret_key_base58 TEXT NOT NULL,
+      unlock_fee_lamports BIGINT NOT NULL DEFAULT 0,
+      reserve_lamports BIGINT NOT NULL DEFAULT 0,
+      runtime_fee_lamports BIGINT NOT NULL DEFAULT 0,
+      runtime_fee_window_hours INTEGER NOT NULL DEFAULT 0,
+      unlock_tx TEXT,
+      unlocked_at TIMESTAMPTZ,
+      activated_at TIMESTAMPTZ,
+      last_run_at TIMESTAMPTZ,
+      archived_at TIMESTAMPTZ,
+      config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      state_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_tool_instances_owner_created
+    ON tool_instances(owner_user_id, created_at DESC);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_tool_instances_status
+    ON tool_instances(status, updated_at DESC);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tool_events (
+      id BIGSERIAL PRIMARY KEY,
+      tool_instance_id TEXT NOT NULL REFERENCES tool_instances(id) ON DELETE CASCADE,
+      owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      tool_type TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      amount NUMERIC NOT NULL DEFAULT 0,
+      message TEXT NOT NULL,
+      tx TEXT,
+      metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_tool_events_instance_created
+    ON tool_events(tool_instance_id, created_at DESC);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tool_managed_wallets (
+      id TEXT PRIMARY KEY,
+      tool_instance_id TEXT NOT NULL REFERENCES tool_instances(id) ON DELETE CASCADE,
+      owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      wallet_pubkey TEXT NOT NULL UNIQUE,
+      secret_key_base58 TEXT NOT NULL,
+      label TEXT NOT NULL DEFAULT '',
+      position INTEGER NOT NULL DEFAULT 0,
+      imported BOOLEAN NOT NULL DEFAULT FALSE,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      state_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_tool_managed_wallets_instance_position
+    ON tool_managed_wallets(tool_instance_id, position ASC);
   `);
 
   await pool.query(`
@@ -719,6 +849,82 @@ export async function initDb() {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_user_telegram_alert_queue_digest
     ON user_telegram_alert_queue(user_id, digest_key, status);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS telegram_flow_state (
+      user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      flow_type TEXT NOT NULL,
+      step TEXT NOT NULL,
+      state_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS telegram_trade_wallets (
+      user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      public_key TEXT NOT NULL,
+      secret_key_base58 TEXT NOT NULL,
+      selected_mint TEXT NOT NULL DEFAULT '',
+      selected_symbol TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_used_at TIMESTAMPTZ
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS telegram_trade_wallet_slots (
+      id TEXT PRIMARY KEY,
+      user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      public_key TEXT NOT NULL UNIQUE,
+      secret_key_base58 TEXT NOT NULL,
+      imported BOOLEAN NOT NULL DEFAULT FALSE,
+      label TEXT NOT NULL DEFAULT '',
+      position INTEGER NOT NULL DEFAULT 1,
+      selected_mint TEXT NOT NULL DEFAULT '',
+      selected_symbol TEXT NOT NULL DEFAULT '',
+      is_selected BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_used_at TIMESTAMPTZ
+    );
+  `);
+
+  await pool.query(`
+    ALTER TABLE telegram_trade_wallet_slots
+    ADD COLUMN IF NOT EXISTS imported BOOLEAN NOT NULL DEFAULT FALSE;
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_telegram_trade_wallet_slots_user_position
+    ON telegram_trade_wallet_slots(user_id, position ASC);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS telegram_trade_events (
+      id BIGSERIAL PRIMARY KEY,
+      user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      wallet_id TEXT NOT NULL DEFAULT '',
+      event_type TEXT NOT NULL,
+      mint TEXT NOT NULL DEFAULT '',
+      amount_sol NUMERIC(20, 9) NOT NULL DEFAULT 0,
+      amount_token NUMERIC(30, 9) NOT NULL DEFAULT 0,
+      tx TEXT,
+      message TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_telegram_trade_events_user_created
+    ON telegram_trade_events(user_id, created_at DESC);
+  `);
+
+  await pool.query(`
+    ALTER TABLE telegram_trade_events
+    ADD COLUMN IF NOT EXISTS wallet_id TEXT NOT NULL DEFAULT '';
   `);
 
   await pool.query(`
@@ -954,6 +1160,18 @@ export async function initDb() {
   await pool.query(`
     CREATE OR REPLACE TRIGGER trg_protocol_settings_updated_at
     BEFORE UPDATE ON protocol_settings
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  `);
+
+  await pool.query(`
+    CREATE OR REPLACE TRIGGER trg_tool_instances_updated_at
+    BEFORE UPDATE ON tool_instances
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  `);
+
+  await pool.query(`
+    CREATE OR REPLACE TRIGGER trg_tool_managed_wallets_updated_at
+    BEFORE UPDATE ON tool_managed_wallets
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   `);
 

@@ -103,6 +103,25 @@ export const config = {
   volumeDefaultMinTradeSol: Number(process.env.VOLUME_DEFAULT_MIN_TRADE_SOL || 0.01),
   volumeDefaultMaxTradeSol: Number(process.env.VOLUME_DEFAULT_MAX_TRADE_SOL || 0.05),
   pumpPortalApiKey: process.env.PUMPPORTAL_API_KEY || "",
+  reactionManagerApiKey: cleanEnvString(
+    process.env.REACTION_MANAGER_API_KEY ||
+    process.env.DEXMOJI_API_KEY ||
+    ""
+  ),
+  reactionManagerApiUrl: cleanEnvString(
+    process.env.REACTION_MANAGER_API_URL ||
+    "https://api.dexemoji.fun/api/v2"
+  ),
+  emberFundingApiKey: cleanEnvString(
+    process.env.EMBER_FUNDING_API_KEY ||
+    process.env.SPLITNOW_API_KEY ||
+    ""
+  ),
+  emberFundingApiUrl: cleanEnvString(
+    process.env.EMBER_FUNDING_API_URL ||
+    process.env.SPLITNOW_API_URL ||
+    "https://splitnow.io/api"
+  ).replace(/\/+$/g, ""),
   telegramBotToken: String(process.env.TELEGRAM_BOT_TOKEN || "").trim(),
   telegramChatId: String(process.env.TELEGRAM_CHAT_ID || "").trim(),
   telegramTopicId: String(process.env.TELEGRAM_TOPIC_ID || "").trim(),

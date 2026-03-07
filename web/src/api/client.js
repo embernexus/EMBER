@@ -163,6 +163,101 @@ function toUserPayload(data) {
   };
 }
 
+function toToolEvent(value) {
+  if (!isRecord(value)) {
+    throw new ApiError("Invalid tool event payload from API.", 500, value);
+  }
+  return {
+    id: num(value.id),
+    toolInstanceId: str(value.toolInstanceId),
+    toolType: str(value.toolType),
+    eventType: str(value.eventType),
+    amount: num(value.amount),
+    message: str(value.message),
+    tx: str(value.tx) || null,
+    metadata: isRecord(value.metadata) ? value.metadata : {},
+    createdAt: str(value.createdAt),
+  };
+}
+
+function toToolInstance(value) {
+  if (!isRecord(value)) {
+    throw new ApiError("Invalid tool payload from API.", 500, value);
+  }
+  return {
+    id: str(value.id),
+    toolType: str(value.toolType),
+    label: str(value.label),
+    status: str(value.status),
+    simpleMode: bool(value.simpleMode, true),
+    title: str(value.title),
+    targetMint: str(value.targetMint),
+    targetUrl: str(value.targetUrl),
+    fundingWalletPubkey: str(value.fundingWalletPubkey),
+    unlockFeeLamports: num(value.unlockFeeLamports),
+    reserveLamports: num(value.reserveLamports),
+    requiredLamports: num(value.requiredLamports),
+    runtimeFeeLamports: num(value.runtimeFeeLamports),
+    runtimeFeeWindowHours: num(value.runtimeFeeWindowHours),
+    unlockFeeSol: num(value.unlockFeeSol),
+    reserveSol: num(value.reserveSol),
+    requiredSol: num(value.requiredSol),
+    runtimeFeeSol: num(value.runtimeFeeSol),
+    balanceLamports: num(value.balanceLamports),
+    balanceSol: num(value.balanceSol),
+    isFunded: bool(value.isFunded),
+    unlockTx: str(value.unlockTx),
+    unlockedAt: str(value.unlockedAt),
+    activatedAt: str(value.activatedAt),
+    lastRunAt: str(value.lastRunAt),
+    archivedAt: str(value.archivedAt),
+    lastError: str(value.lastError),
+    config: isRecord(value.config) ? value.config : {},
+    state: isRecord(value.state) ? value.state : {},
+    fundingState: isRecord(value.fundingState) ? value.fundingState : {},
+    createdAt: str(value.createdAt),
+    updatedAt: str(value.updatedAt),
+    events: Array.isArray(value.events) ? value.events.map(toToolEvent) : [],
+  };
+}
+
+function toToolManagedWallet(value) {
+  if (!isRecord(value)) {
+    throw new ApiError("Invalid tool wallet payload from API.", 500, value);
+  }
+  return {
+    id: str(value.id),
+    toolInstanceId: str(value.toolInstanceId),
+    walletPubkey: str(value.walletPubkey),
+    label: str(value.label),
+    position: num(value.position),
+    imported: bool(value.imported),
+    active: bool(value.active, true),
+    state: isRecord(value.state) ? value.state : {},
+    solLamports: num(value.solLamports),
+    solBalance: num(value.solBalance),
+    tokenBalance: num(value.tokenBalance),
+    createdAt: str(value.createdAt),
+    updatedAt: str(value.updatedAt),
+  };
+}
+
+function toToolDetails(data) {
+  return {
+    tool: toToolInstance(data.tool),
+    funding: isRecord(data.funding)
+      ? {
+          walletPubkey: str(data.funding.walletPubkey),
+          solLamports: num(data.funding.solLamports),
+          solBalance: num(data.funding.solBalance),
+          tokenBalance: num(data.funding.tokenBalance),
+        }
+      : { walletPubkey: "", solLamports: 0, solBalance: 0, tokenBalance: 0 },
+    wallets: Array.isArray(data.wallets) ? data.wallets.map(toToolManagedWallet) : [],
+    permissions: isRecord(data.permissions) ? data.permissions : {},
+  };
+}
+
 export async function apiAuthLogin(username, password) {
   const data = await requestJson("/api/auth/login", {
     method: "POST",
@@ -369,6 +464,154 @@ export async function apiDashboard() {
   const logs = Array.isArray(data.logs) ? data.logs.map(toEvent) : [];
   const chartData = Array.isArray(data.chartData) ? data.chartData.map(toChartPoint) : [];
   return { tokens, feed, logs, chartData };
+}
+
+export async function apiToolsWorkspace() {
+  const data = await requestJson("/api/tools", { method: "GET" });
+  return {
+    catalog: Array.isArray(data.catalog)
+      ? data.catalog.map((entry) => ({
+          toolType: str(entry.toolType),
+          label: str(entry.label),
+          description: str(entry.description),
+          targetKind: str(entry.targetKind),
+          simpleDefaults: isRecord(entry.simpleDefaults) ? entry.simpleDefaults : {},
+          unlockFeeLamports: num(entry.unlockFeeLamports),
+          reserveLamports: num(entry.reserveLamports),
+          requiredLamports: num(entry.requiredLamports),
+          runtimeFeeLamports: num(entry.runtimeFeeLamports),
+          runtimeFeeWindowHours: num(entry.runtimeFeeWindowHours),
+          unlockFeeSol: num(entry.unlockFeeSol),
+          reserveSol: num(entry.reserveSol),
+          requiredSol: num(entry.requiredSol),
+          runtimeFeeSol: num(entry.runtimeFeeSol),
+        }))
+      : [],
+    instances: Array.isArray(data.instances) ? data.instances.map(toToolInstance) : [],
+    permissions: isRecord(data.permissions) ? data.permissions : {},
+  };
+}
+
+export async function apiCreateToolInstance(payload) {
+  const data = await requestJson("/api/tools", {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+  return { tool: toToolInstance(data.tool) };
+}
+
+export async function apiToolDetails(id) {
+  const data = await requestJson(`/api/tools/${encodeURIComponent(id)}`, { method: "GET" });
+  return toToolDetails(data);
+}
+
+export async function apiToolFundingKey(id) {
+  const data = await requestJson(`/api/tools/${encodeURIComponent(id)}/funding/key`, { method: "GET" });
+  return {
+    id: str(data.id),
+    label: str(data.label),
+    toolType: str(data.toolType),
+    publicKey: str(data.publicKey),
+    secretKeyBase58: str(data.secretKeyBase58),
+  };
+}
+
+export async function apiToolWalletKeys(id) {
+  const data = await requestJson(`/api/tools/${encodeURIComponent(id)}/wallet-keys`, { method: "GET" });
+  return {
+    id: str(data.id),
+    label: str(data.label),
+    toolType: str(data.toolType),
+    wallets: Array.isArray(data.wallets)
+      ? data.wallets.map((wallet) => ({
+          id: str(wallet.id),
+          label: str(wallet.label),
+          publicKey: str(wallet.publicKey),
+          secretKeyBase58: str(wallet.secretKeyBase58),
+          imported: bool(wallet.imported),
+        }))
+      : [],
+  };
+}
+
+export async function apiUpdateToolInstance(id, payload) {
+  const data = await requestJson(`/api/tools/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload || {}),
+  });
+  return toToolDetails(data);
+}
+
+export async function apiRefreshToolFunding(id) {
+  const data = await requestJson(`/api/tools/${encodeURIComponent(id)}/funding/refresh`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return toToolDetails(data);
+}
+
+export async function apiRunHolderPooler(id) {
+  const data = await requestJson(`/api/tools/${encodeURIComponent(id)}/holder-pooler/run`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return toToolDetails(data);
+}
+
+export async function apiRunReactionManager(id) {
+  const data = await requestJson(`/api/tools/${encodeURIComponent(id)}/reaction-manager/run`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return toToolDetails(data);
+}
+
+export async function apiRefreshReactionManager(id) {
+  const data = await requestJson(`/api/tools/${encodeURIComponent(id)}/reaction-manager/status`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return toToolDetails(data);
+}
+
+export async function apiArmSmartSell(id) {
+  const data = await requestJson(`/api/tools/${encodeURIComponent(id)}/smart-sell/arm`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return toToolDetails(data);
+}
+
+export async function apiPauseSmartSell(id) {
+  const data = await requestJson(`/api/tools/${encodeURIComponent(id)}/smart-sell/pause`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return toToolDetails(data);
+}
+
+export async function apiReclaimSmartSell(id) {
+  const data = await requestJson(`/api/tools/${encodeURIComponent(id)}/smart-sell/reclaim`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return toToolDetails(data);
+}
+
+export async function apiRunBundleManager(id) {
+  const data = await requestJson(`/api/tools/${encodeURIComponent(id)}/bundle-manager/run`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return toToolDetails(data);
+}
+
+export async function apiReclaimBundleManager(id) {
+  const data = await requestJson(`/api/tools/${encodeURIComponent(id)}/bundle-manager/reclaim`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return toToolDetails(data);
 }
 
 export async function apiPublicMetrics() {

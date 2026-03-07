@@ -1002,6 +1002,162 @@ export default function DashboardPage({
                   <input className="input-f" type="number" value={adminState.settings?.referredReferralBps || 500} onChange={(e) => setAdminState((prev) => ({ ...prev, settings: { ...(prev.settings || {}), referredReferralBps: Math.max(0, Number(e.target.value) || 0) } }))} />
                 </div>
               </div>
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#fff", marginTop: 14, marginBottom: 10 }}>Tool Pricing (SOL)</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: 10 }}>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>HOLDER POOLER</label>
+                  <input
+                    className="input-f"
+                    type="number"
+                    step="0.001"
+                    value={(Number(adminState.settings?.toolFeeHolderPoolerLamports || 0) / 1e9).toFixed(3)}
+                    onChange={(e) =>
+                      setAdminState((prev) => ({
+                        ...prev,
+                        settings: {
+                          ...(prev.settings || {}),
+                          toolFeeHolderPoolerLamports: Math.max(0, Math.floor((Number(e.target.value) || 0) * 1e9)),
+                        },
+                      }))
+                    }
+                  />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>REACTION MANAGER</label>
+                  <input
+                    className="input-f"
+                    type="number"
+                    step="0.001"
+                    value={(Number(adminState.settings?.toolFeeReactionManagerLamports || 0) / 1e9).toFixed(3)}
+                    onChange={(e) =>
+                      setAdminState((prev) => ({
+                        ...prev,
+                        settings: {
+                          ...(prev.settings || {}),
+                          toolFeeReactionManagerLamports: Math.max(0, Math.floor((Number(e.target.value) || 0) * 1e9)),
+                        },
+                      }))
+                    }
+                  />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>BUNDLE MANAGER</label>
+                  <input
+                    className="input-f"
+                    type="number"
+                    step="0.001"
+                    value={(Number(adminState.settings?.toolFeeBundleManagerLamports || 0) / 1e9).toFixed(3)}
+                    onChange={(e) =>
+                      setAdminState((prev) => ({
+                        ...prev,
+                        settings: {
+                          ...(prev.settings || {}),
+                          toolFeeBundleManagerLamports: Math.max(0, Math.floor((Number(e.target.value) || 0) * 1e9)),
+                        },
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: 10, marginTop: 10 }}>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>SMART SELL SETUP</label>
+                  <input
+                    className="input-f"
+                    type="number"
+                    step="0.001"
+                    value={(Number(adminState.settings?.toolFeeSmartSellLamports || 0) / 1e9).toFixed(3)}
+                    onChange={(e) =>
+                      setAdminState((prev) => ({
+                        ...prev,
+                        settings: {
+                          ...(prev.settings || {}),
+                          toolFeeSmartSellLamports: Math.max(0, Math.floor((Number(e.target.value) || 0) * 1e9)),
+                        },
+                      }))
+                    }
+                  />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>SMART SELL RUNTIME</label>
+                  <input
+                    className="input-f"
+                    type="number"
+                    step="0.001"
+                    value={(Number(adminState.settings?.toolFeeSmartSellRuntimeLamports || 0) / 1e9).toFixed(3)}
+                    onChange={(e) =>
+                      setAdminState((prev) => ({
+                        ...prev,
+                        settings: {
+                          ...(prev.settings || {}),
+                          toolFeeSmartSellRuntimeLamports: Math.max(0, Math.floor((Number(e.target.value) || 0) * 1e9)),
+                        },
+                      }))
+                    }
+                  />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>SMART SELL WINDOW (H)</label>
+                  <input
+                    className="input-f"
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={adminState.settings?.toolFeeSmartSellRuntimeWindowHours || 24}
+                    onChange={(e) =>
+                      setAdminState((prev) => ({
+                        ...prev,
+                        settings: {
+                          ...(prev.settings || {}),
+                          toolFeeSmartSellRuntimeWindowHours: Math.max(0, Math.floor(Number(e.target.value) || 0)),
+                        },
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#fff", marginTop: 14, marginBottom: 10 }}>Telegram Trade Fees (SOL)</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0,1fr))", gap: 10 }}>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>BUY FEE</label>
+                  <input
+                    className="input-f"
+                    type="number"
+                    step="0.0001"
+                    value={(Number(adminState.settings?.telegramTradeBuyFeeLamports || 0) / 1e9).toFixed(4)}
+                    onChange={(e) =>
+                      setAdminState((prev) => ({
+                        ...prev,
+                        settings: {
+                          ...(prev.settings || {}),
+                          telegramTradeBuyFeeLamports: Math.max(0, Math.floor((Number(e.target.value) || 0) * 1e9)),
+                        },
+                      }))
+                    }
+                  />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "rgba(255,255,255,.35)", marginBottom: 6, fontWeight: 700 }}>SELL FEE</label>
+                  <input
+                    className="input-f"
+                    type="number"
+                    step="0.0001"
+                    value={(Number(adminState.settings?.telegramTradeSellFeeLamports || 0) / 1e9).toFixed(4)}
+                    onChange={(e) =>
+                      setAdminState((prev) => ({
+                        ...prev,
+                        settings: {
+                          ...(prev.settings || {}),
+                          telegramTradeSellFeeLamports: Math.max(0, Math.floor((Number(e.target.value) || 0) * 1e9)),
+                        },
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+              <div style={{ fontSize: 12, color: "rgba(255,255,255,.52)", lineHeight: 1.6, marginTop: 10 }}>
+                Telegram trading uses these fixed SOL fees per executed buy and sell. Keep them low if you want the in-chat trading surface to stay competitive.
+              </div>
               <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
                 <button
                   className="btn-fire"

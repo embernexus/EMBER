@@ -29,6 +29,11 @@ import {
   getDepositPoolStatus,
   generatePendingDepositAddress,
   getTelegramAlertSettings,
+  getToolsWorkspace,
+  getToolInstanceDetails,
+  revealToolFundingSecret,
+  revealToolManagedWalletSecrets,
+  refreshToolFunding,
   getOperatorAccess,
   getTokenLiveDetails,
   getTokenDeployWallet,
@@ -41,6 +46,16 @@ import {
   resolveMintMetadata,
   registerUser,
   sendTelegramTestAlert,
+  createToolInstance,
+  updateToolInstance,
+  armSmartSell,
+  pauseSmartSell,
+  reclaimSmartSell,
+  runReactionManagerCampaign,
+  refreshReactionManagerStatus,
+  runHolderPoolerDistribution,
+  runBundleManagerCampaign,
+  reclaimBundleManager,
   sweepVolumeWallets,
   submitSignedDeployTx,
   disconnectTelegramAlerts,
@@ -435,6 +450,141 @@ app.post("/api/auth/logout", authOptional, async (req, res, next) => {
 app.get("/api/dashboard", authRequired, async (req, res, next) => {
   try {
     const data = await getDashboard(req.user.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/tools", authRequired, async (req, res, next) => {
+  try {
+    const data = await getToolsWorkspace(req.user.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/tools", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await createToolInstance(req.user.id, req.body || {});
+    res.json({ tool: data });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/tools/:id", authRequired, async (req, res, next) => {
+  try {
+    const data = await getToolInstanceDetails(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/tools/:id/funding/key", authRequired, async (req, res, next) => {
+  try {
+    const data = await revealToolFundingSecret(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/tools/:id/wallet-keys", authRequired, async (req, res, next) => {
+  try {
+    const data = await revealToolManagedWalletSecrets(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/tools/:id/funding/refresh", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await refreshToolFunding(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/tools/:id", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await updateToolInstance(req.user.id, req.params.id, req.body || {});
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/tools/:id/holder-pooler/run", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await runHolderPoolerDistribution(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/tools/:id/reaction-manager/run", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await runReactionManagerCampaign(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/tools/:id/reaction-manager/status", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await refreshReactionManagerStatus(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/tools/:id/smart-sell/arm", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await armSmartSell(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/tools/:id/smart-sell/pause", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await pauseSmartSell(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/tools/:id/smart-sell/reclaim", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await reclaimSmartSell(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/tools/:id/bundle-manager/run", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await runBundleManagerCampaign(req.user.id, req.params.id);
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/tools/:id/bundle-manager/reclaim", authRequired, writeLimiter, async (req, res, next) => {
+  try {
+    const data = await reclaimBundleManager(req.user.id, req.params.id);
     res.json(data);
   } catch (error) {
     next(error);
